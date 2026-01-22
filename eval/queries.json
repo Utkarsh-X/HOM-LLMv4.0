@@ -1,0 +1,88 @@
+{
+    "metadata": {
+        "total_queries": 20,
+        "description": "All 20 test queries extracted from cursor_baseline.json"
+    },
+    "queries": [
+        {
+            "query_id": 1,
+            "query_text": "Trace the execution flow when an admin user calls the admin_search_endpoint through all layers including decorators, cache, optimizer, and ranking."
+        },
+        {
+            "query_id": 2,
+            "query_text": "How does distributed tracing propagate span context across async workers and maintain parent-child relationships?"
+        },
+        {
+            "query_id": 3,
+            "query_text": "How does the query optimizer resolve conflicts between PREDICATE_PUSHDOWN and CONSTANT_FOLDING rules, and what is the priority order of the optimization rules?"
+        },
+        {
+            "query_id": 4,
+            "query_text": "What are the job lifecycle states in the async job queue, and how does exponential backoff work for retries?"
+        },
+        {
+            "query_id": 5,
+            "query_text": "What happens when L1 memory, L2 Redis, and L3 database caches all miss, and how does cache promotion work?"
+        },
+        {
+            "query_id": 6,
+            "query_text": "How does call-graph expansion avoid infinite loops and circular dependencies when traversing multi-hop relationships?"
+        },
+        {
+            "query_id": 7,
+            "query_text": "Describe the fallback chain when semantic search returns insufficient results (semantic → SQL → keyword)."
+        },
+        {
+            "query_id": 8,
+            "query_text": "How does ConnectionPool behave when all connections are in use and callers wait or time out?"
+        },
+        {
+            "query_id": 9,
+            "query_text": "How are cosine similarity scores combined with an optional reranker and what is a reasonable fusion formula?"
+        },
+        {
+            "query_id": 10,
+            "query_text": "Describe the JWT validation flow including extraction, decode, signature check, and error classification."
+        },
+        {
+            "query_id": 11,
+            "query_text": "How should an embedding pipeline detect embedding dimension, handle mismatched dimensions, and create a FAISS index safely?"
+        },
+        {
+            "query_id": 12,
+            "query_text": "How does MetricsCollector aggregate counters, gauges, histograms and calculate percentiles p50/p95/p99?"
+        },
+        {
+            "query_id": 13,
+            "query_text": "What causes NaN in cosine similarity and how does the code handle empty/zero-norm vectors?"
+        },
+        {
+            "query_id": 14,
+            "query_text": "What input validation rules prevent XSS, SQL injection, and prompt-injection for user queries?"
+        },
+        {
+            "query_id": 15,
+            "query_text": "How does the system handle schema evolution when columns are missing—what checks and fallbacks exist?"
+        },
+        {
+            "query_id": 16,
+            "query_text": "How does BatchProcessor handle partial failures and implement at-least-once semantics?"
+        },
+        {
+            "query_id": 17,
+            "query_text": "Compare LRU, LFU and TTL-only eviction—when to use each?"
+        },
+        {
+            "query_id": 18,
+            "query_text": "How do all 5 optimizer rules combine with execution timing and plan caching in complex queries?"
+        },
+        {
+            "query_id": 19,
+            "query_text": "How does RedisClient serialize/deserialise embeddings and handle JSON vs pickle storage and retries?"
+        },
+        {
+            "query_id": 20,
+            "query_text": "Summarize expected outcomes of a stress test with 100 concurrent requests (errors, pool saturation, cache distribution, fallbacks, latency percentiles)."
+        }
+    ]
+}

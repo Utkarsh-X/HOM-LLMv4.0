@@ -1,0 +1,13 @@
+QUERY_ID   : 03
+RUN_ID     : 4b910a27-c03c-4773-bb46-a771933e1912
+MODEL      : gemini-2.5-flash
+PROVIDER   : gemini
+STATUS     : PARTIAL
+--- ANSWER ---
+The query optimizer resolves conflicts between `PREDICATE_PUSHDOWN` and `CONSTANT_FOLDING` rules by applying them sequentially in a predefined order (:39-45).
+
+The priority order of the optimization rules, as implemented in the `QueryOptimizer.optimize` method, is as follows:
+
+1. **PREDICATE_PUSHDOWN**: Applied first to move filters as early as possible in the query plan (:39, :116). This rule reorders filters by selectivity, placing the most selective ones first (:116).
+2. **PROJECTION_PUSHDOWN**: Applied second to select only the necessary columns (:42, :126).
+3. **CONSTANT_FOLDING**: Applied third to evaluate constant expressions within the filters (:45, :139). This rule checks if a filter is a constant expression and, if so, evaluates it, potentially simplifying or removing the filter (:139, 50b9c9

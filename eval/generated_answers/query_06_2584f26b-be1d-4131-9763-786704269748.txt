@@ -1,0 +1,17 @@
+QUERY_ID   : 06
+RUN_ID     : 2584f26b-be1d-4131-9763-786704269748
+MODEL      : gemini-2.5-flash
+PROVIDER   : gemini
+STATUS     : PARTIAL
+--- ANSWER ---
+The provided code context does not contain information about call-graph expansion or mechanisms to avoid infinite loops and circular dependencies when traversing multi-hop relationships in a call graph.
+
+The `DocumentIndexer` class and its methods are focused on:
+* **File Hashing and Caching**: The `_compute_file_hash` method (:34-39) and the `index_file` method (:160-249) use file hashes (`_file_hashes` :30) to detect if a file has changed and skip re-indexing if it hasn't (:179-182). This prevents redundant processing of the same file.
+* **Text Chunking**: The `_chunk_text` method (:137-150) splits large text into smaller, overlapping chunks for processing.
+* **Metadata Extraction**: Methods like `_extract_metadata` (:41-77), `_detect_language` (:79-90), `_count_python_entities` (:92-115), and `_extract_module_docstring` (:117-135) are used to gather information about files and their content.
+* **Embedding Generation**: The `generate_embedding` method (:280-369) creates vector representations of text, also utilizing caching (`_embedding_cache` :29) to avoid re-computing embeddings for identical text (:290-294, :362-366).
+
+These mechanisms are designed for efficient document indexing and embedding generation, not for traversing call graphs or managing dependencies between function calls. The concept of "call-graph expansion" and handling "multi-hop relationships" to avoid "infinite loops and circular dependencies" is not addressed by the provided code.
+
+Therefore, the specific mechanisms for avoiding infinite loops and circular dependencies in call-graph expansion are .
