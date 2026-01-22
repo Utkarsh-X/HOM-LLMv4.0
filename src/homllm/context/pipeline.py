@@ -115,8 +115,11 @@ class ContextPipeline:
             ]
 
             # 4. Budget allocation
+            # Apply generation reserve: context cannot use the full token budget
+            effective_context_budget = self.config.max_tokens - self.config.generation_reserve_tokens
+            
             budget_config = BudgetConfig(
-                max_tokens=self.config.max_tokens,
+                max_tokens=effective_context_budget,
                 budget_mode=self.config.budget_mode,
                 structural_priority_multiplier=self.config.structural_priority_multiplier,
             )
@@ -152,10 +155,12 @@ class ContextPipeline:
             }
 
             # 8. Build explain trace
+            tokens_remaining_for_generation = self.config.max_tokens - used_tokens
             explain_trace = tuple(
                 [
                     f"Selected {len(allocated_blocks)} blocks",
-                    f"Used {used_tokens}/{self.config.max_tokens} tokens",
+                    f"Context budget: {effective_context_budget}/{self.config.max_tokens} tokens (reserve={self.config.generation_reserve_tokens})",
+                    f"Used {used_tokens} context tokens, {tokens_remaining_for_generation} remaining for generation",
                     f"Ordering: {self.config.ordering}",
                 ]
             )
@@ -164,7 +169,7 @@ class ContextPipeline:
                 query_id=query_id,
                 context_text=context_text,
                 blocks=tuple(ab.block for ab in allocated_blocks),
-                token_budget=self.config.max_tokens,
+                token_budget=effective_context_budget,  # Effective budget after reserve
                 used_tokens=used_tokens,
                 provenance=provenance,
                 explain_trace=explain_trace,

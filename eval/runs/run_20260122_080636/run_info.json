@@ -1,0 +1,11 @@
+{
+  "run_name": "run_20260122_080636",
+  "created_at": "2026-01-22T08:06:36.375499Z",
+  "config": "configs\\default.yaml",
+  "provider": null,
+  "model": "gemma-3-27b-it",
+  "intent": null,
+  "selection": [
+    1
+  ]
+}

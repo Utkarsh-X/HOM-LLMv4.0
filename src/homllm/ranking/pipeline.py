@@ -111,10 +111,13 @@ class RankingPipeline:
                             for c in top_candidates
                         ]
 
-                        # Batch rerank
+                        # Batch rerank (timed for diagnostics)
+                        rerank_start = time.perf_counter()
                         scores = self.reranker.batch_score(
                             input_data.query, documents
                         )
+                        rerank_duration_ms = (time.perf_counter() - rerank_start) * 1000
+                        print(f"[RERANK_PHASE] candidates_reranked={len(documents)} duration_ms={rerank_duration_ms:.1f}", flush=True)
 
                         # Map scores back to candidates
                         for candidate, score in zip(top_candidates, scores):

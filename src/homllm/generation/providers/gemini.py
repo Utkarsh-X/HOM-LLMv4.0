@@ -92,11 +92,31 @@ class GeminiProvider(ProviderConnector):
                 else 0
             )
 
+            # Extract actual finish_reason from API response
+            # Gemini finish_reason enum: 1=STOP, 2=MAX_TOKENS, 3=SAFETY, 4=RECITATION, 5=OTHER
+            finish_reason = "unknown"
+            if response.candidates:
+                raw_reason = response.candidates[0].finish_reason
+                # Map enum value to string (handle both enum and int)
+                reason_value = raw_reason.value if hasattr(raw_reason, 'value') else raw_reason
+                reason_map = {
+                    1: "stop",
+                    2: "max_tokens",
+                    3: "safety",
+                    4: "recitation",
+                    5: "other",
+                }
+                finish_reason = reason_map.get(reason_value, f"unknown_{reason_value}")
+                
+                # Log non-stop finish reasons for debugging
+                if finish_reason != "stop":
+                    logger.warning(f"Gemini finish_reason: {finish_reason} (tokens_out={tokens_out})")
+
             return ProviderResponse(
                 text=text,
                 tokens_in=tokens_in,
                 tokens_out=tokens_out,
-                finish_reason="stop",
+                finish_reason=finish_reason,
                 model=request.model,
                 metadata={"response": response},
             )

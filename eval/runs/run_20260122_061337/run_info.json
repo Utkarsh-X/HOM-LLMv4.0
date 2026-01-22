@@ -1,0 +1,11 @@
+{
+  "run_name": "run_20260122_061337",
+  "created_at": "2026-01-22T06:13:37.444464Z",
+  "config": "configs\\default.yaml",
+  "provider": null,
+  "model": null,
+  "intent": null,
+  "selection": [
+    1
+  ]
+}

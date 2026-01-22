@@ -89,6 +89,7 @@ class GenerationResult:
     raw_text: str  # ALWAYS persisted before parsing
     parsed_output: Optional[dict]
     diagnostics: Diagnostics
+    finish_reason: str = "unknown"  # stop, max_tokens, safety, recitation, etc.
 
 
 class ProviderConnector(Protocol):

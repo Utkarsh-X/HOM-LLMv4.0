@@ -405,6 +405,8 @@ def main():
             blocks=len(context_artifact.blocks),
             tokens=context_artifact.used_tokens,
             token_budget=context_artifact.token_budget,
+            generation_reserve=context_config.generation_reserve_tokens,
+            tokens_remaining=context_config.max_tokens - context_artifact.used_tokens,
         )
 
         # Phase 4: Generation
@@ -462,6 +464,7 @@ def main():
             tokens_in=generation_result.tokens_in,
             tokens_out=generation_result.tokens_out,
             status=generation_result.status,
+            finish_reason=generation_result.finish_reason,
         )
 
         # Render user-facing output (preserves raw_text in artifacts)

@@ -117,13 +117,21 @@ class Config(BaseModel):
         ctx_cfg = self.context
 
         scoring_weights = ctx_cfg.get("scoring_weights", {})
+        
+        # Compute safe default for generation reserve: 20% of max_tokens, minimum 400
+        max_tokens = ctx_cfg.get("max_tokens", 4000)
+        default_reserve = max(int(max_tokens * 0.2), 400)
+        
         return ContextConfig(
-            max_tokens=ctx_cfg.get("max_tokens", 4000),
+            max_tokens=max_tokens,
             budget_mode=ctx_cfg.get("budget_mode", "adaptive"),
             summarization_enabled=ctx_cfg.get("summarization_enabled", False),
             ordering=ctx_cfg.get("ordering", "structural_first"),
             structural_priority_multiplier=ctx_cfg.get(
                 "structural_priority_multiplier", 1.5
+            ),
+            generation_reserve_tokens=ctx_cfg.get(
+                "generation_reserve_tokens", default_reserve
             ),
             w_semantic=scoring_weights.get("w_semantic", 0.4),
             w_name=scoring_weights.get("w_name", 0.2),

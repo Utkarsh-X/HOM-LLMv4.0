@@ -1,0 +1,11 @@
+QUERY_ID   : 01
+RUN_ID     : 6bcc68e4-00af-494b-b3b7-5adb40671754
+MODEL      : gemini-2.5-flash
+PROVIDER   : gemini
+STATUS     : PARTIAL
+--- ANSWER ---
+The execution flow when an admin user calls the `admin_search_endpoint` is as follows:
+
+1. **Endpoint Call and Decorators**:
+* The `admin_search_endpoint` function is the entry point (:1).
+* It is explicitly stated to use both

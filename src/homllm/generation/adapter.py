@@ -140,14 +140,23 @@ class GenerationAdapter:
                 corrections_applied=corrections_applied,
             )
 
-            # 8. Determine status
+            # 8. Determine status based on finish reason and diagnostics
+            # Priority: ERROR > truncation > parse errors > hallucinations > OK
             status: Literal["OK", "PARTIAL", "ERROR"] = "OK"
+            finish_reason = provider_response.finish_reason
+            
             if not raw_text:
                 status = "ERROR"
+            elif finish_reason in ["max_tokens", "safety", "recitation", "other"]:
+                # Model was truncated - this is the PRIMARY cause of incomplete responses
+                status = "PARTIAL"
+                logger.warning(f"Generation truncated: finish_reason={finish_reason}")
             elif parse_warnings and request.output_mode in ["STRUCTURED", "TRACE"]:
                 status = "PARTIAL"
-            elif hallucination_flags:
-                status = "PARTIAL"  # Hallucinations detected but response exists
+            # Note: Hallucination flags are a quality indicator, not a generation failure
+            # Commenting out to only mark PARTIAL for actual generation issues
+            # elif hallucination_flags:
+            #     status = "PARTIAL"
 
             return GenerationResult(
                 request_id=request_id,
@@ -160,6 +169,7 @@ class GenerationAdapter:
                 raw_text=raw_text,  # Always persisted before parsing
                 parsed_output=parsed_output,
                 diagnostics=diagnostics,
+                finish_reason=finish_reason,
             )
 
         except Exception as e:
@@ -181,6 +191,7 @@ class GenerationAdapter:
                     hallucination_flags=[],
                     corrections_applied=[],
                 ),
+                finish_reason="error",
             )
 
     def _render_prompt(

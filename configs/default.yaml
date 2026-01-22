@@ -55,6 +55,7 @@ ranking:
 
 context:
   max_tokens: 4000
+  generation_reserve_tokens: 800  # Tokens reserved for generation output
   budget_mode: adaptive
   summarization_enabled: false
   ordering: "structural_first"
@@ -74,7 +75,7 @@ context:
 
 generation:
   default_provider: gemini
-  default_model: "gemini-2.5-flash"
+  default_model: "gemma-3-27b-it"
   temperature: 0.0
   max_output_tokens: 2000
 

@@ -74,6 +74,7 @@ class ContextConfig:
     summarization_enabled: bool
     ordering: str  # "structural_first" or "score_first"
     structural_priority_multiplier: float = 1.5
+    generation_reserve_tokens: int = 800  # Tokens reserved for generation output (~20% of context)
     # Block scoring weights (all from config, no hardcoded values)
     w_semantic: float = 0.4
     w_name: float = 0.2
