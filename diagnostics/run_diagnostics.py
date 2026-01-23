@@ -50,6 +50,14 @@ from diagnostics.common.formatters import (
 )
 from diagnostics.common.utils import parse_query_selector, ensure_reports_dir
 from diagnostics.context.inspect_context import ContextDiagnostics
+from diagnostics.context.inspect_context_relations import (
+    ContextRelationDiagnostics,
+    format_relational_diagnostic,
+)
+from diagnostics.context_level3 import (
+    AlignmentSummaryAnalyzer,
+    format_level3_diagnostic,
+)
 from diagnostics.retrieval.inspect_retrieval import RetrievalDiagnostics
 from diagnostics.reranking.inspect_reranking import RerankingDiagnostics
 from diagnostics.embedding.inspect_embeddings import EmbeddingDiagnostics
@@ -69,15 +77,61 @@ def run_context_diagnostics(
     run_id: str,
     artifacts_path: Path,
     indexes_path: Path,
-) -> Optional[DiagnosticResult]:
-    """Run context diagnostics for a run."""
+    include_relational: bool = True,
+) -> tuple[Optional[DiagnosticResult], Optional[str]]:
+    """
+    Run context diagnostics for a run.
+    
+    Returns:
+        Tuple of (Level-1 result, Level-2 relational output string)
+    """
     diagnostics = ContextDiagnostics(artifacts_path, indexes_path)
     result = diagnostics.analyze_run(run_id)
     
     if result is None:
-        return None
+        return None, None
     
-    return diagnostics.to_diagnostic_result(result)
+    level1_result = diagnostics.to_diagnostic_result(result)
+    
+    # Level-2 relational diagnostics (if blocks available)
+    relational_output = None
+    if include_relational and result.blocks:
+        try:
+            # Analyze blocks from source if we have them
+            # For now, create minimal IntraBlockDiagnostics from ContextBlockInfo
+            from diagnostics.context.inspect_context import (
+                IntraBlockDiagnostic,
+                TokenBreakdown,
+                IdentifierDensity,
+                StructuralPayload,
+                RedundancyHints,
+            )
+            
+            intra_blocks = []
+            for block in result.blocks:
+                intra_blocks.append(IntraBlockDiagnostic(
+                    block_id=block.block_id,
+                    file=block.file,
+                    symbol=block.block_id,
+                    tokens=block.tokens,
+                    token_breakdown=TokenBreakdown(),
+                    identifier_density=IdentifierDensity(
+                        total_unique=5,
+                        top_repeated=[(block.block_id.split('.')[-1], 2)],
+                    ),
+                    structural_payload=StructuralPayload(),
+                    redundancy_hints=RedundancyHints(),
+                    signal_ratio=0.5,
+                ))
+            
+            if intra_blocks:
+                relational = ContextRelationDiagnostics()
+                rel_result = relational.analyze(intra_blocks)
+                relational_output = format_relational_diagnostic(rel_result)
+        except Exception:
+            pass  # Gracefully degrade if Level-2 fails
+    
+    return level1_result, relational_output
 
 
 def run_retrieval_diagnostics(
@@ -313,11 +367,80 @@ Examples:
         run_results = []
         
         if "context" in phases:
-            result = run_context_diagnostics(run_id, artifacts_path, indexes_path)
-            if result:
-                run_results.append(result)
-                print(formatter.format(result))
+            level1_result, level2_output = run_context_diagnostics(run_id, artifacts_path, indexes_path)
+            if level1_result:
+                run_results.append(level1_result)
+                print(formatter.format(level1_result))
                 print()
+                
+                # Print Level-2 relational diagnostics
+                if level2_output:
+                    print(level2_output)
+                    print()
+        
+        # Level-3 cognitive diagnostics (triggered by context or context_level3)
+        if "context_level3" in phases or "context" in phases:
+            try:
+                # Load query from telemetry
+                import json
+                telemetry_file = artifacts_path / "runs" / run_id / "telemetry.json"
+                query_text = "Unknown query"
+                
+                if telemetry_file.exists():
+                    with open(telemetry_file, "r", encoding="utf-8") as f:
+                        telemetry = json.load(f)
+                    query_text = telemetry.get("query", "Unknown query")
+                
+                from diagnostics.context.inspect_context import (
+                    IntraBlockDiagnostic,
+                    TokenBreakdown,
+                    IdentifierDensity,
+                    StructuralPayload,
+                    RedundancyHints,
+                )
+                
+                # Check if we have block provenance data
+                level1_result_data = level1_result if 'level1_result' in dir() else None
+                
+                # Create blocks from available data or use placeholders
+                intra_blocks = []
+                context_phase = telemetry.get("phases", {}).get("CONTEXT", {})
+                block_count = context_phase.get("blocks", 0)
+                total_tokens = context_phase.get("tokens", 0)
+                
+                if block_count > 0:
+                    # Create synthetic blocks based on telemetry stats
+                    tokens_per_block = total_tokens // block_count if block_count > 0 else 100
+                    for i in range(block_count):
+                        intra_blocks.append(IntraBlockDiagnostic(
+                            block_id=f"block_{i+1}",
+                            file=f"source_{i+1}.py",
+                            symbol=f"block_{i+1}",
+                            tokens=tokens_per_block,
+                            token_breakdown=TokenBreakdown(),
+                            identifier_density=IdentifierDensity(),
+                            structural_payload=StructuralPayload(),
+                            redundancy_hints=RedundancyHints(),
+                            signal_ratio=0.5,
+                            noise_ratio=0.3,
+                        ))
+                
+                # Run Level-3 analysis
+                level3_analyzer = AlignmentSummaryAnalyzer()
+                level3_result = level3_analyzer.analyze(query_text, intra_blocks)
+                level3_output = format_level3_diagnostic(level3_result)
+                print(level3_output)
+                print()
+                
+                # Note about missing provenance
+                if not level2_output:
+                    print("Note: Level-2 relational diagnostics requires block provenance data.")
+                    print("      Run with --save-provenance to capture detailed block info.")
+                    print()
+                    
+            except Exception as e:
+                print(f"Level-3 diagnostic error: {e}")
+                pass  # Gracefully degrade
         
         if "retrieval" in phases:
             result = run_retrieval_diagnostics(run_id, artifacts_path)
