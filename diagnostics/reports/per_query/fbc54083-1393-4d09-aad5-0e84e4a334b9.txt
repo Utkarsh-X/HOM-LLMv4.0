@@ -1,0 +1,63 @@
+[CONTEXT DIAGNOSTIC]
+Run ID: fbc54083-1393-4d09-aad5-0e84e4a334b9
+
+Total Blocks: 33
+Total Tokens: 4000
+Token Budget: 4000
+Used Budget Pct: 100.0%
+Top 5 Token Concentration: 0.0%
+Structural Dominance: 0.0%
+Semantic Dominance: 0.0%
+
+! Near budget limit: 100.0% used
+
+
+[RETRIEVAL DIAGNOSTIC]
+Run ID: fbc54083-1393-4d09-aad5-0e84e4a334b9
+
+Bm25 Candidates: 50
+Vector Candidates: 50
+Merged Candidates: 48
+Overlap Count: 52
+Overlap Ratio: 104.0%
+Bm25 Dominance: 50.0%
+Vector Dominance: 50.0%
+Duration Ms: 2585
+
+
+[RERANKING DIAGNOSTIC]
+Run ID: fbc54083-1393-4d09-aad5-0e84e4a334b9
+
+Candidate Count: 48
+Reranker Used: Yes
+Reranker Unavailable: No
+Rank Churn: 0.0%
+Top 10 Stability: 0.0%
+Avg Rank Delta: 0.0
+Max Rank Delta: 0
+Length Bias Score: 0.00
+Duration Ms: 24755
+
+! Low top-N stability: only 0% remained in top 10
+
+
+[EMBEDDING DIAGNOSTIC]
+
+Total Embeddings: 316
+Symbol Embeddings: 316
+File Embeddings: 41
+Avg Text Length: 2021 chars
+Avg Token Count: 253
+Undersized Chunks: 53
+Optimal Chunks: 235
+Oversized Chunks: 28
+Never Retrieved Pct: 0.0%
+
+! Very large chunks detected: max 44000 chars
+
+Top entries:
+  1. type=oversized, symbol=BatchProcessor, tokens=~960, file=batch_processor.py
+  2. type=oversized, symbol=process, tokens=~650, file=batch_processor.py
+  3. type=oversized, symbol=JobQueue, tokens=~1630, file=job_queue.py
+  4. type=undersized, symbol=get_stats, tokens=~30, file=batch_processor.py
+  5. type=undersized, symbol=get_queue_size, tokens=~40, file=job_queue.py
