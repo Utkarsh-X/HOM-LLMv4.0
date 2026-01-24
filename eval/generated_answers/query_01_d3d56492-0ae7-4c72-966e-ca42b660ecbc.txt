@@ -1,6 +1,0 @@
-QUERY_ID   : 01
-RUN_ID     : d3d56492-0ae7-4c72-966e-ca42b660ecbc
-MODEL      : unknown
-PROVIDER   : gemini
-STATUS     : ERROR
---- ANSWER ---

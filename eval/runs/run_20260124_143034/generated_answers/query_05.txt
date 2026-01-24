@@ -1,0 +1,21 @@
+QUERY_ID   : 05
+RUN_ID     : 3c8eab21-4705-4d0c-b953-5e38d9d88454
+MODEL      : gemini-2.5-flash
+PROVIDER   : gemini
+STATUS     : OK
+--- ANSWER ---
+Based on the provided context:
+
+1. **When L1 memory, L2 Redis, and L3 database caches all miss:**
+The provided code snippets **do not** contain a `get` method or logic that describes the sequential checking of L1, L2, and L3 caches for data. Therefore, the exact behavior of what happens when all these layers miss during a read operation cannot be fully determined from the given context.
+* An L1 memory cache is present, managed by `_set_memory` (`cache_manager.py:1-11`).
+* An L2 Redis cache is implied, as the `set` method interacts with `self.redis` (`cache_manager.py:1-20`).
+* The concept of an "L3 database cache" is **[not in context]** as a distinct cache layer. The `QueryOptimizer` and `QueryPlanner` interact with the database for query processing and plan caching, respectively, but are not described as a data caching layer themselves.
+
+2. **How cache promotion works:**
+Cache promotion is demonstrated in the `set` method, which handles writing values to the cache layers:
+* When a value is explicitly set using the `set` method, a cache key is generated (`cache_manager.py:1-7`, `cache_manager.py:1-20`).
+* The value is first stored in the **L1 memory cache** using `_set_memory` (`cache_manager.py:1-20`). This memory cache has a limit and uses an LRU (Least Recently Used) eviction policy to remove the oldest item when the limit is reached, making space for new entries (`cache_manager.py:1-11`).
+* Subsequently, if a Redis instance is configured (`self.redis`), the value is also stored in the **L2 Redis cache** (`cache_manager.py:1-20`).
+* This process ensures that newly set or updated data is promoted to both the L1 memory and L2 Redis caches.
+* However, the provided context **does not** show cache promotion occurring as a result of a read miss (i.e., fetching data from a slower layer like a database and then populating the faster L1 and L2 caches with that retrieved data). The promotion shown is for explicit write operations.

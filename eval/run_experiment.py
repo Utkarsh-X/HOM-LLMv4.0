@@ -27,7 +27,6 @@ ROOT = Path(__file__).resolve().parent.parent
 RUNTIME_CLI = ROOT / "runtime" / "run_query.py"
 QUERIES_PATH = ROOT / "eval" / "queries.json"
 BASE_OUTPUT_DIR = ROOT / "eval" / "runs"
-GENERATED_ANSWERS_DIR = ROOT / "eval" / "generated_answers"
 
 
 class SelectionError(ValueError):
@@ -86,24 +85,40 @@ def load_queries() -> List[QueryRecord]:
 
 
 def extract_result_text(output_lines: List[str]) -> str:
-    """Parse rendered answer between 'RESULT:' and the next ===== line."""
-    result_idx = None
+    """Parse rendered answer between 'ANSWER' header and the closing === line.
+    
+    Output format from run_query.py print_answer_box:
+    ================================================================================
+    ANSWER
+    --------------------------------------------------------------------------------
+    <answer content>
+    ================================================================================
+    """
+    # Find the ANSWER section
+    in_answer = False
+    answer_start = None
+    
+    for idx, line in enumerate(output_lines):
+        if "ANSWER" in line and idx > 0 and "===" in output_lines[idx - 1]:
+            in_answer = True
+            answer_start = idx + 1  # Skip the "---" separator
+            continue
+        if in_answer and "===" in line:
+            # Found the closing marker
+            answer_lines = output_lines[answer_start + 1:idx]  # Skip separator line
+            return "\n".join(line.rstrip() for line in answer_lines).strip()
+    
+    # Fallback: try legacy "RESULT:" format
     for idx, line in enumerate(output_lines):
         if "RESULT:" in line:
-            result_idx = idx
-            break
-    if result_idx is None:
-        return ""
-
-    collected: List[str] = []
-    for line in output_lines[result_idx + 1 :]:
-        if "====" in line:
-            break
-        # Drop log prefix "YYYY-MM-DD ... INFO "
-        parts = line.split(" ", 3)
-        cleaned = parts[-1] if len(parts) >= 4 else line
-        collected.append(cleaned.rstrip())
-    return "\n".join(collected).strip()
+            collected = []
+            for line2 in output_lines[idx + 1:]:
+                if "====" in line2:
+                    break
+                collected.append(line2.rstrip())
+            return "\n".join(collected).strip()
+    
+    return ""
 
 
 def extract_telemetry_path(stdout_text: str) -> Optional[Path]:
@@ -204,6 +219,10 @@ def run_single_query(
         cmd.append("--raw")
     if args.no_file_mapping:
         cmd.append("--no-file-mapping")
+    if args.intelligence_levels:
+        cmd.extend(["--intelligence-levels", args.intelligence_levels])
+    if args.token_attribution:
+        cmd.append("--token-attribution")
 
     completed = subprocess.run(
         cmd,
@@ -250,14 +269,16 @@ def run_single_query(
     return response
 
 
-def persist_answer_txt(response: Dict, answer_text: str) -> None:
-    ensure_dir(GENERATED_ANSWERS_DIR)
-    run_id = response.get("run_id") or "unknown"
+def persist_answer_txt(response: Dict, answer_text: str, run_dir: Path) -> None:
+    """Persist answer text to run_dir/generated_answers/query_XX.txt"""
+    answers_dir = run_dir / "generated_answers"
+    ensure_dir(answers_dir)
     query_id = response.get("query_id")
     model = response.get("model_name", "unknown")
     provider = response.get("provider", "unknown")
     status = response.get("status", "UNKNOWN")
-    file_path = GENERATED_ANSWERS_DIR / f"query_{int(query_id):02d}_{run_id}.txt"
+    run_id = response.get("run_id") or "unknown"
+    file_path = answers_dir / f"query_{int(query_id):02d}.txt"
     with open(file_path, "w", encoding="utf-8") as f:
         f.write(f"QUERY_ID   : {int(query_id):02d}\n")
         f.write(f"RUN_ID     : {run_id}\n")
@@ -305,6 +326,14 @@ def main() -> None:
         default=True,
         help="Print per-query telemetry summary (read-only)",
     )
+    parser.add_argument(
+        "--intelligence-levels", type=str, default=None,
+        help="Override intelligence levels: none|l1|l1,l2|l1,l2,l3"
+    )
+    parser.add_argument(
+        "--token-attribution", action="store_true",
+        help="Enable token attribution telemetry"
+    )
 
     args = parser.parse_args()
 
@@ -332,7 +361,7 @@ def main() -> None:
     for idx, query in enumerate(selected_queries, start=1):
         response = run_single_query(query, args)
         write_jsonl(responses_path, [response])
-        persist_answer_txt(response, response.get("answer_text", ""))
+        persist_answer_txt(response, response.get("answer_text", ""), run_dir)
 
         status_icon = "✔" if response.get("status", "").upper() == "OK" else "⚠"
         print(f"[RUN {idx}/{total}] Query {query.query_id:02d} {status_icon} {response.get('status', 'DONE')}")

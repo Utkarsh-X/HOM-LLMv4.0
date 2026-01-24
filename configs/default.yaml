@@ -73,11 +73,17 @@ context:
   coherence_same_file_bonus: 0.8
   coherence_different_file_bonus: 0.5
 
+intelligence:
+  enabled: true
+  level1_enabled: true
+  level2_enabled: true
+  level3_enabled: true
+
 generation:
   default_provider: gemini
-  default_model: "gemma-3-27b-it"
+  default_model: "gemini-2.5-flash"
   temperature: 0.0
-  max_output_tokens: 2000
+  max_output_tokens: 8000  # Increased for Gemini thinking models
 
 evaluation:
   judge_model: "gemma-3-27b-it"

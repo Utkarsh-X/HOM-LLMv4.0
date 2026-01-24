@@ -33,4 +33,10 @@ def configure_logging(level: int = logging.INFO, logger_name: Optional[str] = No
             )
         logging.getLogger().setLevel(level)
 
+    # Silence noisy third-party loggers (httpx used by google.genai SDK)
+    # Only suppress INFO level - warnings and errors still visible
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+
     return logger
+

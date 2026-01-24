@@ -12,6 +12,18 @@ from homllm.context.interfaces import (
     Stitcher,
 )
 from homllm.context.pipeline import ContextPipeline
+from homllm.context.diff import (
+    ContextDiff,
+    DiffEntry,
+    ConflictRecord,
+    DiffBuilder,
+)
+from homllm.context.applier import (
+    ContextApplier,
+    ApplierConfig,
+    ApplierResult,
+    create_context_applier,
+)
 
 __all__ = [
     "ContextArtifact",
@@ -24,4 +36,15 @@ __all__ = [
     "BudgetManager",
     "Stitcher",
     "ContextPipeline",
+    # Diff types
+    "ContextDiff",
+    "DiffEntry",
+    "ConflictRecord",
+    "DiffBuilder",
+    # Applier
+    "ContextApplier",
+    "ApplierConfig",
+    "ApplierResult",
+    "create_context_applier",
 ]
+

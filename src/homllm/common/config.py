@@ -30,6 +30,16 @@ class IndexerConfig:
     embedding_dimension: int = 1024
 
 
+@dataclass
+class IntelligenceConfig:
+    """Intelligence layer configuration."""
+
+    enabled: bool = True
+    level1_enabled: bool = True
+    level2_enabled: bool = True
+    level3_enabled: bool = True
+
+
 class Config(BaseModel):
     """Root configuration."""
 
@@ -37,6 +47,7 @@ class Config(BaseModel):
     retrieval: dict
     ranking: dict
     context: dict
+    intelligence: dict = {}
     generation: dict
     evaluation: dict
 
@@ -167,3 +178,15 @@ class Config(BaseModel):
             default_max_output_tokens=gen_cfg.get("max_output_tokens", 2000),
             default_template=gen_cfg.get("default_template", "explain"),
         )
+
+    def get_intelligence_config(self) -> IntelligenceConfig:
+        """Extract IntelligenceConfig from root config."""
+        int_cfg = self.intelligence or {}
+
+        return IntelligenceConfig(
+            enabled=int_cfg.get("enabled", True),
+            level1_enabled=int_cfg.get("level1_enabled", True),
+            level2_enabled=int_cfg.get("level2_enabled", True),
+            level3_enabled=int_cfg.get("level3_enabled", True),
+        )
+

@@ -1,0 +1,12 @@
+QUERY_ID   : 08
+RUN_ID     : 6c43d1d4-d162-4222-bd8d-158150b67b2e
+MODEL      : gemini-2.5-flash
+PROVIDER   : gemini
+STATUS     : OK
+--- ANSWER ---
+When all connections in the `ConnectionPool` are in use, the pool does not make callers wait or time out. Instead, it immediately raises a `PoolExhaustedError`.
+
+Here's how it behaves:
+1. **Check for Exhaustion**: The `acquire` method first checks if the number of connections currently in use (`len(self._in_use)`) has reached the `max_connections` limit. (connection.py:43-45)
+2. **Raise Error**: If the pool is exhausted (i.e., `len(self._in_use) >= self.max_connections`), it raises a `PoolExhaustedError`, indicating that no connections are available. (connection.py:45)
+3. **No Waiting/Timeout Mechanism**: The provided code for the `acquire` method does not include any explicit mechanism (like a semaphore with a timeout, or an asynchronous wait) that would cause callers to wait for a connection to become available or to time out after a certain period. While a `self.timeout` attribute is initialized, it is not used in the `acquire` logic to implement a waiting or timeout behavior. (connection.py:29-30, connection.py:43-75)
