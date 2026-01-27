@@ -1,0 +1,17 @@
+QUERY_ID   : 16
+RUN_ID     : 39d4dca1-1c6d-4fd6-8fa2-d8c4dde953b1
+MODEL      : gemini-2.5-flash
+PROVIDER   : gemini
+STATUS     : OK
+--- ANSWER ---
+## Component Interactions
+The `BatchProcessor` (initialized in `batch_processor.py:1-17`) interacts with the `BatchResult` class (`batch_processor.py:1-9`) to report the outcome of its processing. When a batch is processed, the `BatchProcessor` populates a `BatchResult` object, which includes `total_items`, `processed_items`, `failed_items`, `duration_ms`, `errors`, and `results`. This interaction allows the `BatchProcessor` to communicate the success or failure of individual items within a batch.
+
+Internally, the `BatchProcessor` also maintains `batch_stats` (`batch_processor.py:1-17`), which are updated during processing. These statistics, including `"failed_items"`, reflect the cumulative performance and error rates across all batches processed by the instance.
+
+## Summary
+Based on the provided context, the `BatchProcessor` handles partial failures by **tracking** them. The `BatchResult` class (`batch_processor.py:1-9`) explicitly includes fields such as `failed_items` and `errors` to record which items within a batch failed and any associated error messages. Similarly, the `BatchProcessor`'s internal `batch_stats` (`batch_processor.py:1-17`) also track the `"failed_items"` count. This indicates that the processor is designed to differentiate between successful and failed items within a batch, rather than treating a single item failure as a complete batch failure.
+
+However, the provided context **does not contain information** on the specific mechanisms the `BatchProcessor` uses to *handle* these partial failures beyond tracking them. For example, it does not describe if failed items are automatically retried, quarantined, or if the successful items are committed while failed ones are re-queued.
+
+Regarding the implementation of at-least-once semantics, the provided context **does not contain any information**. There are no details about retry logic, idempotency mechanisms, persistent queues, or any other components that would ensure an item is processed at least once even in the face of failures.

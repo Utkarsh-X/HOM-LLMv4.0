@@ -55,6 +55,16 @@ from homllm.intelligence.actions.level3.plan import (
     CognitiveAction,
 )
 
+# Import audit collector (optional observability layer)
+from homllm.intelligence.audit import AuditCollector, AuditResult, create_audit_collector
+
+# Import assertion readability model (optional observability layer)
+from homllm.intelligence.assertion_readability import (
+    ReadabilityCollector,
+    ReadabilityResult,
+    create_readability_collector,
+)
+
 
 # =============================================================================
 # UNIFIED OUTPUT TYPES
@@ -114,6 +124,12 @@ class ContextModificationPlan:
     diagnostics_available: bool = True
     levels_executed: tuple[int, ...] = ()
     total_actions: int = 0
+    
+    # Optional audit result (only populated when audit_enabled=True)
+    audit_result: Optional[AuditResult] = None
+    
+    # Optional readability result (only populated when assertion_readability_enabled=True)
+    readability_result: Optional[ReadabilityResult] = None
     
     @classmethod
     def empty(cls) -> "ContextModificationPlan":
@@ -222,6 +238,8 @@ class IntelligenceController:
         level1_enabled: bool = True,
         level2_enabled: bool = True,
         level3_enabled: bool = True,
+        audit_enabled: bool = False,
+        assertion_readability_enabled: bool = False,
     ):
         """
         Initialize the controller.
@@ -238,6 +256,10 @@ class IntelligenceController:
             level1_enabled: Whether to run Level-1 engine. Default True.
             level2_enabled: Whether to run Level-2 engine. Default True.
             level3_enabled: Whether to run Level-3 engine. Default True.
+            audit_enabled: Whether to collect assertion suppression audit.
+                          Default False. Enable via --assertion-audit flag.
+            assertion_readability_enabled: Whether to evaluate assertion readability.
+                          Default False. Enable via --assertion-readability flag.
         """
         # Instantiate defaults if not provided
         self._diagnostic_controller = (
@@ -268,6 +290,14 @@ class IntelligenceController:
         self._level1_enabled = level1_enabled
         self._level2_enabled = level2_enabled
         self._level3_enabled = level3_enabled
+        
+        # Audit collector (optional observability layer)
+        self._audit_collector = create_audit_collector(enabled=audit_enabled)
+        self._audit_enabled = audit_enabled
+        
+        # Readability collector (optional observability layer)
+        self._readability_collector = create_readability_collector(enabled=assertion_readability_enabled)
+        self._assertion_readability_enabled = assertion_readability_enabled
     
     def run(self, context: "ContextArtifact") -> ContextModificationPlan:
         """
@@ -335,8 +365,8 @@ class IntelligenceController:
         # Step 4: Merge plans deterministically
         unified_actions = self._merge_plans(level1_plan, level2_plan, level3_plan)
         
-        # Step 5: Return unified plan
-        return ContextModificationPlan(
+        # Step 5: Build plan (before audit, for audit input)
+        plan = ContextModificationPlan(
             level1_plan=level1_plan,
             level2_plan=level2_plan,
             level3_plan=level3_plan,
@@ -345,6 +375,33 @@ class IntelligenceController:
             levels_executed=tuple(levels_executed),
             total_actions=len(unified_actions),
         )
+        
+        # Step 6: Collect audit data (optional, no side effects)
+        # Hook AFTER all action engines, BEFORE returning
+        audit_result = None
+        if self._audit_enabled:
+            audit_result = self._audit_collector.collect(snapshot, plan, context)
+        
+        # Step 7: Evaluate assertion readability (optional, no side effects)
+        readability_result = None
+        if self._assertion_readability_enabled:
+            readability_result = self._readability_collector.collect(snapshot, plan, context)
+        
+        # Step 8: Create final plan with optional observability data
+        if audit_result or readability_result:
+            plan = ContextModificationPlan(
+                level1_plan=plan.level1_plan,
+                level2_plan=plan.level2_plan,
+                level3_plan=plan.level3_plan,
+                unified_actions=plan.unified_actions,
+                diagnostics_available=plan.diagnostics_available,
+                levels_executed=plan.levels_executed,
+                total_actions=plan.total_actions,
+                audit_result=audit_result,
+                readability_result=readability_result,
+            )
+        
+        return plan
     
     def _merge_plans(
         self,
@@ -433,6 +490,8 @@ def create_intelligence_controller(
     level1_enabled: bool = True,
     level2_enabled: bool = True,
     level3_enabled: bool = True,
+    audit_enabled: bool = False,
+    assertion_readability_enabled: bool = False,
 ) -> IntelligenceController:
     """
     Factory function to create an IntelligenceController.
@@ -445,6 +504,8 @@ def create_intelligence_controller(
         level1_enabled: Enable Level-1 engine
         level2_enabled: Enable Level-2 engine
         level3_enabled: Enable Level-3 engine
+        audit_enabled: Enable assertion suppression audit
+        assertion_readability_enabled: Enable assertion readability evaluation
         
     Returns:
         Configured IntelligenceController
@@ -457,6 +518,8 @@ def create_intelligence_controller(
         level1_enabled=level1_enabled,
         level2_enabled=level2_enabled,
         level3_enabled=level3_enabled,
+        audit_enabled=audit_enabled,
+        assertion_readability_enabled=assertion_readability_enabled,
     )
 
 

@@ -344,6 +344,14 @@ def main():
                         help="Emit token attribution telemetry")
     parser.add_argument("--intelligence-levels", type=str, default=None,
                         help="Override intelligence levels: none|l1|l1,l2|l1,l2,l3")
+    parser.add_argument("--assertion-audit", action="store_true",
+                        help="Emit assertion suppression audit telemetry")
+    parser.add_argument("--assertion-readability", action="store_true",
+                        help="Emit assertion readability telemetry")
+    parser.add_argument("--reasoning-diagnostics", action="store_true",
+                        help="Emit reasoning diagnostic telemetry")
+    parser.add_argument("--reasoning-contracts", action="store_true",
+                        help="Emit reasoning contract telemetry")
 
     args = parser.parse_args()
 
@@ -508,6 +516,8 @@ def main():
                 level1_enabled=intelligence_config.level1_enabled,
                 level2_enabled=intelligence_config.level2_enabled,
                 level3_enabled=intelligence_config.level3_enabled,
+                audit_enabled=getattr(args, 'assertion_audit', False),
+                assertion_readability_enabled=getattr(args, 'assertion_readability', False),
             )
 
             # Run intelligence analysis (diagnostics run once)
@@ -535,6 +545,31 @@ def main():
                 context_tokens_before=tokens_before,
                 context_tokens_after=context_artifact.used_tokens,
             )
+            
+            # Emit assertion audit telemetry if enabled
+            if getattr(args, 'assertion_audit', False) and modification_plan.audit_result:
+                audit = modification_plan.audit_result
+                print_telemetry(
+                    "ASSERTION_AUDIT",
+                    total_assertions=audit.total_assertions_considered,
+                    suppressed=audit.assertions_suppressed,
+                    unblocked=audit.assertions_unblocked,
+                )
+                # Optionally print detailed suppression breakdown
+                if audit.suppression_breakdown_by_level:
+                    breakdown = {f"L{lvl}": cnt for lvl, cnt in audit.suppression_breakdown_by_level}
+                    print_telemetry("ASSERTION_AUDIT_BREAKDOWN", **breakdown)
+            
+            # Emit assertion readability telemetry if enabled
+            if getattr(args, 'assertion_readability', False) and modification_plan.readability_result:
+                readability = modification_plan.readability_result
+                print_telemetry(
+                    "ASSERTION_READABILITY",
+                    total_blocks=readability.total_blocks,
+                    readable=readability.readable_count,
+                    suppressed=readability.suppressed_count,
+                    protected_but_readable=readability.protected_but_readable_count,
+                )
         else:
             # Intelligence disabled - skip entirely
             telemetry.record_phase(
@@ -549,6 +584,70 @@ def main():
                 context_tokens_before=tokens_before,
                 context_tokens_after=tokens_before,
             )
+
+        # Phase 4b: Build reasoning contracts (pre-generation)
+        # Contracts define what MUST be reasoned before generation
+        reasoning_contract = None
+        if getattr(args, 'reasoning_contracts', False):
+            from homllm.intelligence.reasoning_contracts import create_contract_collector
+            from homllm.intelligence.reasoning_diagnostic import (
+                ReasoningDiagnosticResult,
+                ReasoningExpectation,
+                ReasoningFailure,
+                EvidenceSummary,
+                DiagnosticConfidence,
+                QueryTypeFlag,
+            )
+            from homllm.intelligence.assertion_readability import ReadabilityResult
+            
+            # Get readability result from plan
+            readability_result = (
+                modification_plan.readability_result 
+                if 'modification_plan' in dir() and modification_plan.readability_result 
+                else ReadabilityResult.empty()
+            )
+            
+            # Build expectations from query (same logic as RDL evaluator)
+            from homllm.intelligence.reasoning_diagnostic.evaluator import ReasoningDiagnosticEvaluator
+            evaluator = ReasoningDiagnosticEvaluator()
+            query_flags = evaluator._detect_query_type(args.query.lower())
+            
+            # Count distinct components
+            distinct_components = len(set(b.file for b in context_artifact.blocks)) if context_artifact.blocks else 0
+            
+            # Create minimal diagnostic result for contract building
+            pre_gen_diagnostic = ReasoningDiagnosticResult(
+                query_type_flags=tuple(query_flags),
+                expectations=ReasoningExpectation(
+                    aggregation_expected=QueryTypeFlag.ENUMERATIVE in query_flags,
+                    interaction_expected=QueryTypeFlag.INTERACTIONAL in query_flags,
+                    trace_expected=QueryTypeFlag.TRACE in query_flags,
+                ),
+                failures=ReasoningFailure(False, False, False),  # Pre-gen, no failures yet
+                evidence=EvidenceSummary(
+                    readable_blocks=readability_result.readable_count,
+                    distinct_components_detected=distinct_components,
+                    enumeration_markers_found=False,
+                    interaction_markers_found=False,
+                    surrender_phrases_found=False,
+                ),
+                confidence=DiagnosticConfidence.MODERATE,
+            )
+            
+            contract_collector = create_contract_collector(enabled=True)
+            reasoning_contract = contract_collector.collect(
+                diagnostic_result=pre_gen_diagnostic,
+                readability_result=readability_result,
+                context=context_artifact,
+            )
+            
+            if reasoning_contract.has_requirements:
+                print_telemetry(
+                    "REASONING_CONTRACTS",
+                    required_steps=",".join(reasoning_contract.step_names),
+                    severity=reasoning_contract.severity.value,
+                    constraint_count=len(reasoning_contract.constraints),
+                )
 
         # Phase 5: Generation
         generation_start = time.perf_counter()
@@ -582,13 +681,68 @@ def main():
             max_output_tokens=generation_config.default_max_output_tokens,
         )
 
+        # =====================================================================
+        # Phase-3A/3B/3C: Reasoning Contract Enforcement + Prompt Integrity
+        # =====================================================================
+        # 
+        # Phase-3A: Render reasoning obligations
+        # Phase-3B: Render structure requirements
+        # Phase-3C: Completion guard + prompt integrity
+        #
+        # GUARANTEE: All template variables are assembled BEFORE rendering
+        # GUARANTEE: Each variable is injected EXACTLY ONCE
+        # GUARANTEE: Empty string when disabled (zero side effects)
+        
+        enforcement_prompt = ""
+        structure_prompt = ""
+        completion_guard_prompt = ""
+        
+        if reasoning_contract and reasoning_contract.has_requirements:
+            from homllm.intelligence.reasoning_contracts import (
+                create_contract_enforcer,
+                create_structure_enforcer,
+                create_completion_guard,
+            )
+            # Phase-3A: Reasoning obligations
+            enforcer = create_contract_enforcer()
+            enforcement_prompt = enforcer.render(reasoning_contract)
+            logger.debug(f"Phase-3A: Enforcement prompt injected: {len(enforcement_prompt)} chars")
+            
+            # Phase-3B: Answer structure requirements
+            structure_enforcer = create_structure_enforcer()
+            structure_prompt = structure_enforcer.render(reasoning_contract)
+            logger.debug(f"Phase-3B: Structure prompt injected: {len(structure_prompt)} chars")
+            
+            # Phase-3C: Completion guard (stop instructions)
+            completion_guard = create_completion_guard()
+            completion_guard_prompt = completion_guard.render(reasoning_contract)
+            logger.debug(f"Phase-3C: Completion guard injected: {len(completion_guard_prompt)} chars")
+        
+        # Phase-3C: Assemble template variables with guaranteed integrity
+        # All required variables MUST exist before this point
+        from homllm.intelligence.reasoning_contracts import create_prompt_integrity_guard
+        
+        prompt_guard = create_prompt_integrity_guard()
+        template_variables = {
+            "reasoning_enforcement": enforcement_prompt,
+            "structure_requirements": structure_prompt,
+            "completion_guard": completion_guard_prompt,
+        }
+        
+        # Fill any missing required variables with empty string
+        template_variables = prompt_guard.validate_and_fill(template_variables)
+        
+        # Phase-3C: Hard assertion - catch injection bugs early
+        # This will raise AssertionError if any required variable is missing
+        prompt_guard.assert_integrity(template_variables)
+        
         generation_request = GenerationRequest(
             request_id=retrieval_result.query_id,
             query=args.query,
             intent=intent,
             context_artifact=context_artifact,
             prompt_template="explain",
-            template_variables={},
+            template_variables=template_variables,
             output_mode="TEXT",
             model_config=model_config,
         )
@@ -647,6 +801,36 @@ def main():
         status_message = presentation_renderer.render_status_message(generation_result.status)
         if status_message:
             print(status_message)
+        
+        # Emit reasoning diagnostics if flag enabled (post-generation)
+        if getattr(args, 'reasoning_diagnostics', False):
+            from homllm.intelligence.reasoning_diagnostic import create_reasoning_collector
+            from homllm.intelligence.assertion_readability import ReadabilityResult
+            
+            # Get readability result from plan, or create empty
+            readability_result = (
+                modification_plan.readability_result 
+                if 'modification_plan' in dir() and modification_plan.readability_result 
+                else ReadabilityResult.empty()
+            )
+            
+            reasoning_collector = create_reasoning_collector(enabled=True)
+            reasoning_result = reasoning_collector.collect(
+                query_text=args.query,
+                answer_text=generation_result.raw_text,
+                readability_result=readability_result,
+                context=context_artifact,
+            )
+            
+            print_telemetry(
+                "REASONING_DIAGNOSTICS",
+                aggregation_missing=reasoning_result.failures.aggregation_missing,
+                interaction_missing=reasoning_result.failures.interaction_missing,
+                premature_surrender=reasoning_result.failures.premature_surrender,
+                confidence=reasoning_result.confidence.value,
+                query_types=[f.value for f in reasoning_result.query_type_flags],
+                readable_blocks=reasoning_result.evidence.readable_blocks,
+            )
 
         # Export JSON if requested
         if args.json:

@@ -1,0 +1,23 @@
+QUERY_ID   : 05
+RUN_ID     : 9cb406c1-5c04-4dcc-af45-928a407d4c54
+MODEL      : gemini-2.5-flash
+PROVIDER   : gemini
+STATUS     : OK
+--- ANSWER ---
+When L1 memory, L2 Redis, and L3 database caches all miss, the following sequence of events occurs:
+
+1. **L1 Memory Cache Miss:** The `CacheManager.get` method first attempts to retrieve the value from the in-memory cache (`self.memory_cache`). If the key is not found or the entry has expired, it's considered a memory cache miss, and `self.stats["memory_misses"]` is incremented (cache_manager.py:99-108).
+
+2. **L2 Redis Cache Miss:** After an L1 miss, if Redis is enabled, the system attempts to retrieve the value from the L2 Redis cache using `self.redis.get(key)`. If Redis does not contain the value, it's a Redis cache miss, and `self.stats["redis_misses"]` is incremented (cache_manager.py:111-119).
+
+3. **L3 Database/Source Fetch:** If both L1 and L2 caches miss, and a `fetch_func` (representing the original data source, typically a database or an external service) is provided, this function is executed to retrieve the actual value (cache_manager.py:122-123).
+
+**Cache Promotion:**
+
+Cache promotion ensures that frequently accessed data moves closer to the application, reducing latency for subsequent requests. This system implements two forms of promotion:
+
+1. **Redis (L2) to Memory (L1) Promotion:** If a value is found in the L2 Redis cache (after an L1 miss), it is immediately promoted and stored in the L1 memory cache using `self._set_memory(key, redis_value, ttl)` (cache_manager.py:114-116). This makes the data available in the fastest cache layer for future requests.
+
+2. **Source (L3) to Memory (L1) and Redis (L2) Promotion:** When a value is successfully fetched from the original data source (after both L1 and L2 misses), it is then written to *both* the L1 memory cache and the L2 Redis cache using the `self.set` method (cache_manager.py:124, 131-145). This ensures that the newly fetched data is available in the higher cache layers for subsequent requests, preventing another full cache miss.
+
+The `_set_memory` method handles adding the value to the memory cache, including an LRU (Least Recently Used) eviction policy if the `memory_limit` is reached (cache_manager.py:147-157). The `RedisClient.set` method handles storing the value in Redis with an optional TTL (Time To Live) (redis_client.py:117-138).

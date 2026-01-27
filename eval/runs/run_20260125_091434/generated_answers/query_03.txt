@@ -1,0 +1,17 @@
+QUERY_ID   : 03
+RUN_ID     : 3117c9da-a433-43f5-ad29-a40822e7dd28
+MODEL      : gemini-2.5-flash
+PROVIDER   : gemini
+STATUS     : OK
+--- ANSWER ---
+The query optimizer resolves conflicts between `PREDICATE_PUSHDOWN` and `CONSTANT_FOLDING` rules by applying them in a predefined sequential order. The output of an earlier rule becomes the input for a later rule, implicitly resolving any potential conflicts by giving precedence to the rule applied first (query_optimizer.py:1-208).
+
+The priority order of the optimization rules, as defined in the `optimize` method of the `QueryOptimizer` class, is as follows:
+
+1. **Predicate pushdown**: Filters are moved to be applied as early as possible (query_optimizer.py:1-208, line 46).
+2. **Projection pushdown**: Only necessary columns are selected (query_optimizer.py:1-208, line 49).
+3. **Constant folding**: Constant expressions are evaluated (query_optimizer.py:1-208, line 52).
+4. **Index selection**: The best index for the query is chosen (query_optimizer.py:1-208, line 55).
+5. **Join reordering**: Joins are reordered by cost (query_optimizer.py:1-208, line 59).
+
+Therefore, `PREDICATE_PUSHDOWN` is applied before `CONSTANT_FOLDING`. This means that any modifications made by predicate pushdown (e.g., reordering filters) will be present in the `QueryOperations` object when constant folding is subsequently applied (query_optimizer.py:1-208, lines 46-52). The code does not describe any explicit conflict detection or resolution mechanism beyond this sequential application.

@@ -223,6 +223,12 @@ def run_single_query(
         cmd.extend(["--intelligence-levels", args.intelligence_levels])
     if args.token_attribution:
         cmd.append("--token-attribution")
+    if args.reasoning_contracts:
+        cmd.append("--reasoning-contracts")
+    if args.assertion_readability:
+        cmd.append("--assertion-readability")
+    if args.reasoning_diagnostics:
+        cmd.append("--reasoning-diagnostics")
 
     completed = subprocess.run(
         cmd,
@@ -333,6 +339,18 @@ def main() -> None:
     parser.add_argument(
         "--token-attribution", action="store_true",
         help="Enable token attribution telemetry"
+    )
+    parser.add_argument(
+        "--reasoning-contracts", action="store_true",
+        help="Enable Phase-3A/3B reasoning contract enforcement"
+    )
+    parser.add_argument(
+        "--assertion-readability", action="store_true",
+        help="Enable assertion readability analysis"
+    )
+    parser.add_argument(
+        "--reasoning-diagnostics", action="store_true",
+        help="Enable reasoning diagnostics telemetry"
     )
 
     args = parser.parse_args()
