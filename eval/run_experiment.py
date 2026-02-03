@@ -229,6 +229,10 @@ def run_single_query(
         cmd.append("--assertion-readability")
     if args.reasoning_diagnostics:
         cmd.append("--reasoning-diagnostics")
+    if args.diagnostic_layers:
+        cmd.extend(["--diagnostic-layers", args.diagnostic_layers])
+    if args.context_diagnostics:
+        cmd.append("--context-diagnostics")
 
     completed = subprocess.run(
         cmd,
@@ -351,6 +355,14 @@ def main() -> None:
     parser.add_argument(
         "--reasoning-diagnostics", action="store_true",
         help="Enable reasoning diagnostics telemetry"
+    )
+    parser.add_argument(
+        "--diagnostic-layers", type=str, nargs="?", const="p1,p2,p3,p4", default=None,
+        help="Run P1-P4 diagnostic layers and save to diagnostics.json. Defaults to all layers (p1,p2,p3,p4) if no value specified. Can also pass subset: p1 or p1,p2"
+    )
+    parser.add_argument(
+        "--context-diagnostics", action="store_true",
+        help="Run L1/L2/L3 context diagnostics and save to context_diagnostics.json"
     )
 
     args = parser.parse_args()

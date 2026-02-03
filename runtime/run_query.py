@@ -329,6 +329,159 @@ class QueryTelemetry:
         print_telemetry("TELEMETRY", json_export=str(output_path))
 
 
+def _run_and_save_diagnostic_layers(
+    layers_arg: str,
+    query: str,
+    context_artifact,
+    embedder,
+    run_id: str,
+) -> None:
+    """
+    Run selected P1–P4 diagnostic layers (read-only) and save their output to a separate file.
+    layers_arg: comma-separated, e.g. 'p1,p2' or 'p1,p2,p3,p4'.
+    """
+    requested = [x.strip().lower() for x in layers_arg.split(",") if x.strip()]
+    if not requested:
+        return
+    allowed = {"p1", "p2", "p3", "p4"}
+    selected = [x for x in requested if x in allowed]
+    if not selected:
+        logger.warning("[DIAGNOSTIC_LAYERS] No valid layers in %r; allowed: p1,p2,p3,p4", layers_arg)
+        return
+
+    out = {}
+    p1_result = None
+
+    if "p1" in selected or "p2" in selected:
+        from homllm.sufficiency import run_sufficiency
+        p1_result = run_sufficiency(query, context_artifact, embedder)
+        if "p1" in selected:
+            out["p1"] = p1_result.to_dict()
+
+    if "p2" in selected and p1_result is not None:
+        from homllm.remediation import run_remediation_from_sufficiency
+        p2_result = run_remediation_from_sufficiency(p1_result, fragility_flag=False)
+        out["p2"] = p2_result.to_dict()
+
+    if "p3" in selected:
+        from homllm.instability import run_instability
+        from homllm.instability.interfaces import RunRecord
+        intent = getattr(p1_result, "intent", "UNKNOWN") if p1_result else "UNKNOWN"
+        verdict = getattr(p1_result, "final_verdict", "SUFFICIENT") if p1_result else "SUFFICIENT"
+        runs = (
+            RunRecord(
+                query=query,
+                intent=intent,
+                chunk_ids=tuple(b.block_id for b in context_artifact.blocks),
+                file_paths=tuple(b.file for b in context_artifact.blocks),
+                answer_text="",
+                final_verdict=verdict,
+                policy_influenced=False,
+            ),
+        )
+        p3_result = run_instability(runs, intent, reference_embedding=None)
+        out["p3"] = p3_result.to_dict()
+
+    if "p4" in selected:
+        from homllm.explanation_gap import run_explanation_gap
+        p4_result = run_explanation_gap(query, history_stats=None)
+        out["p4"] = p4_result.to_dict()
+
+    # Build final output with run metadata (matching telemetry.json structure)
+    final_output = {
+        "run_id": run_id,
+        "query": query,
+        "layers": out,
+    }
+
+    output_path = Path("artifacts") / "runs" / run_id / "diagnostics.json"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(final_output, f, indent=2, ensure_ascii=False)
+    print_telemetry("DIAGNOSTIC_LAYERS", saved=str(output_path), layers=",".join(selected))
+
+
+def _run_and_save_context_diagnostics(
+    context_artifact,
+    run_id: str,
+) -> None:
+    """
+    Run L1/L2/L3 context diagnostics (read-only) and save output to context_diagnostics.json.
+    
+    Uses diagnostics_runner.run_diagnostics() which analyzes:
+    - L1: Per-block diagnostics (token counts, quality signals)
+    - L2: Relational diagnostics (block similarity, redundancy, gaps)
+    - L3: Summary diagnostics (intent, roles, load, failure modes)
+    """
+    from dataclasses import asdict, is_dataclass
+    from homllm.intelligence.diagnostics_runner import run_diagnostics
+    
+    def safe_serialize(obj):
+        """Recursively convert dataclasses and handle non-JSON types."""
+        if obj is None:
+            return None
+        if is_dataclass(obj) and not isinstance(obj, type):
+            return {k: safe_serialize(v) for k, v in asdict(obj).items()}
+        if isinstance(obj, (list, tuple)):
+            return [safe_serialize(item) for item in obj]
+        if isinstance(obj, dict):
+            return {k: safe_serialize(v) for k, v in obj.items()}
+        if isinstance(obj, (str, int, float, bool)):
+            return obj
+        # Fallback: convert to string
+        return str(obj)
+    
+    try:
+        snapshot = run_diagnostics(context_artifact, force_run=True)
+        if snapshot is None:
+            logger.warning("[CONTEXT_DIAGNOSTICS] Diagnostics returned None")
+            return
+        
+        # Build output structure with safe serialization
+        output = {
+            "run_id": run_id,
+            "level1": {
+                "status": snapshot.level1.status,
+                "reason": snapshot.level1.reason,
+                "blocks": [
+                    {
+                        "block_id": b.block_id,
+                        "tokens": b.tokens,
+                        "noise_ratio": getattr(b, "noise_ratio", None),
+                        "structural_dominance": getattr(b, "structural_dominance", None),
+                    }
+                    for b in snapshot.level1.blocks
+                ] if snapshot.level1.blocks else [],
+                "result": safe_serialize(snapshot.level1.result) if snapshot.level1.result else None,
+            },
+            "level2": {
+                "status": snapshot.level2.status,
+                "reason": snapshot.level2.reason,
+                "result": safe_serialize(snapshot.level2.result) if snapshot.level2.result else None,
+            },
+            "level3": {
+                "status": snapshot.level3.status,
+                "reason": snapshot.level3.reason,
+                "result": safe_serialize(snapshot.level3.result) if snapshot.level3.result else None,
+            },
+        }
+        
+        output_path = Path("artifacts") / "runs" / run_id / "context_diagnostics.json"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(output, f, indent=2, ensure_ascii=False)
+        
+        print_telemetry(
+            "CONTEXT_DIAGNOSTICS",
+            saved=str(output_path),
+            l1_status=snapshot.level1.status,
+            l2_status=snapshot.level2.status,
+            l3_status=snapshot.level3.status,
+        )
+    except Exception as e:
+        logger.warning("[CONTEXT_DIAGNOSTICS] Failed: %s", e, exc_info=True)
+
+
 def main():
     """Main entrypoint."""
     parser = argparse.ArgumentParser(description="Run a query end-to-end")
@@ -352,6 +505,10 @@ def main():
                         help="Emit reasoning diagnostic telemetry")
     parser.add_argument("--reasoning-contracts", action="store_true",
                         help="Emit reasoning contract telemetry")
+    parser.add_argument("--diagnostic-layers", type=str, default=None,
+                        help="Comma-separated: p1,p2,p3,p4. Run P1–P4 diagnostic layers and save to a separate file (e.g. p1,p2 or p1,p2,p3,p4).")
+    parser.add_argument("--context-diagnostics", action="store_true",
+                        help="Run L1/L2/L3 context diagnostics (per-block, relational, summary) and save to context_diagnostics.json")
 
     args = parser.parse_args()
 
@@ -583,6 +740,23 @@ def main():
                 diff_entries=0,
                 context_tokens_before=tokens_before,
                 context_tokens_after=tokens_before,
+            )
+
+        # Optional: P1–P4 diagnostic layers (read-only; save to separate file for diagnostic visibility)
+        if getattr(args, "diagnostic_layers", None):
+            _run_and_save_diagnostic_layers(
+                args.diagnostic_layers,
+                args.query,
+                context_artifact,
+                embedder,
+                telemetry.run_id,
+            )
+
+        # Optional: L1/L2/L3 context diagnostics (read-only; save to separate file)
+        if getattr(args, "context_diagnostics", False):
+            _run_and_save_context_diagnostics(
+                context_artifact,
+                telemetry.run_id,
             )
 
         # Phase 4b: Build reasoning contracts (pre-generation)

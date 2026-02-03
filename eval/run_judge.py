@@ -1,4 +1,4 @@
-"""LLM-based judge for HOM-LLM delta evaluation.
+﻿"""LLM-based judge for HOM-LLM delta evaluation.
 
 Compares HOM-LLM answers to the fixed Cursor baseline and emits
 per-dimension ordinal scores plus natural-language explanations.
@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 
-# ─────────────────────────────── METRIC NAMES ───────────────────────────────
+# ------------------------------- METRIC NAMES -------------------------------
 METRIC_DISPLAY_NAMES = {
     "semantic_correctness": "Semantic Correctness",
     "factual_consistency": "Factual Consistency",
@@ -48,7 +48,7 @@ METRIC_ORDER = [
 ]
 
 
-# ─────────────────────────────── IO HELPERS ───────────────────────────────
+# ------------------------------- IO HELPERS -------------------------------
 def read_json(path: Path) -> Dict:
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
@@ -71,7 +71,7 @@ def write_jsonl(path: Path, records: List[Dict]) -> None:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
 
-# ─────────────────────────────── RATE LIMITER ───────────────────────────────
+# ------------------------------- RATE LIMITER -------------------------------
 class RateLimiter:
     """
     Token bucket rate limiter for controlling LLM API request rate.
@@ -134,7 +134,7 @@ class RateLimiter:
         return f"RateLimiter({status}, requests={self._request_count})"
 
 
-# ─────────────────────────────── CONFIG ───────────────────────────────
+# ------------------------------- CONFIG -------------------------------
 @dataclass
 class JudgeConfig:
     model: str
@@ -162,7 +162,7 @@ def load_judge_config(path: Path) -> JudgeConfig:
     )
 
 
-# ─────────────────────────────── PROMPT ───────────────────────────────
+# ------------------------------- PROMPT -------------------------------
 def build_prompt(baseline_answer: str, candidate_answer: str, query_text: str) -> List[Dict[str, str]]:
     system_msg = (
         "You are an impartial evaluator comparing two answers to the same query.\n"
@@ -202,7 +202,7 @@ def build_prompt(baseline_answer: str, candidate_answer: str, query_text: str) -
     ]
 
 
-# ─────────────────────────────── API CLIENTS ───────────────────────────────
+# ------------------------------- API CLIENTS -------------------------------
 def ensure_openai_client(cfg: JudgeConfig):
     try:
         from openai import OpenAI
@@ -282,7 +282,7 @@ def call_judge(client, cfg: JudgeConfig, messages: List[Dict[str, str]]) -> Dict
         return call_judge_openai(client, cfg, messages)
 
 
-# ─────────────────────────────── SCORE PROCESSING ───────────────────────────────
+# ------------------------------- SCORE PROCESSING -------------------------------
 def normalize_score(raw_score, is_baseline: bool = False) -> float:
     """Convert 1-5 score to 0-10 scale. Handle dict or scalar."""
     if isinstance(raw_score, dict):
@@ -331,7 +331,37 @@ def interpret_score_diff(candidate: float, baseline: float, metric: str) -> str:
         return "Critical failure"
 
 
-# ─────────────────────────────── OUTPUT FORMATTING ───────────────────────────────
+def compute_verdict_from_scores(scores: Dict) -> str:
+    """
+    Compute verdict from actual scores instead of trusting LLM's verdict.
+    
+    The LLM judge sometimes hallucinates the verdict field, saying "improved"
+    when scores clearly show the candidate performed worse. This function
+    computes the verdict based on the overall_quality score.
+    
+    Args:
+        scores: Dict of metric -> {baseline: int, candidate: int}
+    
+    Returns:
+        "improved", "regressed", or "equal"
+    """
+    overall = scores.get("overall_quality", {})
+    if isinstance(overall, dict):
+        baseline = overall.get("baseline", 3)
+        candidate = overall.get("candidate", 3)
+    else:
+        # Fallback if not a dict
+        return "equal"
+    
+    if candidate > baseline:
+        return "improved"
+    elif candidate < baseline:
+        return "regressed"
+    else:
+        return "equal"
+
+
+# ------------------------------- OUTPUT FORMATTING -------------------------------
 def print_header(run_id: str, date_str: str, model_name: str, total: int):
     print("\n" + "=" * 80)
     print("                    LLM Judge Evaluation Results")
@@ -360,10 +390,10 @@ def print_summary(records: List[Dict], run_id: str):
     win_rate = (improved / contested * 100) if contested else 0
 
     print()
-    print("─" * 22 + " SUMMARY " + "─" * 22)
-    print(f"✔ Improved : {improved:3d} ({improved_pct:5.1f}%)")
-    print(f"✗ Regressed: {regressed:3d} ({regressed_pct:5.1f}%)")
-    print(f"≈ Equal    : {equal:3d} ({equal_pct:5.1f}%)")
+    print("-" * 22 + " SUMMARY " + "-" * 22)
+    print(f"[+] Improved : {improved:3d} ({improved_pct:5.1f}%)")
+    print(f"[-] Regressed: {regressed:3d} ({regressed_pct:5.1f}%)")
+    print(f"[=] Equal    : {equal:3d} ({equal_pct:5.1f}%)")
     print()
 
     # Generate verdict
@@ -385,8 +415,8 @@ def print_summary(records: List[Dict], run_id: str):
         weaknesses = "Systematic issues causing regressions"
 
     print(f"Overall Verdict: {verdict}")
-    print(f"                  • {strengths}")
-    print(f"                  • {weaknesses}")
+    print(f"                  * {strengths}")
+    print(f"                  * {weaknesses}")
     print()
     print(f"Candidate Win Rate (Improved / (Improved + Regressed)): {win_rate:.1f}%")
 
@@ -395,7 +425,7 @@ def print_score_table(scores: Dict, run_id: str, header: bool = True):
     """Print formatted score comparison table."""
     if header:
         print()
-        print("─" * 27 + " SCORE COMPARISON (0–10) " + "─" * 27)
+        print("-" * 27 + " SCORE COMPARISON (0-10) " + "-" * 27)
         print(f"{'Metric':<24} | {'HOM-LLM(v2.0)':<14} | {'Cursor Baseline':<15} | {'Interpretation':<20}")
         print("-" * 24 + "-+-" + "-" * 14 + "-+-" + "-" * 15 + "-+-" + "-" * 20)
 
@@ -416,7 +446,7 @@ def print_query_detail(record: Dict, run_id: str):
     explanation = record.get("explanation", "N/A")
     key_diffs = record.get("key_differences", [])
 
-    verdict_icon = "✔" if verdict == "improved" else "✗" if verdict == "regressed" else "≈"
+    verdict_icon = "[+]" if verdict == "improved" else "[-]" if verdict == "regressed" else "[=]"
     print()
     print(f"Query {qid} {verdict_icon} {verdict.upper()}")
     
@@ -431,13 +461,13 @@ def print_query_detail(record: Dict, run_id: str):
         print("Key Differences:")
         for diff in key_diffs:
             if isinstance(diff, str):
-                print(f"  • {diff}")
+                print(f"  * {diff}")
 
 
 def print_average_scores(records: List[Dict], run_id: str):
     """Print overall average scores across all queries."""
     print()
-    print("─" * 20 + " OVERALL AVERAGE SCORES (0–10) " + "─" * 20)
+    print("-" * 20 + " OVERALL AVERAGE SCORES (0-10) " + "-" * 20)
     print(f"{'Metric':<24} | {'HOM-LLM(v2.0)':<14} | {'Cursor Baseline':<15} | {'Interpretation':<20}")
     print("-" * 24 + "-+-" + "-" * 14 + "-+-" + "-" * 15 + "-+-" + "-" * 20)
 
@@ -503,7 +533,7 @@ def print_final_summary(records: List[Dict]):
     print(f"  {summary}")
 
 
-# ─────────────────────────────── MAIN ───────────────────────────────
+# ------------------------------- MAIN -------------------------------
 def main() -> None:
     parser = argparse.ArgumentParser(description="LLM judge for HOM-LLM vs Cursor baseline.")
     parser.add_argument("--responses", type=Path, required=True, help="Path to responses JSONL from run_experiment")
@@ -573,8 +603,17 @@ def main() -> None:
                     print(f"(waited {wait_time:.1f}s) ", end="", flush=True)
             
             judged = call_judge(client, cfg, messages)
-            verdict = judged.get("verdict", "unknown")
-            print(f"{'✔' if verdict == 'improved' else '✗' if verdict == 'regressed' else '≈'} {verdict}")
+            # IMPORTANT: Compute verdict from scores, not LLM's verdict field.
+            # The LLM sometimes hallucinates the verdict, saying "improved" when
+            # the scores clearly show the candidate performed worse.
+            scores = judged.get("scores", {})
+            verdict = compute_verdict_from_scores(scores)
+            llm_verdict = judged.get("verdict", "unknown")
+            if verdict != llm_verdict:
+                # Log when we override the LLM's verdict
+                sys.stderr.write(f"[WARN] Query {qid}: LLM said '{llm_verdict}' but scores show '{verdict}'\n")
+            verdict_symbol = '[+]' if verdict == 'improved' else '[-]' if verdict == 'regressed' else '[=]'
+            print(f"{verdict_symbol} {verdict}")
         except Exception as exc:
             sys.stderr.write(f"ERROR: {exc}\n")
             continue
@@ -586,8 +625,9 @@ def main() -> None:
             "candidate_provider": resp.get("provider"),
             "baseline_system": baseline_payload.get("metadata", {}).get("system", "Cursor"),
             "judge_model": cfg.model,
-            "scores": judged.get("scores", {}),
-            "verdict": judged.get("verdict"),
+            "scores": scores,
+            "verdict": verdict,  # Use computed verdict, not LLM's
+            "llm_verdict": llm_verdict,  # Store LLM's original verdict for audit
             "explanation": judged.get("explanation"),
             "key_differences": judged.get("key_differences"),
             "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
@@ -602,7 +642,7 @@ def main() -> None:
     # Format date
     date_str = datetime.now().strftime("%B %d, %Y")
 
-    # ══════════════════════ PRINT FULL REPORT ══════════════════════
+    # ====================== PRINT FULL REPORT ======================
     print_header(run_id, date_str, model_name, len(records))
     print_summary(records, run_id)
 
@@ -615,23 +655,23 @@ def main() -> None:
     if regressed:
         print()
         print()
-        print("─" * 18 + " DETAILED PER-QUERY RESULTS " + "─" * 18)
+        print("-" * 18 + " DETAILED PER-QUERY RESULTS " + "-" * 18)
         print()
-        print("═══ CRITICAL REGRESSIONS (Review First) ═══")
+        print("=== CRITICAL REGRESSIONS (Review First) ===")
         for r in regressed:
             print_query_detail(r, run_id)
 
     # Then improvements
     if improved:
         print()
-        print("═══ IMPROVEMENTS ═══")
+        print("=== IMPROVEMENTS ===")
         for r in improved:
             print_query_detail(r, run_id)
 
     # Equal last (optional)
     if equal:
         print()
-        print("═══ EQUAL ═══")
+        print("=== EQUAL ===")
         for r in equal:
             print_query_detail(r, run_id)
 
@@ -643,10 +683,12 @@ def main() -> None:
 
     # Footer
     print()
-    print("═" * 80)
+    print("=" * 80)
     print(f"Judgment results saved to: {output_path}")
     print("=" * 80)
 
 
 if __name__ == "__main__":
     main()
+
+
