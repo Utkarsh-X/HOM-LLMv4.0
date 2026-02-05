@@ -1,0 +1,51 @@
+QUERY_ID   : 16
+RUN_ID     : 066e4ded-6d56-472d-a0d4-1ac1fc88b2f5
+MODEL      : gemini-2.5-flash
+PROVIDER   : gemini
+STATUS     : OK
+--- ANSWER ---
+The provided code context does not contain a class or component explicitly named `BatchProcessor`. Therefore, I cannot describe how `BatchProcessor` handles partial failures or implements at-least-once semantics.
+
+However, the `DocumentIndexer` class, which processes files in a directory (a batch-like operation), exhibits some behaviors related to partial failures and processing semantics. I will describe these behaviors as they are the closest relevant functionality in the provided context.
+
+### 1. Overview
+
+The `DocumentIndexer` is designed to index multiple files, often from a directory. It processes files individually and includes mechanisms to handle errors during the indexing of a single file, allowing the overall directory indexing process to continue. It also employs caching and hash-based change detection to avoid re-processing unchanged files.
+
+### 2. Key Flow
+
+**Handling Partial Failures (within `DocumentIndexer.index_directory`):**
+
+1. **Iteration:** The `index_directory` method (lines 209-227) iterates through all files found in a given directory using `os.walk`.
+2. **Individual File Processing:** For each supported file, it calls `self.index_file(file_path)` (line 219).
+3. **Exception Handling:** The call to `index_file` is wrapped in a `try...except` block (lines 218-225) within `index_directory`.
+* Specific exceptions like `BinaryFileError` and `EmbeddingGenerationError` are caught, and the loop `continue`s to the next file (lines 220-222). This means these files are skipped without halting the entire directory indexing.
+* A general `Exception` is also caught, and the loop `continue`s (lines 223-225). This ensures that any unexpected error during a single file's indexing does not stop the processing of the remaining files in the directory.
+4. **Failure Logging (within `DocumentIndexer.index_file`):** If `index_file` encounters an `Exception` (other than `BinaryFileError` or `EmbeddingGenerationError` which are re-raised and then caught by `index_directory`), it logs the error and stores the file path and error message in `self._failed_files` (lines 199-201).
+
+**Implementing Processing Semantics (within `DocumentIndexer.index_file`):**
+
+The `DocumentIndexer` implements a form of idempotency for *unchanged* files, which contributes to efficient processing but is distinct from "at-least-once" for *failed* items.
+
+1. **Change Detection:** Before processing a file, `index_file` computes its SHA256 hash using `_compute_file_hash` (line 150).
+2. **Cache Check:** If caching is enabled (`self.enable_caching`) and the file path exists in `self._file_hashes` (which stores hashes of previously indexed files), it compares the `current_hash` with the cached hash (lines 151-153).
+3. **Skipping Unchanged Files:** If the hashes match, indicating the file has not changed since the last indexing, a debug message is logged, and the method returns `True` (line 154), effectively skipping re-indexing the file. This ensures that unchanged files are processed "at-most-once" or "exactly-once" (if considering successful processing).
+4. **Caching on Success:** Upon successful indexing, the file's current hash is stored in `self._file_hashes` (line 190), and its embedding is stored in `self._embedding_cache` (line 189), enabling future change detection and avoiding re-computation.
+
+### 3. Assumptions
+
+* The query's reference to "BatchProcessor" is a conceptual one, and `DocumentIndexer`'s `index_directory` method is the intended target for analysis, as it processes multiple items (files) in a batch-like manner.
+* The `_failed_files` dictionary is used to record files that failed indexing during a run, but there is no explicit mechanism shown for automatically retrying these files within the current `index_directory` call.
+
+### 4. Outcomes & Edge Cases
+
+* **Partial Failures:** When indexing a directory, if some files fail due to specific errors (e.g., binary files, embedding generation issues) or general exceptions, the `DocumentIndexer` will continue attempting to index other files in the directory.
+* **Failed File Tracking:** Files that cause an `Exception` during `index_file` are recorded in `self._failed_files`, providing a record of what could not be indexed.
+* **Idempotent Processing for Unchanged Files:** Files that have been successfully indexed previously and whose content (as determined by hash) has not changed will be skipped, preventing redundant work.
+* **No Automatic Retries for Failed Files:** The current implementation does not show any mechanism for automatically retrying files that failed during an `index_directory` run. They are simply skipped, and their failure is logged.
+
+### 5. Limitations
+
+* **Absence of `BatchProcessor`:** The primary limitation is the complete absence of a `BatchProcessor` class in the provided context, making a direct answer to the query impossible.
+* **No Explicit At-Least-Once for Failures:** While the `DocumentIndexer` ensures that *unchanged* files are not re-processed (idempotency), it does not implement explicit retry logic for files that *fail* to be indexed. If a file fails, it is logged and skipped, meaning it is processed "at-most-once" in that specific run, not "at-least-once" until success. To achieve "at-least-once" for failures, an external retry mechanism or a subsequent run targeting `_failed_files` would be required.
+* **Limited Error Handling in `index_directory`:** The `index_directory` method catches all exceptions from `index_file` and simply `continue`s. While this prevents the entire batch from stopping, it doesn't differentiate between transient and permanent errors, nor does it implement backoff or retry strategies.

@@ -1,0 +1,21 @@
+QUERY_ID   : 03
+RUN_ID     : 75919868-bf97-4610-a4e2-68e2b519793c
+MODEL      : gemini-2.5-flash
+PROVIDER   : gemini
+STATUS     : OK
+--- ANSWER ---
+## Component Interactions
+The query optimizer, through its `optimize` method, processes a `QueryOperations` object by applying a sequence of optimization rules. The `_apply_predicate_pushdown` and `_apply_constant_folding` methods interact by sequentially modifying the `filters` attribute of the `QueryOperations` object. The output of one optimization step serves as the input for the next. Specifically, `_apply_predicate_pushdown` reorders the filters within the `QueryOperations` object based on estimated selectivity (lines 116-120, `query_optimizer.py`). Subsequently, `_apply_constant_folding` then processes these potentially reordered filters, evaluating constant expressions and simplifying them (lines 139-148, `query_optimizer.py`). This fixed order of application dictates their interaction and conflict resolution.
+
+## Execution Trace
+The `optimize` method (Symbol: 65 in `query_optimizer.py`) defines the explicit priority order and execution flow for the optimization rules:
+
+1. **Initialization**: The `optimize` method receives a `QueryOperations` object as input, which is initially assigned to the `optimized` variable (lines 3, 10, `query_optimizer.py`).
+2. **Rule 1: Predicate Pushdown**: The `_apply_predicate_pushdown` method is invoked first. It takes the current `optimized` `QueryOperations` object, reorders its `filters` by selectivity (most selective first), and returns the modified object. This modified object then updates the `optimized` variable (line 13, `query_optimizer.py`).
+3. **Rule 2: Projection Pushdown**: The `_apply_projection_pushdown` method is called next, operating on the `QueryOperations` object that has already undergone predicate pushdown (line 16, `query_optimizer.py`).
+4. **Rule 3: Constant Folding**: Finally, the `_apply_constant_folding` method is executed. It receives the `QueryOperations` object that has been processed by both predicate pushdown and projection pushdown. This method iterates through the `filters` (which are already reordered by predicate pushdown), checks if each filter is a constant expression using `_is_constant_expression`, and if so, evaluates it using `_evaluate_constant`. Filters that evaluate to true are kept, effectively simplifying the filter list (lines 19, 139-148, `query_optimizer.py`).
+
+The priority order is strictly sequential: `PREDICATE_PUSHDOWN` -> `PROJECTION_PUSHDOWN` -> `CONSTANT_FOLDING`.
+
+## Summary
+The query optimizer resolves conflicts between `PREDICATE_PUSHDOWN` and `CONSTANT_FOLDING` by applying them in a fixed, sequential order. `PREDICATE_PUSHDOWN` is applied first, followed by `PROJECTION_PUSHDOWN`, and then `CONSTANT_FOLDING`. This means that `CONSTANT_FOLDING` operates on the `QueryOperations` object *after* `PREDICATE_PUSHDOWN` has already reordered its filters. The priority order of the optimization rules, as explicitly defined in the `optimize` method, is: 1. Predicate Pushdown, 2. Projection Pushdown, 3. Constant Folding, 4. Index Selection, and 5. Join Reordering.

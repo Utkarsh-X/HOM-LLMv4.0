@@ -1,0 +1,31 @@
+QUERY_ID   : 05
+RUN_ID     : 265373cf-e5a8-4df7-b4fb-832a3fa2f566
+MODEL      : gemini-2.5-flash
+PROVIDER   : gemini
+STATUS     : OK
+--- ANSWER ---
+## Enumerated Components
+* **`QueryPlanner`**: A class responsible for managing query plans, which includes an internal caching mechanism.
+* **`QueryPlanner.plan_cache`**: An in-memory dictionary (`Dict[str, QueryPlan]`) within the `QueryPlanner` instance. This serves as a cache for storing and retrieving `QueryPlan` objects based on a string key.
+* **`QueryPlanner.plan_stats`**: A dictionary within `QueryPlanner` that tracks statistics related to query plan generation and caching, specifically `plans_generated`, `cache_hits`, and `cache_misses`.
+
+## Component Interactions
+The provided context describes a single-level, in-memory caching mechanism within the `QueryPlanner` class.
+
+1. **Initialization**: When a `QueryPlanner` object is created, it initializes `self.enable_caching` (defaulting to `True`), an empty `self.plan_cache` dictionary, and `self.plan_stats` counters (lines 3-8, file `query_planner.py`).
+2. **Cache Lookup (Hit/Miss)**: When the `QueryPlanner` needs a `QueryPlan`, it would first check if the plan exists in its `self.plan_cache`.
+* **Cache Hit**: If the plan is found in `self.plan_cache`, it is retrieved directly from memory. The `self.plan_stats["cache_hits"]` counter is incremented.
+* **Cache Miss**: If the plan is not found in `self.plan_cache`, this constitutes a cache miss. The `self.plan_stats["cache_misses"]` counter is incremented. The `QueryPlanner` would then proceed to generate the required `QueryPlan` (which is not detailed in the provided context). Once generated, the new plan would be stored in `self.plan_cache` for subsequent requests, and `self.plan_stats["plans_generated"]` would be incremented.
+
+The provided code excerpts **do not contain any information or implementation details** regarding an L2 Redis cache, an L3 database cache, or any interactions between such multi-level caching layers. While `search_endpoint` and `admin_search_endpoint` functions mention "Mock candidate results (in production, would query database)" (e.g., lines 29-30, file `routes.py`), this only implies the conceptual existence of a database backend without detailing its caching mechanisms or how it interacts with other cache layers.
+
+## Summary
+Based on the provided context, the system implements a basic in-memory cache (`QueryPlanner.plan_cache`) for `QueryPlan` objects, which can be considered an L1 memory cache. This cache tracks hits and misses.
+
+However, the context **does not provide any evidence or code** to describe:
+* The existence or implementation of an L2 Redis cache.
+* The existence or implementation of an L3 database cache.
+* What specific actions occur when all three (L1 memory, L2 Redis, and L3 database) caches miss, as only the L1 memory cache is present.
+* Any mechanisms for cache promotion (i.e., how data might be moved from a lower-level cache to a higher-level cache upon a miss).
+
+Therefore, a complete explanation of what happens when L1 memory, L2 Redis, and L3 database caches all miss, and how cache promotion works across these layers, cannot be provided using only the given code excerpts.

@@ -393,7 +393,7 @@ def main() -> None:
         write_jsonl(responses_path, [response])
         persist_answer_txt(response, response.get("answer_text", ""), run_dir)
 
-        status_icon = "✔" if response.get("status", "").upper() == "OK" else "⚠"
+        status_icon = "[OK]" if response.get("status", "").upper() == "OK" else "[!!]"
         print(f"[RUN {idx}/{total}] Query {query.query_id:02d} {status_icon} {response.get('status', 'DONE')}")
 
     print(f"Saved responses to: {responses_path}")

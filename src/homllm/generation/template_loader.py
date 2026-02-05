@@ -8,6 +8,9 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
+# ABRM template name (Plan C)
+ABRM_TEMPLATE_NAME = "abrm_explain"
+
 
 class TemplateLoader:
     """Loads and manages prompt templates."""
@@ -52,6 +55,34 @@ class TemplateLoader:
             logger.error(f"Failed to load template {name}: {e}")
             return None
 
+    def select_template(
+        self,
+        base_template: str,
+        abrm_active: bool = False,
+    ) -> str:
+        """
+        Select appropriate template based on ABRM state.
+        
+        Plan C: ABRM (Assumption-Bound Reasoning Mode) template selection.
+        
+        Args:
+            base_template: Default template name (e.g., "explain")
+            abrm_active: Whether ABRM is activated
+        
+        Returns:
+            Template name to use
+        """
+        if abrm_active:
+            # Check if ABRM template exists
+            abrm_path = self.templates_dir / f"{ABRM_TEMPLATE_NAME}.yaml"
+            if abrm_path.exists():
+                logger.info(f"ABRM activated: using template {ABRM_TEMPLATE_NAME}")
+                return ABRM_TEMPLATE_NAME
+            else:
+                logger.warning(f"ABRM template not found: {ABRM_TEMPLATE_NAME}, using base")
+        
+        return base_template
+
     def render(self, template_name: str, variables: dict) -> str:
         """
         Render template with variables.
@@ -68,12 +99,65 @@ class TemplateLoader:
             # Fallback to simple template
             template = "{query}\n\n{context}"
 
-        # Simple variable substitution
+        # Merge template-defined sections (e.g., instruction, structure) into variables
+        template_data = self._templates.get(template_name, {})
+        merged_variables = dict(variables)
+        for key in ("instruction", "query_header", "context_header", "provenance_header", "structure", "task"):
+            if key in template_data and key not in merged_variables:
+                merged_variables[key] = template_data.get(key, "")
+
+        # Expand nested placeholders inside section fields (e.g., query_header contains {query})
+        class _SafeDict(dict):
+            def __missing__(self, key):
+                return ""
+
+        for key in ("instruction", "query_header", "context_header", "provenance_header", "structure", "task"):
+            value = merged_variables.get(key)
+            if isinstance(value, str):
+                merged_variables[key] = value.format_map(_SafeDict(merged_variables))
+
+        # Simple variable substitution with safe fallback for missing keys
         try:
-            return template.format(**variables)
+            rendered = template.format(**merged_variables)
         except KeyError as e:
             logger.warning(f"Missing template variable: {e}")
-            # Fill missing variables with empty string
-            for key in variables:
-                template = template.replace(f"{{{key}}}", str(variables.get(key, "")))
-            return template
+            rendered = template.format_map(_SafeDict(merged_variables))
+
+        # Debug excerpt for prompt rendering
+        excerpt = rendered[:200].replace("\n", " ")
+        logger.info("PROMPT_RENDER excerpt=%s", excerpt)
+        return rendered
+
+    def render_with_abrm(
+        self,
+        base_template: str,
+        variables: dict,
+        abrm_active: bool = False,
+        mechanical_fix_notice: str = "",
+    ) -> str:
+        """
+        Render template with ABRM support.
+        
+        Plan C: Convenience method that handles ABRM template selection
+        and injects mechanical fix notice.
+        
+        Args:
+            base_template: Default template name
+            variables: Template variables
+            abrm_active: Whether ABRM is activated
+            mechanical_fix_notice: Provenance priming notice from mechanical fixer
+        
+        Returns:
+            Rendered template string
+        """
+        # Select appropriate template
+        template_name = self.select_template(base_template, abrm_active)
+        
+        # Add mechanical fix notice to variables
+        full_variables = {
+            **variables,
+            "mechanical_fix_notice": mechanical_fix_notice,
+        }
+        
+        return self.render(template_name, full_variables)
+

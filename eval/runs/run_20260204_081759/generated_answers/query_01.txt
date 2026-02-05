@@ -1,0 +1,23 @@
+QUERY_ID   : 01
+RUN_ID     : 5f4e68d8-cdcc-4e6f-a0fd-c4bd037e5648
+MODEL      : gemini-2.5-flash
+PROVIDER   : gemini
+STATUS     : OK
+--- ANSWER ---
+{instruction}
+Please analyze the provided text about the benefits of remote work and summarize its key advantages.
+
+{query_header}
+Based on the context, what are the main benefits of adopting a remote work model for employees and companies?
+
+{provenance_header}
+AI internal knowledge and provided context.
+
+{context_header}
+"Remote work has rapidly gained traction globally, offering a multitude of advantages for both employees and organizations. For employees, it often translates to increased flexibility, allowing for a better work-life balance and reduced commuting stress and costs. This flexibility can lead to higher job satisfaction and improved mental well-being. From a company's perspective, remote work can significantly lower operational overheads, such as office rent and utilities. It also broadens the talent pool, enabling companies to hire the best candidates regardless of geographical location. Furthermore, studies suggest that remote employees can be more productive due to fewer interruptions and a personalized work environment, contributing to overall business efficiency and resilience."
+
+{structure}
+Present the answer as a list of four distinct bullet points, clearly separating benefits for employees and companies.
+
+{task}
+Extract and list the primary benefits of remote work for both employees and companies from the given text.

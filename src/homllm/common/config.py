@@ -18,6 +18,32 @@ class StorageConfig:
     artifacts_path: Path
 
 
+# =============================================================================
+# Entity-Centric Indexing Config (Plan A)
+# =============================================================================
+
+
+@dataclass
+class EntityConfidenceConfig:
+    """Configuration for deterministic entity confidence scoring."""
+
+    public_name_bonus: float = 0.3
+    docstring_bonus: float = 0.4
+    exported_bonus: float = 0.2
+    type_annotated_bonus: float = 0.1
+    cap_at: float = 1.0
+
+
+@dataclass
+class HierarchicalChunkingConfig:
+    """Configuration for 3-level hierarchical chunking."""
+
+    enabled: bool = True
+    fine_enabled: bool = True       # Symbol-level
+    medium_enabled: bool = True     # File sections
+    coarse_enabled: bool = True     # File-level
+
+
 @dataclass
 class IndexerConfig:
     """Indexer layer configuration."""
@@ -28,6 +54,17 @@ class IndexerConfig:
     storage: StorageConfig
     embedding_model: str = "Qwen/Qwen3-Embedding-0.6B"
     embedding_dimension: int = 1024
+    # Entity-centric indexing (Plan A)
+    entity_centric_indexing_enabled: bool = True
+    type_alias_extraction_enabled: bool = False  # Disabled by default
+    entity_confidence: EntityConfidenceConfig = None
+    hierarchical_chunking: HierarchicalChunkingConfig = None
+
+    def __post_init__(self):
+        if self.entity_confidence is None:
+            self.entity_confidence = EntityConfidenceConfig()
+        if self.hierarchical_chunking is None:
+            self.hierarchical_chunking = HierarchicalChunkingConfig()
 
 
 @dataclass
@@ -67,6 +104,26 @@ class Config(BaseModel):
             lancedb_path=Path(idx_cfg["storage"]["lancedb_path"]),
             artifacts_path=Path(idx_cfg["storage"]["artifacts_path"]),
         )
+        
+        # Parse entity confidence config
+        confidence_cfg = idx_cfg.get("entity_confidence", {})
+        entity_confidence = EntityConfidenceConfig(
+            public_name_bonus=confidence_cfg.get("public_name_bonus", 0.3),
+            docstring_bonus=confidence_cfg.get("docstring_bonus", 0.4),
+            exported_bonus=confidence_cfg.get("exported_bonus", 0.2),
+            type_annotated_bonus=confidence_cfg.get("type_annotated_bonus", 0.1),
+            cap_at=confidence_cfg.get("cap_at", 1.0),
+        )
+        
+        # Parse hierarchical chunking config
+        chunking_cfg = idx_cfg.get("hierarchical_chunking", {})
+        hierarchical_chunking = HierarchicalChunkingConfig(
+            enabled=chunking_cfg.get("enabled", True),
+            fine_enabled=chunking_cfg.get("fine_enabled", True),
+            medium_enabled=chunking_cfg.get("medium_enabled", True),
+            coarse_enabled=chunking_cfg.get("coarse_enabled", True),
+        )
+        
         return IndexerConfig(
             languages=idx_cfg["languages"],
             ignore_patterns=idx_cfg["ignore_patterns"],
@@ -74,6 +131,10 @@ class Config(BaseModel):
             storage=storage_cfg,
             embedding_model=idx_cfg.get("embedding_model", "Qwen/Qwen3-Embedding-0.6B"),
             embedding_dimension=idx_cfg.get("embedding_dimension", 1024),
+            entity_centric_indexing_enabled=idx_cfg.get("entity_centric_indexing_enabled", True),
+            type_alias_extraction_enabled=idx_cfg.get("type_alias_extraction_enabled", False),
+            entity_confidence=entity_confidence,
+            hierarchical_chunking=hierarchical_chunking,
         )
 
     def get_retrieval_config(self) -> "RetrievalConfig":
@@ -83,8 +144,14 @@ class Config(BaseModel):
         ret_cfg = self.retrieval
         hybrid_cfg = ret_cfg.get("hybrid", {})
         expansion_cfg = ret_cfg.get("expansion", {})
+        
+        # Plan B config sections
+        diversity_mmr_cfg = ret_cfg.get("diversity_mmr", {})
+        granularity_boost_cfg = ret_cfg.get("granularity_boost", {})
+        graph_stitch_cfg = ret_cfg.get("graph_stitch", {})
 
         return RetrievalConfig(
+            # Core retrieval settings
             bm25_top_k=ret_cfg.get("bm25", {}).get("top_k", 50),
             vector_top_k=ret_cfg.get("vector", {}).get("top_k", 50),
             hybrid_method=hybrid_cfg.get("method", "rrf"),
@@ -94,7 +161,39 @@ class Config(BaseModel):
             expansion_enabled=expansion_cfg.get("enabled", True),
             expansion_max_additions=expansion_cfg.get("max_additions", 4),
             expansion_min_similarity=expansion_cfg.get("min_similarity", 0.25),
+            
+            # Plan B: Retrieval Layer Activation
+            plan_b_enabled=ret_cfg.get("plan_b_enabled", True),
+            
+            # Diversity-aware MMR
+            diversity_mmr_enabled=diversity_mmr_cfg.get("enabled", True),
+            mmr_lambda=diversity_mmr_cfg.get("lambda", 0.6),
+            mmr_similarity_threshold=diversity_mmr_cfg.get("similarity_threshold", 0.85),
+            
+            # Granularity boosting
+            granularity_boost_enabled=granularity_boost_cfg.get("enabled", True),
+            granularity_boost_table=self._parse_granularity_boost_table(granularity_boost_cfg),
+            
+            # Graph stitch
+            graph_stitch_enabled=graph_stitch_cfg.get("enabled", True),
+            graph_stitch_max_depth=graph_stitch_cfg.get("max_depth", 2),
+            graph_stitch_max_additions=graph_stitch_cfg.get("max_additions", 8),
+            graph_stitch_min_confidence=graph_stitch_cfg.get("min_confidence", 0.5),
+            graph_stitch_relation_priority=graph_stitch_cfg.get(
+                "relation_priority",
+                ["calls", "overrides", "imports", "uses", "inherits", "type_annotates"]
+            ),
         )
+    
+    def _parse_granularity_boost_table(self, cfg: dict) -> dict:
+        """Parse granularity boost table from config."""
+        # Extract intent-specific boost tables
+        # Keys must match Intent enum: EXPLAIN, IMPLEMENT, REFACTOR, DEBUG, SEARCH, UNKNOWN
+        table = {}
+        for intent in ["EXPLAIN", "IMPLEMENT", "REFACTOR", "DEBUG", "SEARCH", "UNKNOWN"]:
+            if intent in cfg:
+                table[intent] = cfg[intent]
+        return table  # Empty dict triggers defaults in RetrievalConfig.__post_init__
 
     def get_ranking_config(self) -> "RankConfig":
         """Extract RankConfig from root config."""

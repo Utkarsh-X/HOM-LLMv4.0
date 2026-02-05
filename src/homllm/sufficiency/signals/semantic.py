@@ -79,6 +79,6 @@ def compute_semantic_signal(
     score = 0.7 * sim_norm + 0.3 * min(1.0, diversity)
     score = max(0.0, min(1.0, score))
 
-    # Deterministic threshold (no learning)
-    label: LabelType = "SUFFICIENT" if score >= 0.5 else "INSUFFICIENT"
+    # Deterministic threshold (no learning) - raised to 0.80 to reduce false positives
+    label: LabelType = "SUFFICIENT" if score >= 0.80 else "INSUFFICIENT"
     return SignalResult(score=score, label=label)

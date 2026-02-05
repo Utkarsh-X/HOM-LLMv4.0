@@ -1,0 +1,39 @@
+QUERY_ID   : 03
+RUN_ID     : 9251b849-8705-4160-96af-7f9f6452f6d7
+MODEL      : gemini-2.5-flash
+PROVIDER   : gemini
+STATUS     : OK
+--- ANSWER ---
+## Component Interactions
+
+The `QueryOptimizer` resolves interactions between `PREDICATE_PUSHDOWN` and `CONSTANT_FOLDING` rules by applying them sequentially in a predefined order. The `_apply_predicate_pushdown` method is executed first, followed by `_apply_constant_folding` (query_optimizer.py:1-50, query_optimizer.py:1-208).
+
+1. **Predicate Pushdown (`_apply_predicate_pushdown`)**: This rule reorders the `QueryFilter` objects within the `QueryOperations.filters` list based on their estimated selectivity, moving the most selective filters to be processed earlier (query_optimizer.py:1-9, query_optimizer.py:1-208). It uses the `_estimate_selectivity` method to determine the order (query_optimizer.py:1-11, query_optimizer.py:1-208).
+2. **Constant Folding (`_apply_constant_folding`)**: After predicate pushdown has potentially reordered the filters, this rule iterates through the `QueryOperations.filters`. For each filter, it checks if it's a constant expression using `_is_constant_expression` (query_optimizer.py:1-3, query_optimizer.py:1-208). If it is, it evaluates the constant expression using `_evaluate_constant` (query_optimizer.py:1-11, query_optimizer.py:1-208). Filters that evaluate to `True` (or are not constant expressions) are retained in the `simplified_filters` list, effectively removing constant expressions that evaluate to `False` (query_optimizer.py:1-14, query_optimizer.py:1-208).
+
+The interaction is such that `PREDICATE_PUSHDOWN` first optimizes the order of filters, and then `CONSTANT_FOLDING` simplifies or removes filters based on their constant values from this reordered list. There is no explicit conflict resolution logic described beyond this sequential application; the output of `PREDICATE_PUSHDOWN` serves as the input for subsequent rules, including `CONSTANT_FOLDING`.
+
+## Execution Trace
+
+The `QueryOptimizer.optimize` method defines the explicit execution order of the optimization rules (query_optimizer.py:1-50, query_optimizer.py:1-208):
+
+1. **Initialization**: The `optimize` method starts by recording the `start_time` and increments `total_queries` in `optimization_stats` (query_optimizer.py:1-50, query_optimizer.py:1-208).
+2. **Rule 1: Predicate Pushdown**: `_apply_predicate_pushdown(optimized)` is called. This reorders filters by selectivity (query_optimizer.py:1-50, query_optimizer.py:1-208).
+3. **Rule 2: Projection Pushdown**: `_apply_projection_pushdown(optimized)` is called. This selects only needed columns (query_optimizer.py:1-50, query_optimizer.py:1-208).
+4. **Rule 3: Constant Folding**: `_apply_constant_folding(optimized)` is called. This evaluates constant expressions in filters (query_optimizer.py:1-50, query_optimizer.py:1-208).
+5. **Rule 4: Index Selection**: `_apply_index_selection(optimized)` is called. This selects the best index for the query (query_optimizer.py:1-50, query_optimizer.py:1-208).
+6. **Rule 5: Join Reordering**: If `optimized.joins` exist, `_apply_join_reordering(optimized)` is called. This reorders joins by cost (query_optimizer.py:1-50, query_optimizer.py:1-208).
+7. **Cost Estimation**: `_estimate_cost(optimized)` is called to calculate the estimated execution cost of the optimized query (query_optimizer.py:1-50, query_optimizer.py:1-208).
+8. **Finalization**: The `optimization_time` is calculated, `optimization_time_ms` is updated, and `optimized_queries` is incremented if the `estimated_cost` is not infinite (query_optimizer.py:1-50, query_optimizer.py:1-208).
+9. **Return Value**: An `OptimizedQuery` object is returned, containing the original and optimized operations, estimated cost, index used, and optimization time (query_optimizer.py:1-50, query_optimizer.py:1-208).
+
+## Summary
+
+The `QueryOptimizer` resolves interactions between `PREDICATE_PUSHDOWN` and `CONSTANT_FOLDING` by applying them sequentially. `PREDICATE_PUSHDOWN` (Rule 1) is applied first to reorder filters based on selectivity, making the most selective filters appear earlier in the query plan (query_optimizer.py:1-9, query_optimizer.py:1-208). Subsequently, `CONSTANT_FOLDING` (Rule 3) is applied to the filters, which evaluates constant expressions and removes those that resolve to `False` (query_optimizer.py:1-14, query_optimizer.py:1-208). This means `CONSTANT_FOLDING` operates on the filter list that has already been reordered by `PREDICATE_PUSHDOWN`.
+
+The priority order of the optimization rules, as defined in the `QueryOptimizer.optimize` method, is as follows (query_optimizer.py:1-50, query_optimizer.py:1-208):
+1. **Predicate Pushdown**: Filter as early as possible.
+2. **Projection Pushdown**: Select only needed columns.
+3. **Constant Folding**: Evaluate constant expressions.
+4. **Index Selection**: Choose the best index.
+5. **Join Reordering**: Reorder joins by cost (if joins are present).

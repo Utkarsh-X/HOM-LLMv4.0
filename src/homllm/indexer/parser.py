@@ -95,6 +95,7 @@ class TreeSitterParser(CodeParser):
                 symbols=symbols,
                 content=content,
                 parse_error=False,
+                tree=tree,  # Plan A: Include tree for entity extraction
             )
         except Exception as e:
             logger.error(f"Parse error in {file_path}: {e}")

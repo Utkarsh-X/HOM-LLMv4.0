@@ -19,6 +19,30 @@ indexer:
     tantivy_path: "indexes/bm25.index"
     lancedb_path: "indexes/vectors.lance"
     artifacts_path: "indexes"
+  
+  # ==========================================================================
+  # Entity-Centric Indexing (Plan A)
+  # ==========================================================================
+  
+  # Feature flags
+  entity_centric_indexing_enabled: true
+  type_alias_extraction_enabled: false  # Keep disabled by default (low-frequency)
+  
+  # Entity confidence scoring (deterministic, config-driven)
+  # All weights must come from config, not hardcoded
+  entity_confidence:
+    public_name_bonus: 0.3      # No leading underscore
+    docstring_bonus: 0.4        # Has docstring
+    exported_bonus: 0.2         # In __all__ or re-exported
+    type_annotated_bonus: 0.1   # Has type annotation
+    cap_at: 1.0                 # Maximum confidence score
+  
+  # Hierarchical chunking (3-level)
+  hierarchical_chunking:
+    enabled: true
+    fine_enabled: true          # Symbol-level (functions, methods)
+    medium_enabled: true        # File sections / logical blocks
+    coarse_enabled: true        # File-level summary
 
 retrieval:
   bm25:
@@ -34,6 +58,56 @@ retrieval:
     enabled: true
     max_additions: 4
     min_similarity: 0.25
+  
+  # ==========================================================================
+  # Plan B: Retrieval Layer Activation
+  # ==========================================================================
+  
+  plan_b_enabled: true
+  
+  # Diversity-aware MMR (post-RRF redundancy elimination)
+  diversity_mmr:
+    enabled: true
+    lambda: 0.6  # Trade-off: 1.0 = relevance only, 0.0 = diversity only
+    similarity_threshold: 0.85  # Penalize if similarity exceeds this
+  
+  # Intent-driven granularity boosting (multiplicative adjustments)
+  granularity_boost:
+    enabled: true
+    EXPLAIN:
+      coarse: 2.0
+      medium: 1.5
+      fine: 1.0
+    IMPLEMENT:
+      fine: 2.0
+      medium: 1.2
+      coarse: 0.8
+    REFACTOR:
+      fine: 1.8
+      medium: 1.5
+      coarse: 1.0
+    DEBUG:
+      fine: 2.5
+      medium: 1.5
+      coarse: 1.0
+    SEARCH:
+      medium: 1.8
+      fine: 1.5
+      coarse: 1.0
+  
+  # Graph-based structural expansion (GRAPH_STITCH)
+  graph_stitch:
+    enabled: true
+    max_depth: 2
+    max_additions: 8
+    min_confidence: 0.5
+    relation_priority:
+      - calls
+      - overrides
+      - imports
+      - uses
+      - inherits
+      - type_annotates
 
 ranking:
   reranker:
@@ -78,12 +152,43 @@ intelligence:
   level1_enabled: true
   level2_enabled: true
   level3_enabled: true
+  
+  # ==========================================================================
+  # Plan C: Mechanical Fixer & ABRM
+  # ==========================================================================
+  
+  # Mechanical fixer: single-action, deterministic corrective actions
+  mechanical_fixer_enabled: true
+  
+  # Action priority (highest priority first)
+  action_priority:
+    - GRAPH_STITCH_RETRY
+    - SYMBOL_BACKFILL
+    - SEMANTIC_DEDUP_FORCE
+    - UTILIZATION_EXPAND
+  
+  # Thresholds that trigger actions
+  thresholds:
+    orphan_pct_trigger: 60        # Triggers GRAPH_STITCH_RETRY
+    redundancy_cluster_pct_trigger: 25  # Triggers SEMANTIC_DEDUP_FORCE
+    used_budget_pct_low: 40       # Triggers UTILIZATION_EXPAND
+  
+  # Caps for additive actions
+  caps:
+    graph_stitch_max: 6
+    symbol_backfill_max: 4
+    utilization_expand_max: 10
+  
+  # ABRM (Assumption-Bound Reasoning Mode)
+  abrm_enabled: true
+  abrm_disable_on_cold_start: false
+  p2_budget_increase_pct: 40
 
 generation:
   default_provider: gemini
   default_model: "gemini-2.5-flash"
   temperature: 0.0
-  max_output_tokens: 8000  # Increased for Gemini thinking models
+  max_output_tokens: 12000  # Increased to reduce PARTIAL responses
 
 evaluation:
   judge_model: "gemma-3-27b-it"

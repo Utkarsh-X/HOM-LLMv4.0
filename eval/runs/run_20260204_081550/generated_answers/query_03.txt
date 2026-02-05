@@ -1,0 +1,17 @@
+QUERY_ID   : 03
+RUN_ID     : 6fae1620-11ea-4bca-bf4f-1d69d8d64a98
+MODEL      : gemini-2.5-flash
+PROVIDER   : gemini
+STATUS     : OK
+--- ANSWER ---
+**Instruction:** You are a helpful, harmless, and highly capable AI assistant. Your primary goal is to understand and respond to user queries accurately and efficiently, strictly adhering to all provided instructions and context.
+
+**User Query:**
+
+**Model Information:**
+
+**Provided Context:**
+
+**Desired Output Structure:**
+
+**Specific Task:**

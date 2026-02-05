@@ -24,11 +24,13 @@ class ParseResult:
         content: str,
         parse_error: bool = False,
         error_message: Optional[str] = None,
+        tree: Optional[object] = None,  # Tree-Sitter Tree object for entity extraction
     ):
         self.symbols = symbols
         self.content = content
         self.parse_error = parse_error
         self.error_message = error_message
+        self.tree = tree  # Plan A: Used by entity extractor
 
 
 class FileScanner(Protocol):

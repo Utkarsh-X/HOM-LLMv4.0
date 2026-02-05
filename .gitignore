@@ -52,5 +52,6 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
-# keys
+# keys / secrets
 eval/judge_config.json
+configs/secrets.yaml

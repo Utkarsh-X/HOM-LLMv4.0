@@ -1,15 +1,33 @@
-"""Hybrid BM25 + vector fusion implementation."""
+"""Hybrid BM25 + vector fusion implementation.
+
+Extended for Plan B: Retrieval Layer Activation with:
+- Diversity-aware MMR post-fusion
+"""
 
 import logging
+import time
 from typing import Optional
 
-from homllm.retrieval.interfaces import Candidate, HybridMerger, RetrievalConfig
+from homllm.retrieval.interfaces import Candidate, RetrievalConfig
 
 logger = logging.getLogger(__name__)
 
 
-class RRFHybridMerger(HybridMerger):
-    """Reciprocal Rank Fusion hybrid merger."""
+class RRFHybridMerger:
+    """Reciprocal Rank Fusion hybrid merger.
+    
+    Plan B: Optionally applies MMR post-fusion for diversity.
+    """
+    
+    def __init__(self, embedder: Optional[object] = None):
+        """
+        Initialize merger.
+        
+        Args:
+            embedder: Embedder for MMR similarity computation (optional)
+        """
+        self.embedder = embedder
+        self.last_metrics: dict[str, float | int | str] = {}
 
     def merge(
         self,
@@ -20,16 +38,75 @@ class RRFHybridMerger(HybridMerger):
         """
         Uses Reciprocal Rank Fusion or configurable fusion.
         All weights from config. No magic constants.
+        
+        Plan B: Applies MMR post-fusion if enabled.
         """
+        self.last_metrics = {}
         if config.hybrid_method == "rrf":
-            return self._rrf_merge(bm25_results, vector_results, config.rrf_k)
+            merged = self._rrf_merge(bm25_results, vector_results, config.rrf_k)
         elif config.hybrid_method == "linear":
-            return self._linear_merge(
+            merged = self._linear_merge(
                 bm25_results, vector_results, config.bm25_weight, config.vector_weight
             )
         else:
             logger.warning(f"Unknown hybrid method: {config.hybrid_method}, using RRF")
-            return self._rrf_merge(bm25_results, vector_results, config.rrf_k)
+            merged = self._rrf_merge(bm25_results, vector_results, config.rrf_k)
+        
+        # ======================================================================
+        # Plan B: Apply MMR post-fusion for diversity
+        # ======================================================================
+        if (
+            config.plan_b_enabled
+            and config.diversity_mmr_enabled
+            and self.embedder is not None
+        ):
+            merged = self._apply_mmr(merged, config)
+        
+        return merged
+    
+    def _apply_mmr(
+        self,
+        candidates: list[Candidate],
+        config: RetrievalConfig,
+    ) -> list[Candidate]:
+        """Apply deterministic MMR post-fusion."""
+        try:
+            from homllm.retrieval.diversity_mmr import apply_mmr, compute_candidate_embeddings
+            
+            # Compute embeddings for candidates
+            emb_start = time.perf_counter()
+            embeddings = compute_candidate_embeddings(candidates, self.embedder)
+            emb_ms = (time.perf_counter() - emb_start) * 1000
+            
+            if not embeddings:
+                logger.debug("MMR: No embeddings computed, skipping")
+                return candidates
+            
+            # Apply MMR
+            mmr_start = time.perf_counter()
+            result = apply_mmr(
+                candidates,
+                embeddings,
+                mmr_lambda=config.mmr_lambda,
+                similarity_threshold=config.mmr_similarity_threshold,
+            )
+            mmr_ms = (time.perf_counter() - mmr_start) * 1000
+            self.last_metrics = {
+                "mmr_candidates": len(candidates),
+                "mmr_emb_ms": round(emb_ms, 2),
+                "mmr_ms": round(mmr_ms, 2),
+            }
+            logger.info(
+                "[MMR_PROFILE] candidates=%d emb_ms=%.1f mmr_ms=%.1f",
+                len(candidates),
+                emb_ms,
+                mmr_ms,
+            )
+            return result
+        except Exception as e:
+            self.last_metrics = {"mmr_error": str(e)}
+            logger.warning(f"MMR failed, returning original candidates: {e}")
+            return candidates
 
     def _rrf_merge(
         self, bm25_results: list[Candidate], vector_results: list[Candidate], k: int
@@ -58,6 +135,7 @@ class RRFHybridMerger(HybridMerger):
                 vector_score=existing.vector_score,
                 hybrid_score=existing.hybrid_score + rrf_score,
                 provenance=existing.provenance,
+                granularity_level=existing.granularity_level,
             )
 
         # Add vector results with ranks
@@ -75,6 +153,7 @@ class RRFHybridMerger(HybridMerger):
                 vector_score=existing.vector_score,
                 hybrid_score=existing.hybrid_score + rrf_score,
                 provenance=existing.provenance,
+                granularity_level=existing.granularity_level,
             )
 
         # Sort by hybrid score descending
@@ -128,6 +207,7 @@ class RRFHybridMerger(HybridMerger):
                 vector_score=0.0,
                 hybrid_score=norm_score * bm25_weight,
                 provenance=candidate.provenance,
+                granularity_level=candidate.granularity_level,
             )
 
         # Add/update with vector candidates
@@ -144,6 +224,7 @@ class RRFHybridMerger(HybridMerger):
                     vector_score=candidate.vector_score,
                     hybrid_score=existing.hybrid_score + (norm_score * vector_weight),
                     provenance=existing.provenance + candidate.provenance,
+                    granularity_level=existing.granularity_level or candidate.granularity_level,
                 )
             else:
                 candidates_by_id[candidate.doc_id] = Candidate(
@@ -155,6 +236,7 @@ class RRFHybridMerger(HybridMerger):
                     vector_score=candidate.vector_score,
                     hybrid_score=norm_score * vector_weight,
                     provenance=candidate.provenance,
+                    granularity_level=candidate.granularity_level,
                 )
 
         # Sort by hybrid score descending
@@ -162,3 +244,4 @@ class RRFHybridMerger(HybridMerger):
         merged.sort(key=lambda c: c.hybrid_score, reverse=True)
 
         return merged
+

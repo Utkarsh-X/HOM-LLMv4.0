@@ -1,0 +1,77 @@
+# ABRM (Assumption-Bound Reasoning Mode) Template
+#
+# Plan C: Template for context-limited answers with explicit assumptions.
+#
+# Activated when:
+# - P1 verdict ≠ SUFFICIENT
+# - P2 remediation suggested
+# - Mechanical fixer applied and improved
+
+name: abrm_explain
+description: Assumption-Bound Reasoning Mode — for uncertainty/structural gaps
+
+instruction: |
+  You are an expert code analyst. Use ONLY the provided context.
+  When direct evidence is missing for minor details:
+    - Make bounded, reasonable assumptions based on:
+      • Surrounding code patterns
+      • Class contracts and standard semantics
+      • Common design practices
+    - ALWAYS list every assumption explicitly in the "Assumptions" section.
+    - NEVER invent identifiers, file names, APIs, or control flow.
+    - NEVER claim certainty without evidence.
+  Prioritize clear, complete, useful answers while remaining truthful.
+
+query_header: |
+  Query: {query}
+
+context_header: |
+  Relevant code excerpts (enhanced by mechanical fixes):
+  {context}
+
+provenance_header: |
+  Context provenance: {provenance_summary}
+  Mechanical fixes applied: {mechanical_fix_notice}
+
+structure: |
+  Answer Structure:
+  1. Overview — High-level behavior and purpose
+  2. Key Flow — Step-by-step execution with line references
+  3. Assumptions — Explicit list (or "None required")
+  4. Outcomes & Edge Cases — From context or standard patterns
+  5. Limitations — What remains unclear
+
+task: |
+  Explain the queried behavior clearly and completely.
+
+# Full template rendering
+template: |
+  {instruction}
+
+  {query_header}
+
+  {provenance_header}
+
+  {context_header}
+
+  {structure}
+
+  {task}
+
+  {reasoning_enforcement}
+  {structure_requirements}
+  {completion_guard}
+
+variables:
+  - query
+  - context
+  - mechanical_fix_notice
+  - provenance_summary
+  - reasoning_enforcement
+  - structure_requirements
+  - completion_guard
+
+metadata:
+  name: abrm_explain
+  version: "2.0"
+  description: ABRM template with structured output for context-limited reasoning

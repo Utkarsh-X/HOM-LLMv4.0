@@ -1,0 +1,11 @@
+QUERY_ID   : 16
+RUN_ID     : 7f9d9a48-435d-4e54-b244-a891cceb1e1a
+MODEL      : gemini-2.5-flash
+PROVIDER   : gemini
+STATUS     : OK
+--- ANSWER ---
+## Component Interactions
+The provided context does not contain any code for a `BatchProcessor` component. Therefore, it is not possible to explain how `BatchProcessor` handles partial failures or implements at-least-once semantics, as the component itself is not defined.
+
+## Summary
+Information regarding how a `BatchProcessor` handles partial failures and implements at-least-once semantics is missing from the provided context. The context does not include any definition or implementation of a `BatchProcessor` class or related functions.

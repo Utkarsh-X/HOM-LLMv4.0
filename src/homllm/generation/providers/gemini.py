@@ -2,12 +2,19 @@
 
 Uses the new Google GenAI SDK (google.genai) which replaces the deprecated
 google.generativeai package.
+
+API Key Configuration:
+    Priority order (first found wins):
+    1. Explicit api_key parameter passed to __init__
+    2. configs/secrets.yaml file (api_keys.gemini)
+    3. GEMINI_API_KEY environment variable
 """
 
 import logging
 import os
 import time
 from collections.abc import Callable
+from pathlib import Path
 from typing import Optional
 
 from homllm.generation.interfaces import (
@@ -28,6 +35,46 @@ except ImportError:
     logger.debug("google.genai not available; GeminiProvider disabled")
 
 
+def _load_api_key_from_config(provider_name: str = "gemini") -> Optional[str]:
+    """
+    Load API key from configs/secrets.yaml.
+    
+    Args:
+        provider_name: Key name under api_keys section (e.g., 'gemini', 'openai')
+    
+    Returns:
+        API key string if found, None otherwise
+    """
+    try:
+        import yaml
+    except ImportError:
+        logger.debug("PyYAML not installed; cannot read secrets.yaml")
+        return None
+    
+    # Search for secrets.yaml relative to project root
+    # Try multiple possible locations
+    search_paths = [
+        Path(__file__).resolve().parent.parent.parent.parent.parent / "configs" / "secrets.yaml",
+        Path.cwd() / "configs" / "secrets.yaml",
+    ]
+    
+    for secrets_path in search_paths:
+        if secrets_path.exists():
+            try:
+                with open(secrets_path, "r", encoding="utf-8") as f:
+                    secrets = yaml.safe_load(f)
+                
+                if secrets and "api_keys" in secrets:
+                    api_key = secrets["api_keys"].get(provider_name)
+                    if api_key and api_key != f"your_{provider_name}_api_key_here":
+                        logger.debug(f"Loaded {provider_name} API key from {secrets_path}")
+                        return api_key
+            except Exception as e:
+                logger.debug(f"Failed to load secrets from {secrets_path}: {e}")
+    
+    return None
+
+
 class GeminiProvider(ProviderConnector):
     """Google Gemini provider implementation using the new GenAI SDK."""
 
@@ -36,18 +83,29 @@ class GeminiProvider(ProviderConnector):
         Initialize Gemini provider.
         
         Args:
-            api_key: Gemini API key (default: from GEMINI_API_KEY env var)
+            api_key: Gemini API key. If not provided, looks for key in:
+                     1. configs/secrets.yaml (api_keys.gemini)
+                     2. GEMINI_API_KEY environment variable
         """
         self._client: Optional[object] = None
         self._available = False
 
         if genai is not None:
             try:
-                # New SDK uses Client object
-                # It will auto-read GEMINI_API_KEY from environment if not provided
-                if api_key:
-                    self._client = genai.Client(api_key=api_key)
+                # Priority: explicit param > config file > env var
+                resolved_key = api_key
+                
+                if not resolved_key:
+                    # Try loading from config file
+                    resolved_key = _load_api_key_from_config("gemini")
+                    if resolved_key:
+                        logger.info("Using Gemini API key from configs/secrets.yaml")
+                
+                # Create client (will fall back to GEMINI_API_KEY env var if no key provided)
+                if resolved_key:
+                    self._client = genai.Client(api_key=resolved_key)
                 else:
+                    # Let SDK try environment variable
                     self._client = genai.Client()
                 
                 self._available = self.healthcheck()

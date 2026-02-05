@@ -1,7 +1,13 @@
-"""Protocols and interfaces for Retrieval layer."""
+"""Protocols and interfaces for Retrieval layer.
 
-from dataclasses import dataclass
-from typing import Protocol
+Extended for Plan B: Retrieval Layer Activation with:
+- Diversity-aware MMR post-fusion
+- Intent-driven granularity boosting
+- Graph-based structural expansion (GRAPH_STITCH)
+"""
+
+from dataclasses import dataclass, field
+from typing import Optional, Protocol
 
 from homllm.common.types import Intent, Vector
 
@@ -18,6 +24,9 @@ class Candidate:
     vector_score: float = 0.0
     hybrid_score: float = 0.0
     provenance: tuple[str, ...] = ()  # e.g., ("bm25", "expansion:decorator")
+    
+    # Plan B: Granularity level for intent-driven boosting
+    granularity_level: str | None = None
 
 
 @dataclass(frozen=True)
@@ -89,8 +98,12 @@ class StructuralExpander(Protocol):
 
 @dataclass
 class RetrievalConfig:
-    """Retrieval layer configuration."""
+    """Retrieval layer configuration.
+    
+    Extended for Plan B: Retrieval Layer Activation.
+    """
 
+    # Core retrieval settings
     bm25_top_k: int
     vector_top_k: int
     hybrid_method: str  # "rrf" or "linear"
@@ -100,3 +113,44 @@ class RetrievalConfig:
     expansion_enabled: bool
     expansion_max_additions: int
     expansion_min_similarity: float
+    
+    # ==========================================================================
+    # Plan B: Retrieval Layer Activation
+    # ==========================================================================
+    
+    # Master toggle for Plan B features
+    plan_b_enabled: bool = True
+    
+    # Diversity-aware MMR (post-RRF)
+    diversity_mmr_enabled: bool = True
+    mmr_lambda: float = 0.6
+    mmr_similarity_threshold: float = 0.85
+    
+    # Intent-driven granularity boosting
+    granularity_boost_enabled: bool = True
+    granularity_boost_table: dict = field(default_factory=dict)
+    
+    # Graph-based structural expansion (GRAPH_STITCH)
+    graph_stitch_enabled: bool = True
+    graph_stitch_max_depth: int = 2
+    graph_stitch_max_additions: int = 8
+    graph_stitch_min_confidence: float = 0.5
+    graph_stitch_relation_priority: list[str] = field(default_factory=list)
+    
+    def __post_init__(self):
+        """Set defaults for Plan B config."""
+        if not self.granularity_boost_table:
+            self.granularity_boost_table = {
+                "EXPLAIN": {"coarse": 2.0, "medium": 1.5, "fine": 1.0},
+                "IMPLEMENT": {"fine": 2.0, "medium": 1.2, "coarse": 0.8},
+                "REFACTOR": {"fine": 1.8, "medium": 1.5, "coarse": 1.0},
+                "DEBUG": {"fine": 2.5, "medium": 1.5, "coarse": 1.0},
+                "SEARCH": {"medium": 1.8, "fine": 1.5, "coarse": 1.0},
+                "UNKNOWN": {"fine": 1.0, "medium": 1.0, "coarse": 1.0},
+            }
+        
+        if not self.graph_stitch_relation_priority:
+            self.graph_stitch_relation_priority = [
+                "calls", "overrides", "imports", "uses", "inherits", "type_annotates"
+            ]
+
