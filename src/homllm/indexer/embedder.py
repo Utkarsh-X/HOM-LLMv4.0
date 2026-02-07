@@ -25,7 +25,12 @@ except ImportError:
 class QwenEmbedder(Embedder):
     """Qwen3-Embedding-0.6B embedder implementation."""
 
-    def __init__(self, model_name: str = EMBEDDING_MODEL_NAME, dimension: int = 1024):
+    def __init__(
+        self,
+        model_name: str = EMBEDDING_MODEL_NAME,
+        dimension: int = 1024,
+        max_input_tokens: int = 8192,
+    ):
         """
         Initialize embedder.
         
@@ -39,6 +44,8 @@ class QwenEmbedder(Embedder):
         self._model: Optional[torch.nn.Module] = None
         self._tokenizer: Optional[object] = None
         self._device = "cuda" if torch.cuda.is_available() else "cpu"
+        self._requested_max_input_tokens = max_input_tokens
+        self._effective_max_input_tokens = max_input_tokens
 
         if AutoModel is not None and AutoTokenizer is not None:
             self._load_model()
@@ -68,7 +75,20 @@ class QwenEmbedder(Embedder):
             ):
                 self._dimension = self._model.config.hidden_size
 
-            logger.info(f"Model loaded, dimension: {self._dimension}")
+            model_max = getattr(self._model.config, "max_position_embeddings", None)
+            if isinstance(model_max, int) and model_max > 0:
+                self._effective_max_input_tokens = min(
+                    self._requested_max_input_tokens,
+                    model_max,
+                )
+            else:
+                self._effective_max_input_tokens = self._requested_max_input_tokens
+
+            logger.info(
+                "Model loaded, dimension: %s, embed_max_tokens: %s",
+                self._dimension,
+                self._effective_max_input_tokens,
+            )
 
         except Exception as e:
             logger.error(f"Failed to load embedding model: {e}")
@@ -100,7 +120,7 @@ class QwenEmbedder(Embedder):
                 return_tensors="pt",
                 padding=True,
                 truncation=True,
-                max_length=512,
+                max_length=self._effective_max_input_tokens,
             ).to(self._device)
 
             # Generate embeddings

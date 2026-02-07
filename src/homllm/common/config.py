@@ -54,6 +54,7 @@ class IndexerConfig:
     storage: StorageConfig
     embedding_model: str = "Qwen/Qwen3-Embedding-0.6B"
     embedding_dimension: int = 1024
+    embedding_max_tokens: int = 8192
     # Entity-centric indexing (Plan A)
     entity_centric_indexing_enabled: bool = True
     type_alias_extraction_enabled: bool = False  # Disabled by default
@@ -131,6 +132,7 @@ class Config(BaseModel):
             storage=storage_cfg,
             embedding_model=idx_cfg.get("embedding_model", "Qwen/Qwen3-Embedding-0.6B"),
             embedding_dimension=idx_cfg.get("embedding_dimension", 1024),
+            embedding_max_tokens=idx_cfg.get("embedding_max_tokens", 8192),
             entity_centric_indexing_enabled=idx_cfg.get("entity_centric_indexing_enabled", True),
             type_alias_extraction_enabled=idx_cfg.get("type_alias_extraction_enabled", False),
             entity_confidence=entity_confidence,
@@ -183,6 +185,10 @@ class Config(BaseModel):
                 "relation_priority",
                 ["calls", "overrides", "imports", "uses", "inherits", "type_annotates"]
             ),
+            graph_cache_enabled=graph_stitch_cfg.get("graph_cache_enabled", True),
+            graph_stitch_beam_high=graph_stitch_cfg.get("graph_stitch_beam_high", 8),
+            graph_stitch_beam_low=graph_stitch_cfg.get("graph_stitch_beam_low", 3),
+            post_merge_candidates=ret_cfg.get("post_merge_candidates", 0),
         )
     
     def _parse_granularity_boost_table(self, cfg: dict) -> dict:

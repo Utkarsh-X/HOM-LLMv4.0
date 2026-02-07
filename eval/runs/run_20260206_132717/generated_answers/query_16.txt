@@ -1,0 +1,37 @@
+QUERY_ID   : 16
+RUN_ID     : 20b8cad8-2ebb-4151-ba47-dde4d21fb5ac
+MODEL      : gemini-2.5-flash
+PROVIDER   : gemini
+STATUS     : OK
+--- ANSWER ---
+## Component Interactions
+The `BatchProcessor` class (Symbol: 26) handles partial failures by processing items in discrete batches and isolating errors to individual batches.
+
+1. **Batching and Iteration**: The `process` method first splits the input `items` into `batches` based on the configured `self.batch_size`. It then iterates through these `batches` sequentially (lines 50-53).
+2. **Batch Processing**: For each `batch`, the `processor_func` (a `Callable[[List[T]], List[U]]` provided by the caller) is invoked to process the items within that specific batch (line 55).
+3. **Error Handling per Batch**:
+* The call to `processor_func(batch)` is wrapped in a `try-except Exception as e` block (lines 54-65).
+* If `processor_func` successfully processes a batch, its results are `extend`ed to the overall `results` list, and `processed_count` is incremented (lines 56-57).
+* If an `Exception` occurs during the processing of a batch, the `except` block is executed (lines 59-65).
+* The error message for the failed batch is appended to the `errors` list (line 60).
+* The `failed_count` is incremented by the number of items in the failed batch (line 61).
+* An optional `error_handler` (a `Callable[[Exception], None]`) provided during the `process` method call is invoked with the caught exception (lines 63-64).
+* The error is logged using `logger.error` (line 65).
+4. **Continuation on Failure**: Crucially, after handling the exception for a failed batch, the `for` loop continues to the next batch (line 53). This ensures that a failure in one batch does not halt the processing of subsequent batches, allowing for partial success.
+5. **Result Aggregation**: Upon completion of all batches, the `process` method returns a `BatchResult` object (lines 72-80). This object aggregates statistics, including `total_items`, `processed_items`, `failed_items`, and a list of `errors`, providing a comprehensive overview of which items/batches succeeded and which failed.
+
+## Summary
+**Partial Failures:**
+The `BatchProcessor` explicitly handles partial failures by isolating errors to individual batches. If a `processor_func` call fails for a specific batch, the exception is caught, the batch's items are marked as failed, an optional `error_handler` is invoked, and the error is logged. The processing then continues with the next batch in the sequence. This design ensures that the failure of one batch does not prevent other batches from being processed, and the final `BatchResult` provides a clear breakdown of successful and failed items/batches.
+
+**At-Least-Once Semantics:**
+Based on the provided code, the `BatchProcessor` itself **does not implement at-least-once semantics internally**. When a batch fails, the `BatchProcessor` logs the error, updates its internal failure statistics, and proceeds to the next batch without any retry mechanism for the failed batch. The items in the failed batch are simply counted towards `failed_items` in the `BatchResult`.
+
+To achieve at-least-once semantics, an external caller would need to:
+1. Inspect the `BatchResult` returned by `BatchProcessor.process`.
+2. Identify the `failed_items` or `errors` from the result.
+3. Re-submit the items corresponding to the failed batches to the `BatchProcessor` for reprocessing.
+
+**Assumptions:**
+* The `processor_func` is designed to process the entire list of items it receives as a single unit, and its failure implies that none of the items in that specific batch were successfully processed by it.
+* The `error_handler` is an optional callback whose implementation is external to `BatchProcessor` and does not inherently provide retry logic or at-least-once guarantees for the batch processing itself.

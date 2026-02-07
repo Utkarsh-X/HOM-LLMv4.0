@@ -34,6 +34,7 @@ class RRFHybridMerger:
         bm25_results: list[Candidate],
         vector_results: list[Candidate],
         config: RetrievalConfig,
+        apply_mmr: bool = True,
     ) -> list[Candidate]:
         """
         Uses Reciprocal Rank Fusion or configurable fusion.
@@ -56,13 +57,29 @@ class RRFHybridMerger:
         # Plan B: Apply MMR post-fusion for diversity
         # ======================================================================
         if (
-            config.plan_b_enabled
+            apply_mmr
+            and config.plan_b_enabled
             and config.diversity_mmr_enabled
             and self.embedder is not None
         ):
             merged = self._apply_mmr(merged, config)
         
         return merged
+
+    def apply_mmr(
+        self,
+        candidates: list[Candidate],
+        config: RetrievalConfig,
+    ) -> list[Candidate]:
+        if not candidates:
+            return candidates
+        if not (
+            config.plan_b_enabled
+            and config.diversity_mmr_enabled
+            and self.embedder is not None
+        ):
+            return candidates
+        return self._apply_mmr(candidates, config)
     
     def _apply_mmr(
         self,

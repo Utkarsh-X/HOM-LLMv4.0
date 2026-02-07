@@ -1,0 +1,45 @@
+QUERY_ID   : 05
+RUN_ID     : 32028e50-0c22-4cae-897c-e5c18bc7cc61
+MODEL      : gemini-2.5-flash
+PROVIDER   : gemini
+STATUS     : OK
+--- ANSWER ---
+## Enumerated Components
+* **L1 Memory Cache:** This is the fastest, in-process cache layer, implemented by `self.memory_cache` (a Python dictionary) and `self.memory_timestamps` within the `CacheManager` class (Symbol: 21, lines 40-41). It has a configurable `memory_limit` and employs an LRU (Least Recently Used) eviction policy.
+* **L2 Redis Cache:** This is an external, distributed cache layer, implemented by `self.redis`, which is an instance of `RedisClient` (Symbol: 21, lines 44-50). It is optional and can be enabled or disabled during `CacheManager` initialization.
+* **L3 Database/Source:** This represents the ultimate source of truth for the data. Within the `CacheManager.get` method (Symbol: 21, lines 141-144), this layer is abstracted by the `fetch_func` callable. The `CacheManager` class docstring explicitly refers to this as the "Database cache (L3)".
+
+## Component Interactions
+
+The `CacheManager` (Symbol: 21) orchestrates the interactions between these layers, particularly through its `get` and `set` methods.
+
+**When L1, L2, and L3 Caches All Miss:**
+
+1. **L1 Memory Cache Miss:** When `CacheManager.get` is called, it first generates a cache key using `_generate_key` (Symbol: 21, line 117). It then checks `self.memory_cache` for the key (Symbol: 21, line 120). If the key is not present or if its entry has expired based on `self.memory_timestamps` and the `ttl`, it's an L1 miss. The `self.stats["memory_misses"]` counter is incremented (Symbol: 21, line 129).
+
+2. **L2 Redis Cache Miss:** Following an L1 miss, if Redis is enabled (`self.redis` is not None), the `CacheManager` attempts to retrieve the value from the Redis cache by calling `self.redis.get(key)` (Symbol: 21, line 131). If `redis_value` is `None`, it signifies an L2 miss. The `self.stats["redis_misses"]` counter is incremented (Symbol: 21, line 138).
+
+3. **L3 Database/Source Fetch (Miss):** After both L1 and L2 caches miss, the `CacheManager` checks if a `fetch_func` was provided to the `get` method (Symbol: 21, line 141).
+* If `fetch_func` is provided, it is executed (`value = fetch_func()`) to retrieve the data from its original source (L3).
+* If `fetch_func` is *not* provided, or if the `fetch_func` itself returns `None`, the `CacheManager.get` method will ultimately return `None` (Symbol: 21, line 146), indicating the data could not be found in any layer or source.
+
+**Cache Promotion:**
+
+Cache promotion occurs when data is successfully retrieved from a slower, lower cache layer or the original source, and then stored in faster, higher cache layers for future access.
+
+* **L2 Redis to L1 Memory Promotion:** If a value (`redis_value`) is successfully retrieved from the L2 Redis cache (Symbol: 21, line 132), it is immediately promoted to the L1 memory cache. This is achieved by calling `self._set_memory(key, redis_value, ttl)` (Symbol: 21, line 135). This ensures that subsequent requests for the same data will hit the faster in-memory cache.
+
+* **L3 Database/Source to L1 Memory and L2 Redis Promotion:** If the `fetch_func` successfully retrieves a `value` from the L3 source (Symbol: 21, line 142), this `value` is then written to *both* the L1 memory cache and the L2 Redis cache. This is handled by calling `self.set(namespace, identifier, value, ttl)` (Symbol: 21, line 143).
+* The `set` method (Symbol: 21, lines 150-160) first calls `self._set_memory(key, value, ttl)` (Symbol: 21, line 156) to store the value in the L1 memory cache.
+* Then, if Redis is enabled, it calls `self.redis.set(key, value, ttl=ttl)` (Symbol: 21, line 159) to store the value in the L2 Redis cache.
+
+The `_set_memory` method (Symbol: 21, lines 162-170) also manages the L1 memory cache's size. If the `memory_cache` reaches its `memory_limit`, it performs an LRU eviction, removing the oldest entry before adding the new one, and increments `self.stats["evictions"]`.
+
+## Summary
+
+When all three cache layers (L1 memory, L2 Redis, and L3 database/source) miss, the `CacheManager` attempts to retrieve the data from the ultimate source via a provided `fetch_func`. If this function successfully retrieves the data, that data is then promoted and written back into both the L1 memory cache and the L2 Redis cache. This multi-layered approach with automatic promotion ensures that data, once retrieved from a slower source, becomes available in faster cache layers for subsequent requests, optimizing performance. The L1 memory cache also actively manages its capacity through an LRU eviction policy.
+
+**Assumptions:**
+* The `fetch_func` parameter in `CacheManager.get` is the mechanism for retrieving data from the ultimate source, which is referred to as the "Database cache (L3)" in the `CacheManager` class docstring. The provided code does not show an explicit `database_cache` attribute or direct database interaction within `CacheManager` itself, but `fetch_func` serves this role.
+* The `RedisClient` is a functional client capable of `get` and `set` operations with TTL, as implied by its usage in `CacheManager`.
+* `time.time()` is used for standard time-based TTL checks and LRU tracking.

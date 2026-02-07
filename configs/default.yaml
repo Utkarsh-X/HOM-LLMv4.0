@@ -14,6 +14,7 @@ indexer:
   chunk_max_lines: 100
   embedding_model: "Qwen/Qwen3-Embedding-0.6B"
   embedding_dimension: 1024
+  embedding_max_tokens: 1024
   storage:
     duckdb_path: "indexes/metadata.duckdb"
     tantivy_path: "indexes/bm25.index"
@@ -54,6 +55,7 @@ retrieval:
   hybrid:
     method: rrf
     rrf_k: 10
+  post_merge_candidates: 50
   expansion:
     enabled: true
     max_additions: 4
@@ -101,6 +103,9 @@ retrieval:
     max_depth: 2
     max_additions: 8
     min_confidence: 0.5
+    graph_cache_enabled: true
+    graph_stitch_beam_high: 8
+    graph_stitch_beam_low: 3
     relation_priority:
       - calls
       - overrides

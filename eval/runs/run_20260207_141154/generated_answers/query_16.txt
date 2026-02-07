@@ -1,0 +1,37 @@
+QUERY_ID   : 16
+RUN_ID     : 8af9ac21-b681-451d-ad81-b9d4715d15f8
+MODEL      : gemini-2.5-flash
+PROVIDER   : gemini
+STATUS     : OK
+--- ANSWER ---
+## Component Interactions
+
+The `BatchProcessor` interacts with several components to handle batch processing and failures:
+
+1. **`items` (List[T])**: The `BatchProcessor` receives a list of items to be processed. It internally splits these `items` into smaller `batches` based on its configured `batch_size`.
+2. **`processor_func` (Callable[[List[T]], List[U]])**: For each generated `batch`, the `BatchProcessor` invokes the provided `processor_func`. This function is responsible for the actual work on the batch of items. If `processor_func` executes successfully, its results (`batch_results`) are `extend`ed into the overall `results` list of the `BatchResult`.
+3. **`Exception`**: If the `processor_func` raises an `Exception` during the processing of a batch, the `BatchProcessor` catches this exception.
+4. **`error_handler` (Optional[Callable[[Exception], None]])**: Upon catching an exception for a batch, if an `error_handler` callback is provided, the `BatchProcessor` invokes it, passing the caught `Exception` as an argument. This allows external, custom logic to react to batch failures.
+5. **`logger`**: The `BatchProcessor` uses a `logger` (e.g., `logger.error`) to record information about batch processing, including successful completion and failures.
+6. **`BatchResult`**: After iterating through all batches, the `BatchProcessor` compiles and returns a `BatchResult` object. This object encapsulates the overall outcome, including `total_items`, `processed_items`, `failed_items`, `duration_ms`, a list of `errors` (for failed batches), and the accumulated `results` from successfully processed batches.
+
+## Summary
+
+**Partial Failures:**
+The `BatchProcessor` handles partial failures at the batch level by isolating the processing of each batch within a `try-except` block. If an exception occurs during the execution of the `processor_func` for a specific batch:
+* The exception is caught, preventing the entire processing operation from crashing.
+* An error message detailing the failure is appended to the `errors` list within the `BatchResult`.
+* The `failed_count` in the `BatchResult` is incremented by the number of items in the failed batch.
+* An optional `error_handler` callback can be invoked to allow external components to react to the failure.
+* Crucially, the `BatchProcessor` continues to process subsequent batches, ensuring that a failure in one batch does not prevent other batches from being attempted. Only results from successfully processed batches are accumulated.
+
+**At-Least-Once Semantics:**
+Based on the provided code, the `BatchProcessor` itself **does not inherently implement at-least-once semantics**.
+* Each batch is processed exactly once by the `processor_func`.
+* If a batch fails, it is marked as failed, its items contribute to `failed_count`, and an error is recorded. However, the `BatchProcessor` does not contain any internal retry logic to re-process these failed batches or items.
+* To achieve at-least-once semantics, the responsibility would fall to the *caller* of the `BatchProcessor.process` method. The `BatchResult` object provides the necessary information (`failed_items`, `errors`) for the caller to identify which items or batches failed and then implement a retry mechanism by re-submitting those specific items for processing.
+
+**Assumptions:**
+* The `processor_func` is expected to process a list of items and return a list of results.
+* The `error_handler` is a synchronous callback for external handling of batch-level exceptions.
+* The `BatchProcessor` is designed to report failures at the batch level and continue processing other batches, rather than retrying or stopping entirely.

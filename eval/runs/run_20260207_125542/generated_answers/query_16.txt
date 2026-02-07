@@ -1,0 +1,41 @@
+QUERY_ID   : 16
+RUN_ID     : 8b1f914f-b61f-4bbb-b505-ebaff2a90528
+MODEL      : gemini-2.5-flash
+PROVIDER   : gemini
+STATUS     : OK
+--- ANSWER ---
+## Component Interactions
+
+The `BatchProcessor` class is designed to process a list of items in configurable batches, leveraging a `processor_func` provided by the caller. It interacts with the `processor_func` and an optional `error_handler` to manage the processing flow and handle failures.
+
+1. **Batching and Iteration**: The `process` method first splits the input `items` into smaller `batches` based on `self.batch_size`. It then iterates through these batches sequentially.
+2. **Processing Function Execution**: For each `batch`, the `BatchProcessor` invokes the `processor_func(batch)`. This `processor_func` is responsible for the actual work on the items within that batch and is expected to return a list of results (`List[U]`).
+3. **Success Handling**: If `processor_func` executes successfully, its `batch_results` are `extend`ed to the overall `results` list, and `processed_count` is incremented by the number of items in the batch (`len(batch)`). A debug log is also emitted.
+4. **Partial Failure Handling**:
+* If `processor_func` raises an `Exception` for a particular batch, the `BatchProcessor` catches this exception.
+* It records an `error_msg` (including the batch index and exception string) and appends it to the `errors` list.
+* The `failed_count` is incremented by the total number of items in the *failed batch* (`len(batch)`).
+* If an `error_handler` callable was provided during the `process` method call, it is invoked with the caught `Exception` (`error_handler(e)`).
+* An error log is emitted.
+* Crucially, the `BatchProcessor` continues to process subsequent batches even after one or more batches have failed.
+5. **Result Aggregation**: After iterating through all batches, the `process` method aggregates the `results`, `errors`, `processed_count`, and `failed_count` into a `BatchResult` object, along with a unique `batch_id` and duration. It also updates internal `batch_stats`.
+
+## Summary
+
+**Partial Failures:**
+The `BatchProcessor` handles partial failures at the batch level. If the `processor_func` fails for a specific batch, the exception is caught, the failure is logged, and the items in that entire batch are counted towards `failed_items`. An optional `error_handler` can be invoked for custom error logic. Processing then continues with the next batch. The final `BatchResult` object explicitly reports `failed_items` and a list of `errors`, indicating which batches encountered issues. This allows the caller to identify and potentially re-process the failed items or batches.
+
+**At-Least-Once Semantics:**
+Based *solely* on the provided code, the `BatchProcessor` itself **does not implement at-least-once semantics**.
+* There is no explicit retry mechanism within the `process` method for batches that fail. If a batch fails, its items are marked as failed, but the `BatchProcessor` does not attempt to re-process them.
+* There is no persistence layer or state management shown that would allow the `BatchProcessor` to recover from a crash and resume processing from the last successful point, or to re-queue failed items automatically.
+
+To achieve at-least-once semantics, the caller of `BatchProcessor.process` would be responsible for:
+1. Inspecting the `BatchResult.failed_items` and `BatchResult.errors`.
+2. Extracting the items corresponding to the failed batches.
+3. Re-submitting these failed items (or the entire failed batches) to the `BatchProcessor` for another attempt.
+4. Ensuring that the `processor_func` itself is idempotent, meaning that processing the same item multiple times has the same effect as processing it once, to prevent unintended side effects if retries occur.
+
+**Assumptions:**
+* When `processor_func(batch)` raises an exception, it signifies that all items within that specific `batch` have failed. This is inferred from the line `failed_count += len(batch)`.
+* The `processor_func` is expected to return results for all items in the batch if successful.

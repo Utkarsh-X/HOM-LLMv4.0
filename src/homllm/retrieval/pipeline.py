@@ -118,6 +118,9 @@ class RetrievalPipeline:
                     max_additions=config.graph_stitch_max_additions,
                     min_confidence=config.graph_stitch_min_confidence,
                     relation_priority=config.graph_stitch_relation_priority,
+                    graph_cache_enabled=config.graph_cache_enabled,
+                    beam_high=config.graph_stitch_beam_high,
+                    beam_low=config.graph_stitch_beam_low,
                 )
                 self._graph_stitch_expander = GraphStitchExpander(duckdb_path, graph_config)
             except Exception as e:
@@ -202,10 +205,28 @@ class RetrievalPipeline:
                     metadata={"error": "both_searches_failed"},
                 )
 
-            # 3. Hybrid merge (includes MMR if Plan B enabled)
+            # 3. Hybrid merge
             merge_start = time.perf_counter()
-            merged = self.merger.merge(bm25_results, vector_results, self.config)
+            apply_mmr_in_merge = self.config.post_merge_candidates <= 0
+            merged = self.merger.merge(
+                bm25_results,
+                vector_results,
+                self.config,
+                apply_mmr=apply_mmr_in_merge,
+            )
             merge_ms = (time.perf_counter() - merge_start) * 1000
+
+            # Post-merge cap (applied before MMR/graph/expansion)
+            if self.config.post_merge_candidates and len(merged) > self.config.post_merge_candidates:
+                merged = merged[: self.config.post_merge_candidates]
+            
+            # MMR (if not applied in merge)
+            if not apply_mmr_in_merge:
+                mmr_start = time.perf_counter()
+                merged = self.merger.apply_mmr(merged, self.config)
+                mmr_ms = (time.perf_counter() - mmr_start) * 1000
+            else:
+                mmr_ms = 0.0
             
             # =================================================================
             # Plan B: Step 3 — Intent-Driven Granularity Boosting
@@ -248,11 +269,12 @@ class RetrievalPipeline:
             total_ms = (time.perf_counter() - t0) * 1000
 
             logger.info(
-                "[RETRIEVAL_PROFILE] prep_ms=%.1f bm25_ms=%s vector_ms=%s merge_ms=%.1f granularity_ms=%.1f graph_stitch_ms=%.1f expansion_ms=%.1f precision_ms=%.1f total_ms=%.1f",
+                "[RETRIEVAL_PROFILE] prep_ms=%.1f bm25_ms=%s vector_ms=%s merge_ms=%.1f mmr_ms=%.1f granularity_ms=%.1f graph_stitch_ms=%.1f expansion_ms=%.1f precision_ms=%.1f total_ms=%.1f",
                 prep_ms,
                 f"{bm25_ms:.1f}" if bm25_ms is not None else "NA",
                 f"{vector_ms:.1f}" if vector_ms is not None else "NA",
                 merge_ms,
+                mmr_ms,
                 granularity_ms,
                 graph_stitch_ms,
                 expansion_ms,
@@ -274,6 +296,7 @@ class RetrievalPipeline:
                     "bm25_ms": round(bm25_ms, 2) if bm25_ms is not None else None,
                     "vector_ms": round(vector_ms, 2) if vector_ms is not None else None,
                     "merge_ms": round(merge_ms, 2),
+                    "mmr_ms": round(mmr_ms, 2),
                     "granularity_ms": round(granularity_ms, 2),
                     "graph_stitch_ms": round(graph_stitch_ms, 2),
                     "expansion_ms": round(expansion_ms, 2),

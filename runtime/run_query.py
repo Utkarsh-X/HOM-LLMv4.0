@@ -565,6 +565,7 @@ def main():
         embedder = QwenEmbedder(
             model_name=indexer_config.embedding_model,
             dimension=indexer_config.embedding_dimension,
+            max_input_tokens=indexer_config.embedding_max_tokens,
         )
 
         # Phase 1: Retrieval

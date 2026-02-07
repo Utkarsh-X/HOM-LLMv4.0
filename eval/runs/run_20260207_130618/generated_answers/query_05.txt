@@ -1,0 +1,42 @@
+QUERY_ID   : 05
+RUN_ID     : 512e624b-0ef1-4f4d-a09f-c38d0043e230
+MODEL      : gemini-2.5-flash
+PROVIDER   : gemini
+STATUS     : OK
+--- ANSWER ---
+## Enumerated Components
+The caching system described involves the following components:
+
+* **L1 Memory Cache:** This is the fastest cache layer, implemented as `self.memory_cache` (a Python dictionary) and `self.memory_timestamps` within the `CacheManager` class. It stores data in the application's process memory for very quick access.
+* **L2 Redis Cache:** This is a distributed cache layer, managed by an instance of `RedisClient` (`self.redis`). It provides a shared, persistent cache that can be accessed by multiple application instances.
+* **L3 Data Source (Database/Origin):** This represents the ultimate source of truth for the data. In the provided context, it is abstracted by the `fetch_func` callable parameter in the `CacheManager.get` method. This function is responsible for retrieving the data from its original storage location, such as a database or an external service.
+
+## Component Interactions
+The `CacheManager.get` method orchestrates the interaction between these layers when attempting to retrieve a value, and also handles cache promotion:
+
+1. **L1 Memory Cache Lookup:**
+* Upon a `get` request, the `CacheManager` first generates a unique `key` for the requested `namespace` and `identifier`.
+* It checks if this `key` exists in `self.memory_cache`.
+* If the key is found and the entry has not expired (based on `self.memory_timestamps` and `ttl`), it's an L1 hit. The `memory_hits` statistic is incremented, and the value is immediately returned.
+* If the key is not found or the entry has expired, `memory_misses` are incremented. Expired entries are removed from `self.memory_cache` and `self.memory_timestamps`.
+
+2. **L2 Redis Cache Lookup (if L1 misses):**
+* If the L1 memory cache misses, and if Redis is enabled (`self.redis` is not `None`), the `CacheManager` attempts to retrieve the value from Redis using `self.redis.get(key)`.
+* If a value is found in Redis, it's an L2 hit. The `redis_hits` statistic is incremented.
+* **Cache Promotion (L2 to L1):** The retrieved `redis_value` is then promoted to the L1 memory cache by calling `self._set_memory(key, redis_value, ttl)`. This ensures that subsequent requests for the same item will find it in the faster L1 cache. The `redis_value` is then returned.
+* If the value is not found in Redis, `redis_misses` are incremented.
+
+3. **L3 Data Source Fetch (if L1 and L2 both miss):**
+* If both L1 memory and L2 Redis caches miss, and a `fetch_func` callable was provided to the `get` method, this function is executed (`value = fetch_func()`). This is where the data is retrieved from its original source (the L3 layer).
+* **Cache Promotion (L3 to L1 and L2):** The newly fetched `value` is then promoted and stored in *both* the L1 memory cache and the L2 Redis cache. This is achieved by calling `self.set(namespace, identifier, value, ttl)`, which internally calls `self._set_memory` for L1 and `self.redis.set` for L2.
+* The fetched and now cached `value` is returned.
+* If no `fetch_func` was provided and both L1 and L2 missed, the `get` method returns `None`.
+
+## Summary
+When L1 memory, L2 Redis, and L3 database caches all miss, the `CacheManager` proceeds through a defined fallback sequence. First, it checks the L1 memory cache. If that misses (or the entry is expired), it checks the L2 Redis cache. If both L1 and L2 miss, the system falls back to the `fetch_func` (representing the L3 data source) to retrieve the data.
+
+Cache promotion is an automatic mechanism to move data from slower cache layers to faster ones upon a cache hit. Specifically:
+* If a value is found in the L2 Redis cache (after an L1 miss), it is promoted and stored in the L1 memory cache.
+* If a value is retrieved from the L3 data source (after both L1 and L2 miss), it is promoted and stored in both the L1 memory cache and the L2 Redis cache.
+
+This multi-layered caching strategy, combined with automatic promotion, optimizes data retrieval by serving requests from the fastest available cache and populating higher-level caches with frequently accessed or newly fetched data.

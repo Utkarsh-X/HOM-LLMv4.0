@@ -7,6 +7,7 @@ Uses cosine similarity to penalize candidates similar to already-selected items.
 """
 
 import logging
+from collections import OrderedDict
 from typing import Optional
 
 import numpy as np
@@ -14,6 +15,23 @@ import numpy as np
 from homllm.retrieval.interfaces import Candidate
 
 logger = logging.getLogger(__name__)
+
+_EMBED_CACHE_MAX = 2048
+_EMBED_CACHE: "OrderedDict[str, tuple[float, ...]]" = OrderedDict()
+
+
+def _cache_get(doc_id: str) -> Optional[tuple[float, ...]]:
+    if doc_id in _EMBED_CACHE:
+        _EMBED_CACHE.move_to_end(doc_id)
+        return _EMBED_CACHE[doc_id]
+    return None
+
+
+def _cache_put(doc_id: str, vector: tuple[float, ...]) -> None:
+    _EMBED_CACHE[doc_id] = vector
+    _EMBED_CACHE.move_to_end(doc_id)
+    if len(_EMBED_CACHE) > _EMBED_CACHE_MAX:
+        _EMBED_CACHE.popitem(last=False)
 
 
 def apply_mmr(
@@ -137,19 +155,35 @@ def compute_candidate_embeddings(
         Map of doc_id -> embedding vector
     """
     embeddings: dict[str, tuple[float, ...]] = {}
+    cache_hits = 0
+    cache_misses = 0
     
     for candidate in candidates:
         if not candidate.content:
+            continue
+        cached = _cache_get(candidate.doc_id)
+        if cached is not None:
+            embeddings[candidate.doc_id] = cached
+            cache_hits += 1
             continue
         
         try:
             # Use embed_code for code content
             vector = embedder.embed_code(candidate.content)
             embeddings[candidate.doc_id] = vector.values
+            _cache_put(candidate.doc_id, vector.values)
+            cache_misses += 1
         except Exception as e:
             logger.debug(f"Failed to embed {candidate.doc_id}: {e}")
             continue
-    
+
+    logger.debug(
+        "MMR_EMBED_CACHE hits=%d misses=%d size=%d",
+        cache_hits,
+        cache_misses,
+        len(_EMBED_CACHE),
+    )
+
     return embeddings
 
 

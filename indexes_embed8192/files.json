@@ -1,0 +1,333 @@
+{
+  "files": [
+    {
+      "content_hash": "c62d12a066eef0db0167ccfc27c58425141a6100248050ea248bc30dd0fbbb64",
+      "file_id": "39291ec4c0f92d41",
+      "language": "python",
+      "line_count": 15,
+      "parse_error": false,
+      "path": "api\\__init__.py"
+    },
+    {
+      "content_hash": "7464296768687f07787337197adc84821d9246bb258e9f085080804308abe2dd",
+      "file_id": "b2562ce6d603a293",
+      "language": "python",
+      "line_count": 88,
+      "parse_error": false,
+      "path": "api\\dependencies.py"
+    },
+    {
+      "content_hash": "d19cea4160547efa3cb98f77c9a7a1e8a08d0ee44807ab65f552af31c90133a1",
+      "file_id": "8ec6a6690ce24e8d",
+      "language": "python",
+      "line_count": 134,
+      "parse_error": false,
+      "path": "api\\routes.py"
+    },
+    {
+      "content_hash": "8480abe81212755ffe781feed41e8e737caab6b3d67ae2927235d4fb738105c5",
+      "file_id": "9e1cbc24d319511b",
+      "language": "python",
+      "line_count": 17,
+      "parse_error": false,
+      "path": "async_jobs\\__init__.py"
+    },
+    {
+      "content_hash": "a3ad3cbf8d932e0ced02b9dc2b06b41521bda6bb3d90018fd51833b18c532701",
+      "file_id": "a6ac4d259ba1c6d9",
+      "language": "python",
+      "line_count": 123,
+      "parse_error": false,
+      "path": "async_jobs\\batch_processor.py"
+    },
+    {
+      "content_hash": "7e10d4468e080087550fe781567bdc179a6a4a201261ed9c315a7fead934be21",
+      "file_id": "3fc413963bef641c",
+      "language": "python",
+      "line_count": 236,
+      "parse_error": false,
+      "path": "async_jobs\\job_queue.py"
+    },
+    {
+      "content_hash": "47f04282e9eca564c3394b061e086cbafefeb661ab4cf8908052661f819d1395",
+      "file_id": "c0d6aa1ac0df67cc",
+      "language": "python",
+      "line_count": 180,
+      "parse_error": false,
+      "path": "async_jobs\\worker.py"
+    },
+    {
+      "content_hash": "2868afa588b4d1d276ac0cce4f1c599e8e991ee2a57c551e5b813f53351383a6",
+      "file_id": "c0a41ae91bb75f9f",
+      "language": "python",
+      "line_count": 15,
+      "parse_error": false,
+      "path": "cache\\__init__.py"
+    },
+    {
+      "content_hash": "924aa84e09d1bceb3857793585358a1250896458fc230107fc8260513f237a68",
+      "file_id": "62959d8d92de9c58",
+      "language": "python",
+      "line_count": 230,
+      "parse_error": false,
+      "path": "cache\\cache_manager.py"
+    },
+    {
+      "content_hash": "8a50312e97eb8280e1abcbe75bb4d6e8de5292501193d239157b6e9fd0c58f96",
+      "file_id": "9a27b881c7a49b23",
+      "language": "python",
+      "line_count": 66,
+      "parse_error": false,
+      "path": "cache\\decorators.py"
+    },
+    {
+      "content_hash": "7589507712597e2b6f753b47c9214d060494a9d753abaa07da375a997dff8993",
+      "file_id": "c291241be1820c9d",
+      "language": "python",
+      "line_count": 284,
+      "parse_error": false,
+      "path": "cache\\redis_client.py"
+    },
+    {
+      "content_hash": "facfb2b48793346170bb0982aaf13055125d47878e85223dc013ddfb86b43e0c",
+      "file_id": "e5a4c0af248d7114",
+      "language": "python",
+      "line_count": 305,
+      "parse_error": false,
+      "path": "config.py"
+    },
+    {
+      "content_hash": "828b05e9ac05d74c8ef59232ecaa2b2dabfa3bc8b45dd8dc5220dee8ad70e5a1",
+      "file_id": "6be1f28701699a0d",
+      "language": "python",
+      "line_count": 33,
+      "parse_error": false,
+      "path": "core\\__init__.py"
+    },
+    {
+      "content_hash": "4c7b780a0bb6083d907d735dcfe763f536777b99b6f597d0c5ac5da4c1b40aad",
+      "file_id": "b6102d15ada8b151",
+      "language": "python",
+      "line_count": 51,
+      "parse_error": false,
+      "path": "core\\exceptions.py"
+    },
+    {
+      "content_hash": "316fdf77457f73146536f8f41ad4054a24793c183f1e9b2cc43083a1fc8f6648",
+      "file_id": "917a698e6a439c13",
+      "language": "python",
+      "line_count": 112,
+      "parse_error": false,
+      "path": "core\\interfaces.py"
+    },
+    {
+      "content_hash": "32df6dcebf945a5ab94122f8dec486f7ebfd5f33635e9d6463d3d2181feb73ca",
+      "file_id": "ca3039ada50fd609",
+      "language": "python",
+      "line_count": 9,
+      "parse_error": false,
+      "path": "database\\__init__.py"
+    },
+    {
+      "content_hash": "2bc7e8980eb97e8159ff44383f74a1337e44179b7dd12e4f20d577dfd2118cc8",
+      "file_id": "1fad0ed64b5d7e1a",
+      "language": "python",
+      "line_count": 8,
+      "parse_error": false,
+      "path": "database\\adapters\\__init__.py"
+    },
+    {
+      "content_hash": "c3b18b91ce54526c7a248cf543b2119cd15ea7afceae3581ee795497fc675ec9",
+      "file_id": "9259153015f96b17",
+      "language": "python",
+      "line_count": 317,
+      "parse_error": false,
+      "path": "database\\adapters\\postgres.py"
+    },
+    {
+      "content_hash": "fa00ca6c6cfd9d9f49ca9807d20df15fb943b318561805318d73c9fdd6b537e3",
+      "file_id": "b0658a4232ce1a3c",
+      "language": "python",
+      "line_count": 76,
+      "parse_error": false,
+      "path": "database\\adapters\\sqlite_legacy.py"
+    },
+    {
+      "content_hash": "235f06784bb070a62a236d95846cfe81b392640e62a91b96dd9fcec8a49af621",
+      "file_id": "ba9bc801047a6e20",
+      "language": "python",
+      "line_count": 113,
+      "parse_error": false,
+      "path": "database\\connection.py"
+    },
+    {
+      "content_hash": "7d3ed0c2df1e4a6aeb0cbc32b6669ed53dae4b9984c47c4ae9b8aff75df63211",
+      "file_id": "4c00e442e72d06d0",
+      "language": "python",
+      "line_count": 76,
+      "parse_error": false,
+      "path": "main.py"
+    },
+    {
+      "content_hash": "832c5d2ce9576500faf83978522db41010421875aa2125f68f5d6d9779d2b15f",
+      "file_id": "d6479bf8cca3e300",
+      "language": "python",
+      "line_count": 15,
+      "parse_error": false,
+      "path": "monitoring\\__init__.py"
+    },
+    {
+      "content_hash": "edf678eac3883448a5642be8547615b21a25385b8182381a368ed13123a4b109",
+      "file_id": "1bbb339762f4b858",
+      "language": "python",
+      "line_count": 74,
+      "parse_error": false,
+      "path": "monitoring\\decorators.py"
+    },
+    {
+      "content_hash": "cc38bf3cc8eceeccb70150d66f3fd5a741e23a0863a8bd822655a057406096eb",
+      "file_id": "e3ec9a1a6e211b84",
+      "language": "python",
+      "line_count": 215,
+      "parse_error": false,
+      "path": "monitoring\\metrics.py"
+    },
+    {
+      "content_hash": "644e6f988937d28f9b7cf79f6982d48f0b3239942b5c94a1762a3b0510708eb9",
+      "file_id": "f31b269ca116a2e7",
+      "language": "python",
+      "line_count": 225,
+      "parse_error": false,
+      "path": "monitoring\\tracer.py"
+    },
+    {
+      "content_hash": "b2edfede69439ef2e36b3a0a83c6bf062edd2d083514caf3e0b16761b5f68291",
+      "file_id": "f27c30f51f4d8fad",
+      "language": "python",
+      "line_count": 15,
+      "parse_error": false,
+      "path": "optimization\\__init__.py"
+    },
+    {
+      "content_hash": "961d38cfe021a36a40aed856824dbe153f3c574cc45b1bdf48c6cb5d100a9d63",
+      "file_id": "32de821ef41e842c",
+      "language": "python",
+      "line_count": 227,
+      "parse_error": false,
+      "path": "optimization\\execution_engine.py"
+    },
+    {
+      "content_hash": "6dbce4dc78aa442b7540bc9778046f74f9488b523a6754ce2387f3e8eeccd408",
+      "file_id": "50b9c9036fa9a01c",
+      "language": "python",
+      "line_count": 267,
+      "parse_error": false,
+      "path": "optimization\\query_optimizer.py"
+    },
+    {
+      "content_hash": "1b9c10aeb96b5db56162632cab916cf5a65d9857a0be4b8c0bbf085511b2a463",
+      "file_id": "6157ae2fab7f3e72",
+      "language": "python",
+      "line_count": 220,
+      "parse_error": false,
+      "path": "optimization\\query_planner.py"
+    },
+    {
+      "content_hash": "859407a3a32fdf8f60fcff36a4aa49c23a6ac0f00cc56c5fd98bcd86761eba57",
+      "file_id": "428cbb7482a08b84",
+      "language": "python",
+      "line_count": 9,
+      "parse_error": false,
+      "path": "search_engine\\__init__.py"
+    },
+    {
+      "content_hash": "3f9c246c7491921cbaaf05885455e31e68b55afe5f2210f4087e071833cb92fd",
+      "file_id": "c0e53853af95bd46",
+      "language": "python",
+      "line_count": 83,
+      "parse_error": false,
+      "path": "search_engine\\filters.py"
+    },
+    {
+      "content_hash": "ce7ed8ece8540c0709f24f27462fcc62a8def69cef5159843fec49f386dfc44a",
+      "file_id": "a271a35fa7475a6b",
+      "language": "python",
+      "line_count": 594,
+      "parse_error": false,
+      "path": "search_engine\\indexer.py"
+    },
+    {
+      "content_hash": "fb709bc1b3694b1a11f8f1b8d4649ad5edd9c204597eea58d6936b707a0ba3f8",
+      "file_id": "3aab8d44d5bfda3a",
+      "language": "python",
+      "line_count": 148,
+      "parse_error": false,
+      "path": "search_engine\\ranking.py"
+    },
+    {
+      "content_hash": "88903114a0293ad6f740ea9875d1d5678bd57fcabd35a1490a118edc3932f06f",
+      "file_id": "b4c0cbbedb2aabdd",
+      "language": "python",
+      "line_count": 15,
+      "parse_error": false,
+      "path": "security\\__init__.py"
+    },
+    {
+      "content_hash": "01d0de5f0e89bd4ba3e704d3e3d0c8f56cba9fc96684a6a77451773370daf5ee",
+      "file_id": "32d02746238718ae",
+      "language": "python",
+      "line_count": 105,
+      "parse_error": false,
+      "path": "security\\auth_manager.py"
+    },
+    {
+      "content_hash": "9143b7891e8badcb14266b2dbc8f7ac7386097b7921fc5c7b2dd1aeffb4f5474",
+      "file_id": "239b90178597c3f1",
+      "language": "python",
+      "line_count": 97,
+      "parse_error": false,
+      "path": "security\\decorators.py"
+    },
+    {
+      "content_hash": "3eef3d800fb9f659e8914879c0f8fc8dbbde815df31c0957937af3db13ff3464",
+      "file_id": "40542aea2fa168ae",
+      "language": "python",
+      "line_count": 69,
+      "parse_error": false,
+      "path": "security\\hashing.py"
+    },
+    {
+      "content_hash": "f0584e8143821262ce65b047f022272234b0b932b8c85fc7c688031bfbd4de99",
+      "file_id": "7c1160680c9b9753",
+      "language": "python",
+      "line_count": 34,
+      "parse_error": false,
+      "path": "utils\\__init__.py"
+    },
+    {
+      "content_hash": "f911c8b473108e3312d2063e41110b018ec475f555bc0d668e2c2945f978ae83",
+      "file_id": "2833c4cbc37c1b29",
+      "language": "python",
+      "line_count": 94,
+      "parse_error": false,
+      "path": "utils\\date_helpers.py"
+    },
+    {
+      "content_hash": "3ef8de40794bb41e1566119f2f8b8c2a2ef346f94458138077b8b2f55ae702b3",
+      "file_id": "444474c557b38c2e",
+      "language": "python",
+      "line_count": 149,
+      "parse_error": false,
+      "path": "utils\\string_tools.py"
+    },
+    {
+      "content_hash": "eede72656739a2adfa12ede061cb0b93fd2a3ec659c43af74f144a8285267059",
+      "file_id": "0fc7f7997457c2f7",
+      "language": "python",
+      "line_count": 138,
+      "parse_error": false,
+      "path": "utils\\validators.py"
+    }
+  ],
+  "version": "1.0"
+}

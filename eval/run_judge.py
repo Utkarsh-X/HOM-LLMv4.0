@@ -18,6 +18,7 @@ import re
 import sys
 import time
 import threading
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -83,7 +84,7 @@ class RateLimiter:
         limiter.acquire()  # Blocks until a request slot is available
     """
     
-    def __init__(self, requests_per_minute: int = 60):
+    def __init__(self, requests_per_minute: int = 60, safety_seconds: float = 0.25):
         """
         Initialize rate limiter.
         
@@ -94,10 +95,13 @@ class RateLimiter:
         """
         self.rpm = requests_per_minute
         self.enabled = requests_per_minute > 0
-        self.interval = 60.0 / requests_per_minute if self.enabled else 0
-        self.last_request_time = 0.0
+        self.window_seconds = 60.0
+        self.safety_seconds = max(0.0, float(safety_seconds))
+        self.min_interval_seconds = (self.window_seconds / requests_per_minute) if self.enabled else 0.0
         self._lock = threading.Lock()
         self._request_count = 0
+        self._request_times = deque()
+        self._last_request_time = None
     
     def acquire(self) -> float:
         """
@@ -110,19 +114,40 @@ class RateLimiter:
             return 0.0
         
         with self._lock:
-            current_time = time.time()
-            time_since_last = current_time - self.last_request_time
-            
-            if time_since_last < self.interval:
-                wait_time = self.interval - time_since_last
+            total_wait = 0.0
+
+            # Strict limiter: enforce both
+            # 1) rolling-window cap and
+            # 2) minimum inter-request spacing.
+            while True:
+                now = time.monotonic()
+                cutoff = now - self.window_seconds
+                while self._request_times and self._request_times[0] <= cutoff:
+                    self._request_times.popleft()
+
+                wait_window = 0.0
+                if len(self._request_times) >= self.rpm:
+                    oldest = self._request_times[0]
+                    wait_window = (oldest + self.window_seconds + self.safety_seconds) - now
+
+                wait_interval = 0.0
+                if self._last_request_time is not None:
+                    wait_interval = (
+                        (self._last_request_time + self.min_interval_seconds + self.safety_seconds)
+                        - now
+                    )
+
+                wait_time = max(wait_window, wait_interval, 0.0)
+                wait_time = max(0.0, wait_time)
+                if wait_time <= 0:
+                    now = time.monotonic()
+                    self._request_times.append(now)
+                    self._last_request_time = now
+                    self._request_count += 1
+                    return total_wait
+
                 time.sleep(wait_time)
-                self.last_request_time = time.time()
-                self._request_count += 1
-                return wait_time
-            else:
-                self.last_request_time = current_time
-                self._request_count += 1
-                return 0.0
+                total_wait += wait_time
     
     @property
     def request_count(self) -> int:
@@ -567,7 +592,7 @@ def main() -> None:
     rpm = args.rpm if args.rpm is not None else cfg.requests_per_minute
     rate_limiter = RateLimiter(requests_per_minute=rpm)
     if rate_limiter.enabled:
-        print(f"Rate limit: {rpm} requests/minute ({60.0/rpm:.1f}s between requests)")
+        print(f"Rate limit: {rpm} requests/minute (strict rolling window, +{rate_limiter.safety_seconds:.2f}s safety)")
     else:
         print("Rate limit: disabled (unlimited)")
 

@@ -7,7 +7,8 @@ Respects confidence threshold, depth limit, and relation priority.
 """
 
 import logging
-from collections import deque
+import time
+from collections import defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -28,6 +29,9 @@ DEFAULT_RELATION_PRIORITY: list[str] = [
     "type_annotates",
 ]
 
+HIGH_PRIORITY_RELATIONS: set[str] = {"DEFINES", "CALLS", "INHERITS", "OVERRIDES"}
+LOW_PRIORITY_RELATIONS: set[str] = {"IMPORTS", "USES"}
+
 
 @dataclass
 class GraphStitchConfig:
@@ -38,10 +42,14 @@ class GraphStitchConfig:
     max_additions: int = 8
     min_confidence: float = 0.5
     relation_priority: list[str] = None
+    graph_cache_enabled: bool = True
+    beam_high: int = 8
+    beam_low: int = 3
     
     def __post_init__(self):
         if self.relation_priority is None:
             self.relation_priority = DEFAULT_RELATION_PRIORITY.copy()
+        self.relation_priority = [str(r).upper() for r in self.relation_priority]
 
 
 @dataclass(frozen=True)
@@ -52,6 +60,71 @@ class RelationEdge:
     dst_entity_id: str
     relation_type: str
     hop: int  # BFS hop count
+    confidence: float = 0.0
+
+
+class GraphTopology:
+    """Singleton in-memory graph topology for relations table."""
+
+    _instance: Optional["GraphTopology"] = None
+
+    def __init__(self):
+        self._loaded = False
+        self.adjacency: dict[str, list[tuple[str, str, float]]] = defaultdict(list)
+
+    @classmethod
+    def get_instance(cls, duckdb_path: Optional[Path]) -> Optional["GraphTopology"]:
+        if duckdb_path is None:
+            return None
+        if cls._instance is None:
+            cls._instance = GraphTopology()
+        if not cls._instance._loaded:
+            cls._instance._load(duckdb_path)
+        return cls._instance
+
+    def _load(self, duckdb_path: Path) -> None:
+        start = time.perf_counter()
+        adapter = DuckDBAdapter(duckdb_path)
+        try:
+            adapter.connect()
+            try:
+                rows = adapter.conn.execute(
+                    """
+                    SELECT src_entity_id, dst_entity_id, relation_type, confidence_score
+                    FROM relations
+                    """
+                ).fetchall()
+                for src, dst, rel_type, conf in rows:
+                    rel = str(rel_type).upper()
+                    self.adjacency[str(src)].append((str(dst), rel, float(conf or 0.0)))
+            except Exception:
+                rows = adapter.conn.execute(
+                    """
+                    SELECT src_entity_id, dst_entity_id, relation_type
+                    FROM relations
+                    """
+                ).fetchall()
+                for src, dst, rel_type in rows:
+                    rel = str(rel_type).upper()
+                    self.adjacency[str(src)].append((str(dst), rel, 1.0))
+            self._loaded = True
+            nodes = len(self.adjacency)
+            edges = sum(len(v) for v in self.adjacency.values())
+            elapsed_ms = (time.perf_counter() - start) * 1000
+            logger.info(
+                "GraphTopology: Loaded cache nodes=%d edges=%d in %.1f ms",
+                nodes,
+                edges,
+                elapsed_ms,
+            )
+        except Exception as e:
+            logger.warning(f"GraphTopology: Failed to load relations into memory: {e}")
+        finally:
+            try:
+                if adapter.conn:
+                    adapter.conn.close()
+            except Exception:
+                pass
 
 
 class GraphStitchExpander:
@@ -83,6 +156,9 @@ class GraphStitchExpander:
         self.config = config or GraphStitchConfig()
         self._duckdb: Optional[DuckDBAdapter] = None
         self.duckdb_path = duckdb_path
+        self._graph_topology: Optional[GraphTopology] = None
+        self._cache_hits = 0
+        self._cache_fallbacks = 0
         
         if duckdb_path:
             try:
@@ -90,6 +166,9 @@ class GraphStitchExpander:
                 self._duckdb.connect()
             except Exception as e:
                 logger.warning(f"Failed to initialize DuckDB for graph stitch: {e}")
+        
+        if self.config.graph_cache_enabled:
+            self._graph_topology = GraphTopology.get_instance(duckdb_path)
     
     def expand(
         self,
@@ -121,9 +200,29 @@ class GraphStitchExpander:
             return candidates
         
         # BFS to find related entities
-        related = self._bfs_expand(seed_ids)
+        bfs_start = time.perf_counter()
+        self._cache_hits = 0
+        self._cache_fallbacks = 0
+        hop_stats: dict[int, dict[str, int]] = defaultdict(
+            lambda: {"high": 0, "low": 0, "total_before": 0, "after": 0}
+        )
+        related, visited_nodes, neighbors_before, neighbors_after = self._bfs_expand(
+            seed_ids, hop_stats
+        )
+        bfs_ms = (time.perf_counter() - bfs_start) * 1000
         
         if not related:
+            logger.info(
+                "GraphStitch: query=\"%s\" cache_used=%s cache_hits=%d cache_fallbacks=%d bfs_ms=%.1f visited=%d neighbors_before=%d neighbors_after=%d additions=0",
+                query[:80].replace("\n", " "),
+                bool(self.config.graph_cache_enabled and self._graph_topology),
+                self._cache_hits,
+                self._cache_fallbacks,
+                bfs_ms,
+                visited_nodes,
+                neighbors_before,
+                neighbors_after,
+            )
             return candidates
         
         # Convert to candidates
@@ -140,6 +239,8 @@ class GraphStitchExpander:
             )
         )
         
+        entity_info_ms = 0.0
+        content_ms = 0.0
         for edge in related:
             if additions >= self.config.max_additions:
                 break
@@ -151,7 +252,9 @@ class GraphStitchExpander:
                 continue
             
             # Load entity content
+            info_start = time.perf_counter()
             entity_info = self._get_entity_info(entity_id)
+            entity_info_ms += (time.perf_counter() - info_start) * 1000
             if not entity_info:
                 continue
             
@@ -165,7 +268,9 @@ class GraphStitchExpander:
                 continue
             
             # Load content
+            content_start = time.perf_counter()
             content = self._get_entity_content(entity_id, entity_info)
+            content_ms += (time.perf_counter() - content_start) * 1000
             
             # Create candidate with provenance
             provenance_tag = f"graph_stitch:{edge.relation_type}:hop{edge.hop}"
@@ -190,9 +295,39 @@ class GraphStitchExpander:
         if additions > 0:
             logger.info(f"Graph stitch: Added {additions} related entities")
         
+        hop_entries = sorted(hop_stats.items())
+        hop_count = len(hop_entries)
+        avg_high = sum(v["high"] for _, v in hop_entries) / hop_count if hop_count else 0.0
+        avg_low = sum(v["low"] for _, v in hop_entries) / hop_count if hop_count else 0.0
+        avg_total = sum(v["total_before"] for _, v in hop_entries) / hop_count if hop_count else 0.0
+        avg_after = sum(v["after"] for _, v in hop_entries) / hop_count if hop_count else 0.0
+        
+        logger.info(
+            "GraphStitch: query=\"%s\" cache_used=%s cache_hits=%d cache_fallbacks=%d bfs_ms=%.1f entity_info_ms=%.1f content_ms=%.1f visited=%d neighbors_before=%d neighbors_after=%d avg_high=%.1f avg_low=%.1f avg_total=%.1f avg_after=%.1f additions=%d",
+            query[:80].replace("\n", " "),
+            bool(self.config.graph_cache_enabled and self._graph_topology),
+            self._cache_hits,
+            self._cache_fallbacks,
+            bfs_ms,
+            entity_info_ms,
+            content_ms,
+            visited_nodes,
+            neighbors_before,
+            neighbors_after,
+            avg_high,
+            avg_low,
+            avg_total,
+            avg_after,
+            additions,
+        )
+        
         return expanded
     
-    def _bfs_expand(self, seed_ids: set[str]) -> list[RelationEdge]:
+    def _bfs_expand(
+        self,
+        seed_ids: set[str],
+        hop_stats: dict[int, dict[str, int]],
+    ) -> tuple[list[RelationEdge], int, int, int]:
         """
         Perform BFS on relation graph starting from seed IDs.
         
@@ -205,6 +340,8 @@ class GraphStitchExpander:
         found: list[RelationEdge] = []
         visited: set[str] = set(seed_ids)
         queue: deque[tuple[str, int]] = deque()
+        neighbors_before = 0
+        neighbors_after = 0
         
         # Initialize queue with seed IDs at hop 0
         for seed in seed_ids:
@@ -218,10 +355,38 @@ class GraphStitchExpander:
             
             # Get outgoing relations
             relations = self._get_relations_from(entity_id)
+            if not relations:
+                continue
             
+            high: list[dict] = []
+            low: list[dict] = []
             for rel in relations:
+                rel_type = rel["relation_type"]
+                if rel_type in HIGH_PRIORITY_RELATIONS:
+                    high.append(rel)
+                else:
+                    low.append(rel)
+            
+            high.sort(key=lambda r: r.get("confidence", 0.0), reverse=True)
+            low.sort(key=lambda r: r.get("confidence", 0.0), reverse=True)
+            
+            high_before = len(high)
+            low_before = len(low)
+            neighbors_before += high_before + low_before
+            high = high[: self.config.beam_high]
+            low = low[: self.config.beam_low]
+            pruned = high + low
+            neighbors_after += len(pruned)
+            
+            hop_stats[hop]["high"] += len(high)
+            hop_stats[hop]["low"] += len(low)
+            hop_stats[hop]["total_before"] += high_before + low_before
+            hop_stats[hop]["after"] += len(pruned)
+            
+            for rel in pruned:
                 dst = rel["dst_entity_id"]
                 rel_type = rel["relation_type"]
+                conf = rel.get("confidence", 0.0)
                 
                 if dst in visited:
                     continue
@@ -232,6 +397,7 @@ class GraphStitchExpander:
                     dst_entity_id=dst,
                     relation_type=rel_type,
                     hop=hop + 1,
+                    confidence=conf,
                 )
                 found.append(edge)
                 
@@ -239,13 +405,25 @@ class GraphStitchExpander:
                 visited.add(dst)
                 queue.append((dst, hop + 1))
         
-        return found
+        return found, len(visited), neighbors_before, neighbors_after
     
     def _get_relations_from(self, entity_id: str) -> list[dict]:
         """Get relations where entity is the source."""
+        if self.config.graph_cache_enabled and self._graph_topology:
+            self._cache_hits += 1
+            items = self._graph_topology.adjacency.get(entity_id, [])
+            return [
+                {
+                    "dst_entity_id": dst,
+                    "relation_type": rel_type,
+                    "confidence": conf,
+                }
+                for dst, rel_type, conf in items
+            ]
         if not self._duckdb or not self._duckdb.conn:
             return []
         
+        self._cache_fallbacks += 1
         try:
             result = self._duckdb.conn.execute(
                 """
@@ -257,7 +435,11 @@ class GraphStitchExpander:
             ).fetchall()
             
             return [
-                {"dst_entity_id": row[0], "relation_type": row[1]}
+                {
+                    "dst_entity_id": row[0],
+                    "relation_type": str(row[1]).upper(),
+                    "confidence": 1.0,
+                }
                 for row in result
             ]
         except Exception as e:

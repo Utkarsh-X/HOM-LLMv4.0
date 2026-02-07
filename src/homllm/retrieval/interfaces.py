@@ -136,6 +136,12 @@ class RetrievalConfig:
     graph_stitch_max_additions: int = 8
     graph_stitch_min_confidence: float = 0.5
     graph_stitch_relation_priority: list[str] = field(default_factory=list)
+    graph_cache_enabled: bool = True
+    graph_stitch_beam_high: int = 8
+    graph_stitch_beam_low: int = 3
+
+    # Post-merge candidate cap (applied after hybrid merge)
+    post_merge_candidates: int = 0
     
     def __post_init__(self):
         """Set defaults for Plan B config."""

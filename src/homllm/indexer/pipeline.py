@@ -73,6 +73,7 @@ class IndexerPipeline:
         self.embedder = QwenEmbedder(
             model_name=config.embedding_model,
             dimension=config.embedding_dimension,
+            max_input_tokens=config.embedding_max_tokens,
         )
 
         # Initialize storage adapters

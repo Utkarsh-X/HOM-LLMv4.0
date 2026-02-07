@@ -279,6 +279,102 @@ def run_single_query(
     return response
 
 
+def run_single_query_inproc(
+    query: QueryRecord,
+    args: argparse.Namespace,
+) -> Dict:
+    import io
+    import contextlib
+    import importlib
+    import logging
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+
+    argv = [
+        str(RUNTIME_CLI),
+        "--query",
+        query.query_text,
+        "--config",
+        str(args.config),
+        "--json",
+    ]
+    if args.provider:
+        argv.extend(["--provider", args.provider])
+    if args.model:
+        argv.extend(["--model", args.model])
+    if args.intent:
+        argv.extend(["--intent", args.intent])
+    if args.raw:
+        argv.append("--raw")
+    if args.no_file_mapping:
+        argv.append("--no-file-mapping")
+    if args.intelligence_levels:
+        argv.extend(["--intelligence-levels", args.intelligence_levels])
+    if args.token_attribution:
+        argv.append("--token-attribution")
+    if args.reasoning_contracts:
+        argv.append("--reasoning-contracts")
+    if args.assertion_readability:
+        argv.append("--assertion-readability")
+    if args.reasoning_diagnostics:
+        argv.append("--reasoning-diagnostics")
+    if args.diagnostic_layers:
+        argv.extend(["--diagnostic-layers", args.diagnostic_layers])
+    if args.context_diagnostics:
+        argv.append("--context-diagnostics")
+
+    out_buf = io.StringIO()
+    err_buf = io.StringIO()
+    old_argv = sys.argv[:]
+    root_logger = logging.getLogger()
+    handler_streams = []
+    try:
+        sys.argv = argv
+        run_query = importlib.import_module("runtime.run_query")
+        for handler in root_logger.handlers:
+            if hasattr(handler, "stream"):
+                handler_streams.append((handler, handler.stream))
+                handler.stream = err_buf
+        with contextlib.redirect_stdout(out_buf), contextlib.redirect_stderr(err_buf):
+            run_query.main()
+    finally:
+        for handler, stream in handler_streams:
+            handler.stream = stream
+        sys.argv = old_argv
+
+    combined_output = out_buf.getvalue() + "\n" + err_buf.getvalue()
+    combined_lines = combined_output.splitlines()
+
+    telemetry_path = extract_telemetry_path(combined_output)
+    telemetry = load_telemetry(telemetry_path) if telemetry_path and telemetry_path.exists() else {}
+    run_id = extract_run_id_from_path(telemetry_path)
+    answer_text = extract_result_text(combined_lines)
+
+    phases = telemetry.get("phases", {})
+    gen_meta = phases.get("GENERATION", {})
+
+    response = {
+        "query_id": query.query_id,
+        "query_text": query.query_text,
+        "system": "HOM-LLM",
+        "model_name": gen_meta.get("model") or args.model or "unknown",
+        "provider": gen_meta.get("provider") or args.provider or "unknown",
+        "answer_text": answer_text,
+        "tokens_in": gen_meta.get("tokens_in", 0),
+        "tokens_out": gen_meta.get("tokens_out", 0),
+        "latency_ms": gen_meta.get("latency_ms", 0.0),
+        "status": gen_meta.get("status", "UNKNOWN"),
+        "telemetry_path": str(telemetry_path) if telemetry_path else None,
+        "run_id": run_id,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+    if args.telemetry_print:
+        print_telemetry_summary(query.query_id, query.query_text, telemetry, run_id)
+
+    return response
+
+
 def persist_answer_txt(response: Dict, answer_text: str, run_dir: Path) -> None:
     """Persist answer text to run_dir/generated_answers/query_XX.txt"""
     answers_dir = run_dir / "generated_answers"
@@ -364,6 +460,10 @@ def main() -> None:
         "--context-diagnostics", action="store_true",
         help="Run L1/L2/L3 context diagnostics and save to context_diagnostics.json"
     )
+    parser.add_argument(
+        "--reuse-process", action="store_true",
+        help="Run queries in-process to reuse caches between queries"
+    )
 
     args = parser.parse_args()
 
@@ -389,7 +489,11 @@ def main() -> None:
 
     total = len(selected_queries)
     for idx, query in enumerate(selected_queries, start=1):
-        response = run_single_query(query, args)
+        response = (
+            run_single_query_inproc(query, args)
+            if args.reuse_process
+            else run_single_query(query, args)
+        )
         write_jsonl(responses_path, [response])
         persist_answer_txt(response, response.get("answer_text", ""), run_dir)
 
