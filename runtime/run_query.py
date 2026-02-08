@@ -284,6 +284,26 @@ def parse_intelligence_levels(spec: str) -> tuple[bool, bool, bool, bool]:
     raise ValueError(f"Invalid intelligence-levels: {spec}. Use: none|l1|l1,l2|l1,l2,l3")
 
 
+def infer_retrieval_intent(query: str) -> Intent:
+    """
+    Infer retrieval intent from query text when CLI intent is not provided.
+
+    Uses the existing deterministic sufficiency intent classifier and maps:
+    - ARCHITECTURAL -> EXPLAIN
+    - IMPLEMENTATION -> IMPLEMENT
+    - BEHAVIORAL -> DEBUG
+    """
+    from homllm.sufficiency.intent import classify_intent
+
+    result = classify_intent(query)
+    mapping = {
+        "ARCHITECTURAL": Intent.EXPLAIN,
+        "IMPLEMENTATION": Intent.IMPLEMENT,
+        "BEHAVIORAL": Intent.DEBUG,
+    }
+    return mapping.get(result.intent, Intent.UNKNOWN)
+
+
 class QueryTelemetry:
     """Telemetry collector for query execution."""
 
@@ -548,10 +568,18 @@ def main():
     telemetry = QueryTelemetry(args.query, export_json=args.json)
 
     # Parse intent
+    intent_source = "cli"
     try:
         intent = Intent[args.intent.upper()]
     except KeyError:
         intent = Intent.UNKNOWN
+        intent_source = "inferred"
+
+    if intent == Intent.UNKNOWN:
+        intent = infer_retrieval_intent(args.query)
+        intent_source = "inferred"
+
+    logger.info("[INTENT] value=%s source=%s", intent.value, intent_source)
 
     try:
         # Initialize presentation renderer (architecture-safe, deterministic)
@@ -1106,10 +1134,6 @@ def main():
             provenance_parts.append(f"Fix: {fixer_result.action.value}")
         template_variables["provenance_summary"] = "; ".join(provenance_parts) if provenance_parts else "Standard retrieval"
         template_variables["fix_summary"] = mechanical_fix_notice or "None"
-
-        # Force test: hardcode ABRM template for one query
-        if args.query.strip().startswith("Trace the execution flow when an admin user calls the admin_search_endpoint"):
-            selected_template = "abrm_explain"
 
         logger.debug(f"Plan C: template={selected_template}, abrm_active={abrm_active}")
 

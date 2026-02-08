@@ -13,6 +13,7 @@ Chunking Principles:
 
 import hashlib
 import logging
+import textwrap
 from dataclasses import dataclass
 from typing import Optional
 
@@ -113,21 +114,37 @@ class HierarchicalChunker:
     
     def _create_fine_chunks(self, context: FileContext) -> list[ChunkInfo]:
         """
-        Create fine-level (symbol-level) chunks.
+        Create fine-level (symbol-level) chunks with parent scope injection.
         
-        One chunk per function/method/class.
+        Each fine chunk includes:
+        - File header for explicit location context
+        - Parent scope signatures (class / outer function chain)
+        - Symbol body normalized to match injected nesting depth
         """
         chunks = []
-        
+        symbol_by_id = {s.id: s for s in context.symbols}
+
         for idx, symbol in enumerate(context.symbols):
             # Skip very small symbols (less than 2 lines)
             if symbol.end_line - symbol.start_line < 2:
                 continue
-            
+
             # Extract symbol content
             start_idx = max(0, symbol.start_line - 1)
             end_idx = min(len(context.lines), symbol.end_line)
-            chunk_content = "\n".join(context.lines[start_idx:end_idx])
+            raw_content = "\n".join(context.lines[start_idx:end_idx])
+            
+            # Build scope-aware fine chunk to avoid orphaned method/function bodies.
+            scope_chain = self._build_scope_chain(symbol, symbol_by_id)
+            chunk_parts = [f"# File: {context.file_path}", ""]
+            
+            for depth, parent in enumerate(scope_chain):
+                scope_line = self._get_scope_signature(parent)
+                chunk_parts.append(self._indent_content(scope_line, depth))
+            
+            normalized_content = self._normalize_symbol_content(raw_content)
+            chunk_parts.append(self._indent_content(normalized_content, len(scope_chain)))
+            chunk_content = "\n".join(chunk_parts)
             
             # Find linked entity IDs
             linked_entities = self._find_linked_entities(
@@ -150,8 +167,59 @@ class HierarchicalChunker:
                 entity_ids=tuple(linked_entities),
             )
             chunks.append(chunk)
-        
+
         return chunks
+    
+    def _build_scope_chain(
+        self,
+        symbol: SymbolInfo,
+        symbol_by_id: dict[str, SymbolInfo],
+    ) -> list[SymbolInfo]:
+        """
+        Build parent scope chain from root -> immediate parent for a symbol.
+        """
+        chain = []
+        current = symbol
+        
+        while current.parent_id:
+            parent = symbol_by_id.get(current.parent_id)
+            if not parent:
+                break
+            chain.insert(0, parent)
+            current = parent
+        
+        return chain
+    
+    def _get_scope_signature(self, symbol: SymbolInfo) -> str:
+        """
+        Return a signature-only line for an enclosing scope.
+        """
+        if symbol.kind.value == "class":
+            return f"class {symbol.name}:"
+        
+        if symbol.kind.value in {"function", "method"}:
+            if symbol.signature:
+                return f"def {symbol.signature}:"
+            return f"def {symbol.name}(...):"
+        
+        return f"# {symbol.name}"
+    
+    def _normalize_symbol_content(self, content: str) -> str:
+        """
+        Dedent symbol content so scope injection can re-indent deterministically.
+        """
+        return textwrap.dedent(content).rstrip()
+    
+    def _indent_content(self, content: str, levels: int) -> str:
+        """
+        Indent multi-line content by 4 spaces per level.
+        """
+        if levels <= 0:
+            return content
+        
+        prefix = "    " * levels
+        lines = content.split("\n")
+        return "\n".join(f"{prefix}{line}" if line else line for line in lines)
     
     def _create_medium_chunks(self, context: FileContext) -> list[ChunkInfo]:
         """

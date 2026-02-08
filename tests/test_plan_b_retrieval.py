@@ -54,7 +54,7 @@ class TestRetrievalConfigPlanB:
         assert config.graph_stitch_max_depth == 2
         assert config.graph_stitch_max_additions == 8
         assert config.graph_stitch_min_confidence == 0.5
-        assert "calls" in config.graph_stitch_relation_priority
+        assert config.graph_stitch_relation_priority[0] == "resolves_to"
 
     def test_granularity_boost_table_populated(self):
         """Test that granularity boost table has correct structure."""
@@ -232,7 +232,7 @@ class TestGraphStitch:
         assert config.max_depth == 2
         assert config.max_additions == 8
         assert config.min_confidence == 0.5
-        assert "calls" in config.relation_priority
+        assert config.relation_priority[0] == "resolves_to"
         assert "inherits" in config.relation_priority
 
     def test_graph_stitch_expander_no_duckdb(self):
@@ -254,6 +254,67 @@ class TestGraphStitch:
         
         # No DuckDB → unchanged
         assert result == candidates
+
+
+class TestRetrievalGapHelpers:
+    """Tests for budgeting, dedup, and granularity mixing helpers."""
+
+    def test_budget_selection_respects_effective_budget(self):
+        from homllm.retrieval.budget import select_candidates_with_budget
+
+        candidates = [
+            Candidate(doc_id="a", file="a.py", symbol_id=None, content="x" * 900, hybrid_score=5.0),
+            Candidate(doc_id="b", file="b.py", symbol_id=None, content="x" * 900, hybrid_score=4.0),
+            Candidate(doc_id="c", file="c.py", symbol_id=None, content="x" * 900, hybrid_score=3.0),
+        ]
+        selected, tracker = select_candidates_with_budget(candidates, total_budget=600, reserve=200)
+        assert len(selected) == 1
+        assert tracker.used <= tracker.effective_budget
+
+    def test_hierarchical_dedup_drops_parent_when_fine_present(self):
+        from homllm.retrieval.deduplication import deduplicate_hierarchical
+
+        candidates = [
+            Candidate(doc_id="fine1", file="pkg/a.py", symbol_id=None, content="f", hybrid_score=5.0, granularity_level="fine"),
+            Candidate(doc_id="fine2", file="pkg/a.py", symbol_id=None, content="f", hybrid_score=4.0, granularity_level="fine"),
+            Candidate(doc_id="medium", file="pkg/a.py", symbol_id=None, content="m", hybrid_score=3.0, granularity_level="medium"),
+            Candidate(doc_id="coarse", file="pkg/a.py", symbol_id=None, content="c", hybrid_score=2.0, granularity_level="coarse"),
+        ]
+        deduped = deduplicate_hierarchical(candidates)
+        ids = {candidate.doc_id for candidate in deduped}
+        assert "coarse" not in ids
+        assert "medium" not in ids
+        assert "fine1" in ids and "fine2" in ids
+
+    def test_hierarchical_dedup_keeps_structural_context_for_explain(self):
+        from homllm.retrieval.deduplication import deduplicate_hierarchical
+
+        candidates = [
+            Candidate(doc_id="fine1", file="pkg/a.py", symbol_id=None, content="f", hybrid_score=5.0, granularity_level="fine"),
+            Candidate(doc_id="fine2", file="pkg/a.py", symbol_id=None, content="f", hybrid_score=4.5, granularity_level="fine"),
+            Candidate(doc_id="medium1", file="pkg/a.py", symbol_id=None, content="m", hybrid_score=4.0, granularity_level="medium"),
+            Candidate(doc_id="coarse1", file="pkg/a.py", symbol_id=None, content="c", hybrid_score=3.5, granularity_level="coarse"),
+        ]
+        deduped = deduplicate_hierarchical(candidates, intent=Intent.EXPLAIN)
+        ids = {candidate.doc_id for candidate in deduped}
+        assert "medium1" in ids
+        assert "coarse1" in ids
+        assert "fine1" in ids and "fine2" in ids
+
+    def test_granularity_mix_prefers_explain_diversity(self):
+        from homllm.retrieval.granularity_strategy import apply_granularity_mix
+
+        candidates = [
+            Candidate(doc_id="f1", file="a.py", symbol_id=None, content="f", hybrid_score=9.0, granularity_level="fine"),
+            Candidate(doc_id="f2", file="a.py", symbol_id=None, content="f", hybrid_score=8.0, granularity_level="fine"),
+            Candidate(doc_id="m1", file="a.py", symbol_id=None, content="m", hybrid_score=7.0, granularity_level="medium"),
+            Candidate(doc_id="c1", file="a.py", symbol_id=None, content="c", hybrid_score=6.0, granularity_level="coarse"),
+        ]
+        mixed = apply_granularity_mix(candidates, Intent.EXPLAIN)
+        levels = {candidate.granularity_level for candidate in mixed[:4]}
+        assert "fine" in levels
+        assert "medium" in levels
+        assert "coarse" in levels
 
 
 if __name__ == "__main__":

@@ -35,7 +35,7 @@ class BlockAssembler:
             start_line = 1
             end_line = len(content.split("\n")) if content else 1
 
-            if ":" in symbol_id:
+            if symbol_id and ":" in symbol_id:
                 parts = symbol_id.split(":")
                 # Try to extract line numbers if present
                 try:

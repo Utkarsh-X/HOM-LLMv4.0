@@ -10,13 +10,21 @@ Extended for entity-centric indexing (Plan A) with typed relations:
 - type_annotates: Type annotation links (optional)
 """
 
+import logging
 import re
+from collections import defaultdict
 from typing import Optional
 
 from tree_sitter import Node
 
 from homllm.common.types import CallEdge, EntityInfo, RelationInfo, RelationType, SymbolInfo
 from homllm.indexer.interfaces import ParseResult
+
+
+logger = logging.getLogger(__name__)
+
+CALL_NODE_TYPES = {"call", "call_expression", "new_expression"}
+CALLABLE_SYMBOL_KINDS = {"function", "method"}
 
 
 class GraphBuilder:
@@ -73,25 +81,374 @@ class GraphBuilder:
         for entity in entities:
             self.entities[entity.entity_id] = entity
 
-    def _extract_call_edges(self, file_path: str, result: ParseResult) -> None:
+    def _build_symbols_by_name(
+        self,
+        result: ParseResult,
+    ) -> dict[str, list[SymbolInfo]]:
+        """Build deterministic symbol lookup by name."""
+        symbols_by_name: dict[str, list[SymbolInfo]] = defaultdict(list)
+        for symbol in result.symbols:
+            symbols_by_name[symbol.name].append(symbol)
+
+        for symbols in symbols_by_name.values():
+            symbols.sort(key=lambda s: (s.start_line, s.end_line, s.id))
+
+        return dict(symbols_by_name)
+
+    def _iter_ast_nodes(self, root: Node):
+        """Iterate AST nodes in pre-order traversal."""
+        stack = [root]
+        while stack:
+            current = stack.pop()
+            yield current
+            for child in reversed(current.children):
+                stack.append(child)
+
+    def _node_text(self, content_bytes: bytes, node: Optional[Node]) -> str:
+        """Read node text from source bytes."""
+        if node is None:
+            return ""
+        return content_bytes[node.start_byte : node.end_byte].decode(
+            "utf-8", errors="replace"
+        )
+
+    def _find_containing_callable(
+        self,
+        line_number: int,
+        callable_symbols: list[SymbolInfo],
+    ) -> Optional[SymbolInfo]:
+        """Find innermost callable symbol containing a line."""
+        candidates = [
+            symbol
+            for symbol in callable_symbols
+            if symbol.start_line <= line_number <= symbol.end_line
+        ]
+        if not candidates:
+            return None
+
+        return min(
+            candidates,
+            key=lambda s: (s.end_line - s.start_line, s.start_line, s.id),
+        )
+
+    def _select_best_candidate(
+        self,
+        candidates: list[SymbolInfo],
+        line_number: int,
+    ) -> Optional[SymbolInfo]:
+        """Select deterministic symbol candidate near a line."""
+        if not candidates:
+            return None
+        return min(
+            candidates,
+            key=lambda s: (abs(s.start_line - line_number), s.start_line, s.id),
+        )
+
+    def _extract_identifier_name(self, node: Optional[Node], content_bytes: bytes) -> str:
+        """Extract identifier-like text from a node."""
+        if node is None:
+            return ""
+
+        if node.type in {"identifier", "property_identifier", "type_identifier"}:
+            return self._node_text(content_bytes, node)
+
+        if node.type in {"attribute", "member_expression"}:
+            property_node = node.child_by_field_name("attribute")
+            if property_node is None:
+                property_node = node.child_by_field_name("property")
+            return self._extract_identifier_name(property_node, content_bytes)
+
+        if node.type == "this":
+            return "this"
+
+        return ""
+
+    def _extract_constructed_class_name(
+        self,
+        node: Optional[Node],
+        content_bytes: bytes,
+    ) -> str:
+        """Extract class-like target from assignment RHS constructors."""
+        if node is None:
+            return ""
+
+        if node.type in CALL_NODE_TYPES:
+            constructor = node.child_by_field_name("constructor")
+            function = node.child_by_field_name("function")
+            return self._extract_identifier_name(constructor or function, content_bytes)
+
+        return self._extract_identifier_name(node, content_bytes)
+
+    def _extract_assignment_type_hint(
+        self,
+        node: Node,
+        content_bytes: bytes,
+        class_names: set[str],
+    ) -> Optional[tuple[str, str]]:
+        """Extract variable-to-class assignment hints from AST nodes."""
+        lhs: Optional[Node] = None
+        rhs: Optional[Node] = None
+
+        if node.type == "assignment":
+            lhs = node.child_by_field_name("left")
+            rhs = node.child_by_field_name("right")
+        elif node.type == "variable_declarator":
+            lhs = node.child_by_field_name("name")
+            rhs = node.child_by_field_name("value")
+        elif node.type == "assignment_expression":
+            lhs = node.child_by_field_name("left")
+            rhs = node.child_by_field_name("right")
+        else:
+            return None
+
+        variable_name = self._extract_identifier_name(lhs, content_bytes)
+        class_name = self._extract_constructed_class_name(rhs, content_bytes)
+
+        if not variable_name or not class_name:
+            return None
+
+        if class_name not in class_names:
+            return None
+
+        return variable_name, class_name
+
+    def _collect_receiver_type_hints(
+        self,
+        root: Node,
+        content_bytes: bytes,
+        callable_symbols: list[SymbolInfo],
+        class_names: set[str],
+    ) -> dict[str, list[tuple[int, str, str]]]:
+        """Collect simple receiver class hints per callable scope."""
+        receiver_hints: dict[str, list[tuple[int, str, str]]] = defaultdict(list)
+
+        for node in self._iter_ast_nodes(root):
+            if node.type not in {"assignment", "variable_declarator", "assignment_expression"}:
+                continue
+
+            hint = self._extract_assignment_type_hint(node, content_bytes, class_names)
+            if hint is None:
+                continue
+
+            line_number = node.start_point[0] + 1
+            caller_symbol = self._find_containing_callable(line_number, callable_symbols)
+            if caller_symbol is None:
+                continue
+
+            variable_name, class_name = hint
+            receiver_hints[caller_symbol.id].append(
+                (line_number, variable_name, class_name)
+            )
+
+        for hints in receiver_hints.values():
+            hints.sort(key=lambda h: (h[0], h[1], h[2]))
+
+        return dict(receiver_hints)
+
+    def _extract_call_target(
+        self,
+        node: Node,
+        content_bytes: bytes,
+    ) -> tuple[str, Optional[str]]:
+        """Extract callee name and optional receiver from call node."""
+        function_node = node.child_by_field_name("constructor")
+        if function_node is None:
+            function_node = node.child_by_field_name("function")
+        if function_node is None:
+            return "", None
+
+        if function_node.type in {"attribute", "member_expression"}:
+            receiver_node = function_node.child_by_field_name("object")
+            attribute_node = function_node.child_by_field_name("attribute")
+            if attribute_node is None:
+                attribute_node = function_node.child_by_field_name("property")
+
+            callee_name = self._extract_identifier_name(attribute_node, content_bytes)
+            receiver_name = self._node_text(content_bytes, receiver_node).strip()
+            return callee_name, receiver_name or None
+
+        callee_name = self._extract_identifier_name(function_node, content_bytes)
+        return callee_name, None
+
+    def _resolve_receiver_class(
+        self,
+        receiver_name: str,
+        call_line: int,
+        caller_symbol: SymbolInfo,
+        receiver_hints: dict[str, list[tuple[int, str, str]]],
+        class_symbols_by_name: dict[str, list[SymbolInfo]],
+        symbols_by_id: dict[str, SymbolInfo],
+    ) -> Optional[SymbolInfo]:
+        """Resolve receiver variable to class symbol when possible."""
+        if receiver_name in {"self", "this"} and caller_symbol.parent_id:
+            parent_symbol = symbols_by_id.get(caller_symbol.parent_id)
+            if parent_symbol and parent_symbol.kind.value == "class":
+                return parent_symbol
+
+        if receiver_name in class_symbols_by_name:
+            return self._select_best_candidate(class_symbols_by_name[receiver_name], call_line)
+
+        for hint_line, variable_name, class_name in reversed(
+            receiver_hints.get(caller_symbol.id, [])
+        ):
+            if hint_line > call_line or variable_name != receiver_name:
+                continue
+            class_candidates = class_symbols_by_name.get(class_name, [])
+            return self._select_best_candidate(class_candidates, call_line)
+
+        return None
+
+    def _resolve_callee_symbol(
+        self,
+        callee_name: str,
+        receiver_name: Optional[str],
+        call_line: int,
+        caller_symbol: SymbolInfo,
+        symbols_by_name: dict[str, list[SymbolInfo]],
+        class_symbols_by_name: dict[str, list[SymbolInfo]],
+        receiver_hints: dict[str, list[tuple[int, str, str]]],
+        symbols_by_id: dict[str, SymbolInfo],
+    ) -> Optional[SymbolInfo]:
+        """Resolve best callee symbol for a call site."""
+        candidates = symbols_by_name.get(callee_name, [])
+        if not candidates:
+            return None
+
+        if receiver_name:
+            receiver_class = self._resolve_receiver_class(
+                receiver_name,
+                call_line,
+                caller_symbol,
+                receiver_hints,
+                class_symbols_by_name,
+                symbols_by_id,
+            )
+            if receiver_class:
+                class_scoped = [
+                    symbol
+                    for symbol in candidates
+                    if symbol.parent_id == receiver_class.id
+                ]
+                if class_scoped:
+                    return self._select_best_candidate(class_scoped, call_line)
+
+            method_candidates = [symbol for symbol in candidates if symbol.parent_id]
+            if method_candidates:
+                return self._select_best_candidate(method_candidates, call_line)
+
+        local_nested = [
+            symbol
+            for symbol in candidates
+            if symbol.parent_id == caller_symbol.id
+        ]
+        if local_nested:
+            return self._select_best_candidate(local_nested, call_line)
+
+        sibling_scope = [
+            symbol
+            for symbol in candidates
+            if symbol.parent_id == caller_symbol.parent_id
+        ]
+        if sibling_scope:
+            return self._select_best_candidate(sibling_scope, call_line)
+
+        callable_candidates = [
+            symbol
+            for symbol in candidates
+            if symbol.kind.value in CALLABLE_SYMBOL_KINDS
+        ]
+        if callable_candidates:
+            return self._select_best_candidate(callable_candidates, call_line)
+
+        return self._select_best_candidate(candidates, call_line)
+
+    def _extract_call_edges_ast(
+        self,
+        result: ParseResult,
+        symbols_by_name: dict[str, list[SymbolInfo]],
+    ) -> None:
+        """Extract call graph edges via AST traversal."""
+        if not result.tree:
+            return
+
+        content_bytes = result.content.encode("utf-8")
+        callable_symbols = [
+            symbol
+            for symbol in result.symbols
+            if symbol.kind.value in CALLABLE_SYMBOL_KINDS
+        ]
+        if not callable_symbols:
+            return
+
+        symbols_by_id = {symbol.id: symbol for symbol in result.symbols}
+
+        class_symbols_by_name: dict[str, list[SymbolInfo]] = defaultdict(list)
+        for symbol in result.symbols:
+            if symbol.kind.value == "class":
+                class_symbols_by_name[symbol.name].append(symbol)
+        for class_symbols in class_symbols_by_name.values():
+            class_symbols.sort(key=lambda s: (s.start_line, s.end_line, s.id))
+
+        receiver_hints = self._collect_receiver_type_hints(
+            result.tree.root_node,
+            content_bytes,
+            callable_symbols,
+            set(class_symbols_by_name.keys()),
+        )
+
+        for node in self._iter_ast_nodes(result.tree.root_node):
+            if node.type not in CALL_NODE_TYPES:
+                continue
+
+            line_number = node.start_point[0] + 1
+            caller_symbol = self._find_containing_callable(line_number, callable_symbols)
+            if caller_symbol is None:
+                continue
+
+            callee_name, receiver_name = self._extract_call_target(node, content_bytes)
+            if not callee_name:
+                continue
+
+            callee_symbol = self._resolve_callee_symbol(
+                callee_name,
+                receiver_name,
+                line_number,
+                caller_symbol,
+                symbols_by_name,
+                class_symbols_by_name,
+                receiver_hints,
+                symbols_by_id,
+            )
+            if callee_symbol is None:
+                continue
+
+            if callee_symbol.id == caller_symbol.id:
+                continue
+
+            edge = CallEdge(
+                caller_id=caller_symbol.id,
+                callee_id=callee_symbol.id,
+                call_site_line=line_number,
+            )
+            if edge not in self.edges:
+                self.edges.append(edge)
+
+    def _extract_call_edges_regex(
+        self,
+        result: ParseResult,
+        symbols_by_name: dict[str, list[SymbolInfo]],
+    ) -> None:
         """
-        Extract call graph edges by analyzing function bodies.
-        
-        This is a simplified implementation that looks for function calls
-        within function definitions. A more sophisticated version would
-        use the full AST from the parser.
+        Fallback call graph extraction using regex.
+
+        This path is retained for resilience when AST extraction fails.
         """
         content = result.content
         lines = content.split("\n")
 
-        # Build name-to-symbol mapping for this file
-        file_symbols: dict[str, SymbolInfo] = {}
-        for symbol in result.symbols:
-            file_symbols[symbol.name] = symbol
-
         # For each function, find calls to other functions
         for symbol in result.symbols:
-            if symbol.kind.value not in ["function", "method"]:
+            if symbol.kind.value not in CALLABLE_SYMBOL_KINDS:
                 continue
 
             # Get function body (lines between start and end)
@@ -104,7 +461,7 @@ class GraphBuilder:
 
             # Find function calls (simplified: look for identifier( pattern)
             # This is a basic heuristic; full AST analysis would be more accurate
-            for callee_name, callee_symbol in file_symbols.items():
+            for callee_name, callee_candidates in symbols_by_name.items():
                 if callee_name == symbol.name:
                     continue  # Skip self-calls for now
 
@@ -118,6 +475,13 @@ class GraphBuilder:
                     match_pos = match.start()
                     line_num = body_text[:match_pos].count("\n") + symbol.start_line
 
+                    callee_symbol = self._select_best_candidate(
+                        callee_candidates,
+                        line_num,
+                    )
+                    if callee_symbol is None or callee_symbol.id == symbol.id:
+                        continue
+
                     edge = CallEdge(
                         caller_id=symbol.id,
                         callee_id=callee_symbol.id,
@@ -126,6 +490,25 @@ class GraphBuilder:
                     # Avoid duplicates
                     if edge not in self.edges:
                         self.edges.append(edge)
+
+    def _extract_call_edges(self, file_path: str, result: ParseResult) -> None:
+        """Extract call graph edges using AST first, regex fallback."""
+        symbols_by_name = self._build_symbols_by_name(result)
+        if not symbols_by_name:
+            return
+
+        if result.tree:
+            try:
+                self._extract_call_edges_ast(result, symbols_by_name)
+                return
+            except Exception as exc:
+                logger.warning(
+                    "AST call extraction failed for %s (%s); using regex fallback",
+                    file_path,
+                    exc,
+                )
+
+        self._extract_call_edges_regex(result, symbols_by_name)
 
     def _extract_typed_relations(self, file_path: str, result: ParseResult) -> None:
         """

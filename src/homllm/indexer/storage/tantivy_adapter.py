@@ -96,6 +96,33 @@ class TantivyAdapter(LexicalIndex):
         except Exception as e:
             logger.error(f"Failed to index documents: {e}")
 
+    def delete_documents(self, doc_ids: list[str]) -> None:
+        """Delete a set of documents by doc_id."""
+        if tantivy is None or self._index is None or not doc_ids:
+            return
+
+        try:
+            writer = self._index.writer()
+            for doc_id in doc_ids:
+                writer.delete_documents("doc_id", doc_id)
+            writer.commit()
+            logger.info("Deleted %d BM25 documents", len(doc_ids))
+        except Exception as e:
+            logger.error(f"Failed to delete BM25 documents: {e}")
+
+    def reset(self) -> None:
+        """Clear all BM25 documents while keeping schema/index."""
+        if tantivy is None or self._index is None:
+            return
+
+        try:
+            writer = self._index.writer()
+            writer.delete_all_documents()
+            writer.commit()
+            logger.info("Reset BM25 index")
+        except Exception as e:
+            logger.error(f"Failed to reset BM25 index: {e}")
+
     def search(self, query: str, top_k: int) -> list[tuple[str, float]]:
         """
         Returns ranked results as (doc_id, score) tuples.

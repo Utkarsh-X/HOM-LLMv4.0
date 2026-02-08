@@ -14,7 +14,15 @@ from typing import Any, Optional
 
 import duckdb
 
-from homllm.common.types import CallEdge, ChunkInfo, EntityInfo, FileInfo, RelationInfo, SymbolInfo
+from homllm.common.types import (
+    CallEdge,
+    ChunkInfo,
+    EntityInfo,
+    FileInfo,
+    RelationInfo,
+    SymbolInfo,
+    SymbolKind,
+)
 from homllm.indexer.interfaces import StorageAdapter
 
 logger = logging.getLogger(__name__)
@@ -212,6 +220,8 @@ class DuckDBAdapter:
         if self.conn is None:
             self.connect()
 
+        normalized_path = str(file_info.path).replace("\\", "/")
+
         self.conn.execute(
             """
             INSERT OR REPLACE INTO files 
@@ -220,7 +230,7 @@ class DuckDBAdapter:
             """,
             [
                 file_info.file_id,
-                str(file_info.path),
+                normalized_path,
                 file_info.language,
                 file_info.content_hash,
                 file_info.line_count,
@@ -274,6 +284,328 @@ class DuckDBAdapter:
             """,
             [edge.caller_id, edge.callee_id, edge.call_site_line],
         )
+
+    def get_doc_ids_for_file(self, file_path: str) -> list[str]:
+        """Return document IDs currently indexed for a file."""
+        if self.conn is None:
+            self.connect()
+
+        variants = self._path_variants(file_path)
+        placeholders = ", ".join(["?"] * len(variants))
+        chunk_rows = self.conn.execute(
+            f"""
+            SELECT chunk_id
+            FROM chunks
+            WHERE file_path IN ({placeholders})
+            ORDER BY chunk_id
+            """,
+            variants,
+        ).fetchall()
+        if chunk_rows:
+            return [row[0] for row in chunk_rows]
+
+        file_ids = self._get_file_ids_for_path(file_path)
+        if not file_ids:
+            return []
+
+        doc_ids: list[str] = []
+        for file_id in file_ids:
+            rows = self.conn.execute(
+                """
+                SELECT symbol_id
+                FROM symbols
+                WHERE file_id = ?
+                ORDER BY symbol_id
+                """,
+                [file_id],
+            ).fetchall()
+            for row in rows:
+                doc_ids.append(f"{file_id}:{row[0]}")
+
+        return doc_ids
+
+    def get_document_candidate_data(self, doc_id: str) -> Optional[dict[str, Any]]:
+        """
+        Resolve retrieval-facing metadata for a stored document.
+
+        Supports both chunk-based IDs (preferred) and legacy symbol IDs.
+        """
+        if self.conn is None:
+            self.connect()
+
+        chunk_row = self.conn.execute(
+            """
+            SELECT file_path, content, granularity_level, entity_ids
+            FROM chunks
+            WHERE chunk_id = ?
+            """,
+            [doc_id],
+        ).fetchone()
+        if chunk_row:
+            entity_ids = json.loads(chunk_row[3]) if chunk_row[3] else []
+            symbol_id = entity_ids[0] if entity_ids else None
+            return {
+                "doc_id": doc_id,
+                "file": chunk_row[0],
+                "symbol_id": symbol_id,
+                "content": chunk_row[1],
+                "granularity_level": chunk_row[2],
+                "entity_ids": entity_ids,
+                "doc_type": "chunk",
+            }
+
+        symbol_id = doc_id.split(":", 1)[1] if ":" in doc_id else doc_id
+        symbol_row = self.conn.execute(
+            """
+            SELECT f.path, s.content, e.granularity_level
+            FROM symbols s
+            LEFT JOIN files f ON f.file_id = s.file_id
+            LEFT JOIN entities e ON e.entity_id = s.symbol_id
+            WHERE s.symbol_id = ?
+            """,
+            [symbol_id],
+        ).fetchone()
+        if symbol_row:
+            return {
+                "doc_id": doc_id,
+                "file": symbol_row[0] or "",
+                "symbol_id": symbol_id,
+                "content": symbol_row[1] or "",
+                "granularity_level": symbol_row[2],
+                "entity_ids": [symbol_id],
+                "doc_type": "symbol",
+            }
+
+        return None
+
+    def delete_file_data(self, file_path: str) -> None:
+        """Delete all index rows associated with a file path."""
+        if self.conn is None:
+            self.connect()
+
+        file_ids = self._get_file_ids_for_path(file_path)
+        if not file_ids:
+            return
+
+        symbol_ids: list[str] = []
+        for file_id in file_ids:
+            rows = self.conn.execute(
+                "SELECT symbol_id FROM symbols WHERE file_id = ?",
+                [file_id],
+            ).fetchall()
+            symbol_ids.extend(row[0] for row in rows)
+
+        entity_paths = self._path_variants(file_path)
+        entity_ids: list[str] = []
+        for variant in entity_paths:
+            rows = self.conn.execute(
+                "SELECT entity_id FROM entities WHERE file_path = ?",
+                [variant],
+            ).fetchall()
+            entity_ids.extend(row[0] for row in rows)
+
+        for symbol_id in symbol_ids:
+            self.conn.execute(
+                "DELETE FROM call_edges WHERE caller_id = ? OR callee_id = ?",
+                [symbol_id, symbol_id],
+            )
+            self.conn.execute(
+                "DELETE FROM relations WHERE src_entity_id = ? OR dst_entity_id = ?",
+                [symbol_id, symbol_id],
+            )
+
+        for entity_id in entity_ids:
+            self.conn.execute(
+                "DELETE FROM relations WHERE src_entity_id = ? OR dst_entity_id = ?",
+                [entity_id, entity_id],
+            )
+
+        for file_id in file_ids:
+            self.conn.execute("DELETE FROM symbols WHERE file_id = ?", [file_id])
+            self.conn.execute("DELETE FROM files WHERE file_id = ?", [file_id])
+
+        for variant in entity_paths:
+            self.conn.execute("DELETE FROM chunks WHERE file_path = ?", [variant])
+            self.conn.execute("DELETE FROM entities WHERE file_path = ?", [variant])
+
+    def reset_index_data(self) -> None:
+        """Clear all indexed rows while preserving schema."""
+        if self.conn is None:
+            self.connect()
+
+        self.conn.execute("DELETE FROM call_edges")
+        self.conn.execute("DELETE FROM relations")
+        self.conn.execute("DELETE FROM chunks")
+        self.conn.execute("DELETE FROM entities")
+        self.conn.execute("DELETE FROM symbols")
+        self.conn.execute("DELETE FROM files")
+
+    def get_all_files(self) -> list[FileInfo]:
+        """Return all indexed files."""
+        if self.conn is None:
+            self.connect()
+
+        rows = self.conn.execute(
+            """
+            SELECT file_id, path, language, content_hash, line_count
+            FROM files
+            ORDER BY path
+            """
+        ).fetchall()
+
+        return [
+            FileInfo(
+                file_id=row[0],
+                path=Path(row[1]),
+                language=row[2],
+                content_hash=row[3],
+                line_count=row[4],
+                parse_error=False,
+            )
+            for row in rows
+        ]
+
+    def get_all_symbols(self) -> list[SymbolInfo]:
+        """Return all indexed symbols with file paths."""
+        if self.conn is None:
+            self.connect()
+
+        rows = self.conn.execute(
+            """
+            SELECT s.symbol_id, s.name, s.kind, f.path, s.start_line,
+                   s.end_line, s.signature, s.parent_id
+            FROM symbols s
+            JOIN files f ON f.file_id = s.file_id
+            ORDER BY f.path, s.start_line, s.name
+            """
+        ).fetchall()
+
+        symbols: list[SymbolInfo] = []
+        for row in rows:
+            try:
+                kind = SymbolKind(row[2])
+            except ValueError:
+                continue
+
+            symbols.append(
+                SymbolInfo(
+                    id=row[0],
+                    name=row[1],
+                    kind=kind,
+                    file=row[3],
+                    start_line=row[4],
+                    end_line=row[5],
+                    signature=row[6],
+                    parent_id=row[7],
+                )
+            )
+
+        return symbols
+
+    def get_all_call_edges(self) -> list[CallEdge]:
+        """Return all call edges."""
+        if self.conn is None:
+            self.connect()
+
+        rows = self.conn.execute(
+            """
+            SELECT caller_id, callee_id, call_site_line
+            FROM call_edges
+            ORDER BY caller_id, callee_id, call_site_line
+            """
+        ).fetchall()
+
+        return [
+            CallEdge(
+                caller_id=row[0],
+                callee_id=row[1],
+                call_site_line=row[2],
+            )
+            for row in rows
+        ]
+
+    def get_all_entities(self) -> list[EntityInfo]:
+        """Return all entities."""
+        if self.conn is None:
+            self.connect()
+
+        rows = self.conn.execute(
+            """
+            SELECT entity_id, entity_type, name, file_path, span_start, span_end,
+                   docstring_hash, granularity_level, confidence_score,
+                   has_type_annotation, is_exported, parent_entity_id
+            FROM entities
+            ORDER BY file_path, span_start, name
+            """
+        ).fetchall()
+
+        return [
+            EntityInfo(
+                entity_id=row[0],
+                entity_type=row[1],
+                name=row[2],
+                file_path=row[3],
+                span_start=row[4],
+                span_end=row[5],
+                docstring_hash=row[6],
+                granularity_level=row[7],
+                confidence_score=row[8],
+                has_type_annotation=row[9],
+                is_exported=row[10],
+                parent_entity_id=row[11],
+            )
+            for row in rows
+        ]
+
+    def get_all_relations(self) -> list[RelationInfo]:
+        """Return all relations."""
+        if self.conn is None:
+            self.connect()
+
+        rows = self.conn.execute(
+            """
+            SELECT src_entity_id, dst_entity_id, relation_type, extraction_source
+            FROM relations
+            ORDER BY src_entity_id, dst_entity_id, relation_type
+            """
+        ).fetchall()
+
+        return [
+            RelationInfo(
+                src_entity_id=row[0],
+                dst_entity_id=row[1],
+                relation_type=row[2],
+                extraction_source=row[3],
+            )
+            for row in rows
+        ]
+
+    def get_all_chunks(self) -> list[ChunkInfo]:
+        """Return all chunks."""
+        if self.conn is None:
+            self.connect()
+
+        rows = self.conn.execute(
+            """
+            SELECT chunk_id, file_path, content, granularity_level,
+                   span_start, span_end, entity_ids
+            FROM chunks
+            ORDER BY file_path, granularity_level, span_start
+            """
+        ).fetchall()
+
+        return [
+            ChunkInfo(
+                chunk_id=row[0],
+                file_path=row[1],
+                content=row[2],
+                granularity_level=row[3],
+                span_start=row[4],
+                span_end=row[5],
+                entity_ids=tuple(json.loads(row[6])) if row[6] else (),
+            )
+            for row in rows
+        ]
 
     # =========================================================================
     # Entity-Centric Indexing Methods (Plan A)
@@ -534,4 +866,19 @@ class DuckDBAdapter:
         if self.conn:
             self.conn.close()
             self.conn = None
+
+    def _path_variants(self, file_path: str) -> list[str]:
+        normalized = str(file_path).lstrip("./")
+        slash = normalized.replace("\\", "/")
+        backslash = slash.replace("/", "\\")
+        return sorted({normalized, slash, backslash})
+
+    def _get_file_ids_for_path(self, file_path: str) -> list[str]:
+        variants = self._path_variants(file_path)
+        placeholders = ", ".join(["?"] * len(variants))
+        rows = self.conn.execute(
+            f"SELECT file_id FROM files WHERE path IN ({placeholders})",
+            variants,
+        ).fetchall()
+        return sorted({row[0] for row in rows})
 

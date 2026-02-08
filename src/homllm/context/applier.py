@@ -484,11 +484,16 @@ class ContextApplier:
         
         Preserves query_id and other metadata from original.
         """
-        # Compute new token count (estimate based on content length)
-        new_used_tokens = sum(
-            len(block.content.split()) // 2  # Simple estimate
-            for block in new_blocks
-        )
+        # Preserve token accounting scale from the original artifact.
+        # This avoids severe undercounting that can mislead downstream diagnostics.
+        original_chars = sum(len(block.content) for block in original.blocks)
+        new_chars = sum(len(block.content) for block in new_blocks)
+        if original_chars > 0 and original.used_tokens > 0:
+            ratio = new_chars / original_chars
+            new_used_tokens = int(round(original.used_tokens * ratio))
+        else:
+            new_used_tokens = original.used_tokens
+        new_used_tokens = max(0, min(new_used_tokens, original.token_budget))
         
         # Rebuild context_text from blocks
         new_context_text = "\n\n".join(

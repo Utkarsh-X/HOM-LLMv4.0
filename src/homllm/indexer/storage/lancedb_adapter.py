@@ -1,5 +1,6 @@
 """LanceDB adapter for vector indexing."""
 
+import json
 import logging
 from pathlib import Path
 from typing import Iterator, Optional
@@ -51,7 +52,7 @@ class LanceDBAdapter:
             self.db = lancedb.connect(str(self.db_path))
 
             # Check if table exists
-            if self.table_name in self.db.table_names():
+            if self._table_exists(self.table_name):
                 self._table = self.db.open_table(self.table_name)
             else:
                 # Table will be created on first index
@@ -84,7 +85,7 @@ class LanceDBAdapter:
                     "doc_id": doc.doc_id,
                     "vector": vector.values,
                     "content": doc.content,
-                    "metadata": str(doc.metadata),  # Store as string for now
+                    "metadata": json.dumps(doc.metadata or {}),
                 })
 
             if not data:
@@ -113,9 +114,26 @@ class LanceDBAdapter:
             # Create table
             table = pa.Table.from_pylist(data, schema=schema)
 
-            # Create or append to table
+            # Create or append to table.
+            #
+            # Important: in long-running processes or after reset/reconnect cycles,
+            # it's possible for `self._table` to be None even though the table exists
+            # on disk. In that case, open and append instead of trying to re-create.
             if self._table is None:
-                self._table = self.db.create_table(self.table_name, table)
+                try:
+                    if self._table_exists(self.table_name):
+                        self._table = self.db.open_table(self.table_name)
+                        self._table.add(table)
+                    else:
+                        self._table = self.db.create_table(self.table_name, table)
+                except Exception as e:
+                    # Fallback: if create failed due to existence, open and append.
+                    msg = str(e).lower()
+                    if "already exists" in msg or "exists" in msg:
+                        self._table = self.db.open_table(self.table_name)
+                        self._table.add(table)
+                    else:
+                        raise
             else:
                 self._table.add(table)
 
@@ -124,12 +142,48 @@ class LanceDBAdapter:
         except Exception as e:
             logger.error(f"Failed to index vectors: {e}")
 
-    def search(self, query_vector: Vector, top_k: int) -> list[tuple[str, float, str]]:
+    def delete_documents(self, doc_ids: list[str]) -> None:
+        """Delete vectors by document IDs."""
+        if lancedb is None or self.db is None or self._table is None or not doc_ids:
+            return
+
+        try:
+            escaped_ids = [doc_id.replace("'", "''") for doc_id in doc_ids]
+            filter_expr = "doc_id IN ({})".format(
+                ", ".join([f"'{doc_id}'" for doc_id in escaped_ids])
+            )
+            self._table.delete(filter_expr)
+            logger.info("Deleted %d vectors", len(doc_ids))
+        except Exception as e:
+            logger.error(f"Failed to delete vectors: {e}")
+
+    def reset(self) -> None:
+        """Clear vectors table."""
+        if lancedb is None or self.db is None:
+            return
+
+        try:
+            if self._table_exists(self.table_name):
+                self.db.drop_table(self.table_name)
+            self._table = None
+            logger.info("Reset vector index")
+        except Exception as e:
+            logger.error(f"Failed to reset vector index: {e}")
+
+    def _table_exists(self, table_name: str) -> bool:
+        """Compatibility wrapper for LanceDB list_tables() return types."""
+        if self.db is None:
+            return False
+        tables_response = self.db.list_tables()
+        table_names = getattr(tables_response, "tables", tables_response)
+        return table_name in table_names
+
+    def search(self, query_vector: Vector, top_k: int) -> list[tuple[str, float, str, dict]]:
         """
         Vector similarity search.
         
         Returns:
-            List of (doc_id, similarity_score, content) tuples, sorted descending by score
+            List of (doc_id, similarity_score, content, metadata) tuples, sorted descending by score
         """
         if lancedb is None or self.db is None or self._table is None:
             return []
@@ -148,10 +202,19 @@ class LanceDBAdapter:
             for _, row in results.iterrows():
                 doc_id = row.get("doc_id", "")
                 content = row.get("content", "")
+                metadata_raw = row.get("metadata", "{}")
+                metadata: dict = {}
+                if isinstance(metadata_raw, str):
+                    try:
+                        metadata = json.loads(metadata_raw)
+                    except Exception:
+                        metadata = {}
+                elif isinstance(metadata_raw, dict):
+                    metadata = metadata_raw
                 # LanceDB returns distance, convert to similarity (1 - normalized distance)
                 distance = row.get("_distance", float("inf"))
                 similarity = 1.0 / (1.0 + distance)  # Simple conversion
-                output.append((doc_id, float(similarity), str(content)))
+                output.append((doc_id, float(similarity), str(content), metadata))
 
             # Sort by similarity descending
             output.sort(key=lambda x: x[1], reverse=True)

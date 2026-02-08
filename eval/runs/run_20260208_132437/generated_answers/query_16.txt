@@ -1,0 +1,9 @@
+QUERY_ID   : 16
+RUN_ID     : 9c56f859-bffb-4002-acf1-54ddd0361a21
+MODEL      : gemini-2.5-flash
+PROVIDER   : gemini
+STATUS     : OK
+--- ANSWER ---
+I apologize, but the "Relevant code excerpts" section is empty. Without the actual code for `BatchProcessor`, I cannot analyze how it handles partial failures or implements at-least-once semantics.
+
+Please provide the code excerpts so I can answer your query.

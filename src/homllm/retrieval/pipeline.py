@@ -20,7 +20,10 @@ from homllm.indexer.embedder import QwenEmbedder
 from homllm.indexer.storage.duckdb_adapter import DuckDBAdapter
 from homllm.indexer.storage.filesystem_adapter import FilesystemAdapter
 from homllm.retrieval.bm25 import BM25Retriever
+from homllm.retrieval.budget import select_candidates_with_budget
+from homllm.retrieval.deduplication import deduplicate_hierarchical
 from homllm.retrieval.expander import StructuralExpanderImpl
+from homllm.retrieval.granularity_strategy import apply_granularity_mix
 from homllm.retrieval.hybrid import RRFHybridMerger
 from homllm.retrieval.interfaces import (
     RetrievalConfig,
@@ -90,7 +93,11 @@ class RetrievalPipeline:
 
         # Initialize retrievers
         self.bm25_retriever = BM25Retriever(bm25_index_path, duckdb_path=duckdb_path)
-        self.vector_retriever = VectorRetriever(vector_db_path, self.embedder)
+        self.vector_retriever = VectorRetriever(
+            vector_db_path,
+            self.embedder,
+            duckdb_path=duckdb_path,
+        )
         
         # Initialize precision recovery
         self.precision_recovery = PrecisionRecovery(
@@ -207,7 +214,7 @@ class RetrievalPipeline:
 
             # 3. Hybrid merge
             merge_start = time.perf_counter()
-            apply_mmr_in_merge = self.config.post_merge_candidates <= 0
+            apply_mmr_in_merge = False
             merged = self.merger.merge(
                 bm25_results,
                 vector_results,
@@ -220,7 +227,11 @@ class RetrievalPipeline:
             if self.config.post_merge_candidates and len(merged) > self.config.post_merge_candidates:
                 merged = merged[: self.config.post_merge_candidates]
             
-            # MMR (if not applied in merge)
+            # Hierarchical deduplication before MMR
+            if plan_b_active and self.config.hierarchical_dedup_enabled:
+                merged = deduplicate_hierarchical(merged, intent=intent)
+
+            # MMR
             if not apply_mmr_in_merge:
                 mmr_start = time.perf_counter()
                 merged = self.merger.apply_mmr(merged, self.config)
@@ -237,6 +248,10 @@ class RetrievalPipeline:
                 granularity_ms = (time.perf_counter() - gran_start) * 1000
             else:
                 granularity_ms = 0.0
+
+            # Intent-driven granularity mixing
+            if plan_b_active and self.config.granularity_mixing_enabled:
+                merged = apply_granularity_mix(merged, intent)
 
             # 4. Structural expansion
             if self.config.expansion_enabled:
@@ -264,7 +279,19 @@ class RetrievalPipeline:
             )
             precision_ms = (time.perf_counter() - pr_start) * 1000
 
-            # 6. Limit to top_k
+            # 6. Budget-aware selection + top-k
+            budget_used = None
+            budget_effective = None
+            if plan_b_active and self.config.budget_aware_selection:
+                merged = sorted(merged, key=lambda c: c.hybrid_score, reverse=True)
+                merged, budget_tracker = select_candidates_with_budget(
+                    merged,
+                    total_budget=self.config.context_budget,
+                    reserve=self.config.budget_reserve,
+                )
+                budget_used = budget_tracker.used
+                budget_effective = budget_tracker.effective_budget
+
             final_candidates = merged[:top_k]
             total_ms = (time.perf_counter() - t0) * 1000
 
@@ -306,6 +333,8 @@ class RetrievalPipeline:
                     "mmr_emb_ms": getattr(self.merger, "last_metrics", {}).get("mmr_emb_ms"),
                     "mmr_ms": getattr(self.merger, "last_metrics", {}).get("mmr_ms"),
                     "mmr_error": getattr(self.merger, "last_metrics", {}).get("mmr_error"),
+                    "budget_used_tokens": budget_used,
+                    "budget_effective_tokens": budget_effective,
                 },
             )
 

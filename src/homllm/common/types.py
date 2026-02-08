@@ -42,6 +42,7 @@ class RelationType(str, Enum):
     DEFINES = "defines"
     USES = "uses"
     IMPORTS = "imports"
+    RESOLVES_TO = "resolves_to"
     INHERITS = "inherits"
     # Optional relation types (low cost, high ROI)
     OVERRIDES = "overrides"

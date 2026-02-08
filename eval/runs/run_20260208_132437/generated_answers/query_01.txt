@@ -1,0 +1,8 @@
+QUERY_ID   : 01
+RUN_ID     : ba6f9287-425d-4520-aab6-c4d408da0718
+MODEL      : gemini-2.5-flash
+PROVIDER   : gemini
+STATUS     : OK
+--- ANSWER ---
+## Execution Trace
+The provided context does not contain any code excerpts for `admin_search_endpoint` or related components such as decorators, cache, optimizer, or ranking. Therefore, it is not possible to trace the execution flow as requested. The necessary information to describe the step-by-step execution through these layers is entirely missing from the context.

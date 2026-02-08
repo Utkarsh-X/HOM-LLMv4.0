@@ -32,7 +32,9 @@ from homllm.indexer.storage import (
 
 # Entity-centric indexing imports (Plan A)
 from homllm.indexer.entity_extractor import EntityExtractor
+from homllm.indexer.graph_resolver import SymbolResolver
 from homllm.indexer.hierarchical_chunker import HierarchicalChunker
+from homllm.indexer.incremental_indexer import IncrementalIndexer
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +88,10 @@ class IndexerPipeline:
         self.graph_builder = GraphBuilder(
             entity_centric_enabled=config.entity_centric_indexing_enabled
         )
+        self.symbol_resolver = SymbolResolver(repo_root=Path.cwd())
+        self.incremental_indexer = IncrementalIndexer(
+            cache_path=config.storage.artifacts_path / "incremental_cache.json"
+        )
         
         # Entity-centric indexing components (Plan A)
         if config.entity_centric_indexing_enabled:
@@ -110,6 +116,10 @@ class IndexerPipeline:
         """
         repo_path = repo_path.resolve()
         logger.info(f"Starting indexing for {repo_path}")
+        self.symbol_resolver = SymbolResolver(repo_root=repo_path)
+        self.graph_builder = GraphBuilder(
+            entity_centric_enabled=self.config.entity_centric_indexing_enabled
+        )
         
         # Log entity-centric indexing status
         if self.config.entity_centric_indexing_enabled:
@@ -130,19 +140,54 @@ class IndexerPipeline:
         files = list(self.scanner.scan(repo_path, scan_config))
         logger.info(f"Scanned {len(files)} files")
 
+        files_to_process = files
+        deleted_paths: list[str] = []
+        if incremental:
+            diff = self.incremental_indexer.diff(files)
+            files_to_process = diff.changed_files
+            deleted_paths = diff.deleted_paths
+            logger.info(
+                "Incremental mode: %d changed, %d unchanged, %d deleted",
+                len(diff.changed_files),
+                len(diff.unchanged_files),
+                len(diff.deleted_paths),
+            )
+        else:
+            # Full rebuild semantics to avoid stale/duplicate rows.
+            self.duckdb.reset_index_data()
+            self.tantivy.reset()
+            self.lancedb.reset()
+
+        for deleted_path in deleted_paths:
+            doc_ids = self.duckdb.get_doc_ids_for_file(deleted_path)
+            if doc_ids:
+                self.tantivy.delete_documents(doc_ids)
+                self.lancedb.delete_documents(doc_ids)
+            self.duckdb.delete_file_data(deleted_path)
+
+        for changed_file in files_to_process:
+            changed_path = str(changed_file.path)
+            old_doc_ids = self.duckdb.get_doc_ids_for_file(changed_path)
+            if old_doc_ids:
+                self.tantivy.delete_documents(old_doc_ids)
+                self.lancedb.delete_documents(old_doc_ids)
+            self.duckdb.delete_file_data(changed_path)
+
         # 2. Parse files and collect symbols
         all_symbols: list[SymbolInfo] = []
         all_files: list[FileInfo] = []
         all_entities: list[EntityInfo] = []  # Plan A
         all_chunks: list[ChunkInfo] = []  # Plan A
+        all_import_specs = []
         documents_for_bm25: list[Document] = []
         documents_for_vectors: list[Document] = []
 
-        for file_info in files:
+        for file_info in files_to_process:
             try:
                 # Parse file
                 file_path = repo_path / file_info.path
                 result = self.parser.parse(file_path, file_info.language or "unknown")
+                file_chunk_docs_added = False
 
                 # Store file metadata
                 all_files.append(file_info)
@@ -171,6 +216,13 @@ class IndexerPipeline:
                         str(file_info.path),
                     )
                     all_entities.extend(entities)
+
+                    import_specs = self.symbol_resolver.extract_import_specs(
+                        result.tree.root_node,
+                        result.content,
+                        str(file_info.path),
+                    )
+                    all_import_specs.extend(import_specs)
                     
                     # Add entities to graph builder
                     self.graph_builder.add_entities(entities)
@@ -188,27 +240,41 @@ class IndexerPipeline:
                         entities,
                     )
                     all_chunks.extend(chunks)
+                    for chunk in chunks:
+                        chunk_doc = Document(
+                            doc_id=chunk.chunk_id,
+                            content=chunk.content,
+                            metadata={
+                                "chunk_id": chunk.chunk_id,
+                                "file_path": chunk.file_path,
+                                "granularity_level": chunk.granularity_level,
+                                "entity_ids": list(chunk.entity_ids),
+                            },
+                        )
+                        documents_for_bm25.append(chunk_doc)
+                        documents_for_vectors.append(chunk_doc)
+                    file_chunk_docs_added = bool(chunks)
 
-                # Create documents for indexing (chunk by symbol)
-                for symbol in result.symbols:
-                    # Extract symbol code from file content
-                    symbol_code = self._extract_symbol_code(
-                        result.content, symbol.start_line, symbol.end_line
-                    )
-
-                    doc_id = f"{file_info.file_id}:{symbol.id}"
-                    doc = Document(
-                        doc_id=doc_id,
-                        content=symbol_code,
-                        metadata={
-                            "file": str(file_info.path),
-                            "symbol_id": symbol.id,
-                            "symbol_name": symbol.name,
-                            "symbol_kind": symbol.kind.value,
-                        },
-                    )
-                    documents_for_bm25.append(doc)
-                    documents_for_vectors.append(doc)
+                # Legacy fallback: if chunk docs are unavailable for this file,
+                # index symbol-level docs to preserve retrievability.
+                if not file_chunk_docs_added:
+                    for symbol in result.symbols:
+                        symbol_code = self._extract_symbol_code(
+                            result.content, symbol.start_line, symbol.end_line
+                        )
+                        doc_id = f"{file_info.file_id}:{symbol.id}"
+                        doc = Document(
+                            doc_id=doc_id,
+                            content=symbol_code,
+                            metadata={
+                                "file": str(file_info.path),
+                                "symbol_id": symbol.id,
+                                "symbol_name": symbol.name,
+                                "symbol_kind": symbol.kind.value,
+                            },
+                        )
+                        documents_for_bm25.append(doc)
+                        documents_for_vectors.append(doc)
 
             except Exception as e:
                 logger.error(f"Error processing {file_info.path}: {e}")
@@ -220,6 +286,14 @@ class IndexerPipeline:
         if validation_errors:
             logger.warning(f"Graph validation errors: {validation_errors}")
 
+        if incremental:
+            existing_symbols = self.duckdb.get_all_symbols()
+            existing_files = self.duckdb.get_all_files()
+            existing_call_edges = self.duckdb.get_all_call_edges()
+            all_symbols = existing_symbols
+            all_files = existing_files
+            call_edges = existing_call_edges + call_edges
+
         # Store call edges
         for edge in call_edges:
             self.duckdb.insert_call_edge(edge)
@@ -229,8 +303,30 @@ class IndexerPipeline:
         # ===================================================================
         all_relations: list[RelationInfo] = []
         if self.config.entity_centric_indexing_enabled:
+            import_entities = [
+                entity
+                for entity in all_entities
+                if entity.entity_type in {"import", "alias"}
+            ]
+            resolved_relations = self.symbol_resolver.resolve_import_entities(
+                import_entities=import_entities,
+                symbols=all_symbols,
+                files=all_files,
+                import_specs=all_import_specs,
+            )
+            for relation in resolved_relations:
+                self.graph_builder.relations.append(relation)
+
             # Build typed relation graph
             all_relations = self.graph_builder.build_relation_graph()
+
+            if incremental:
+                existing_entities = self.duckdb.get_all_entities()
+                existing_relations = self.duckdb.get_all_relations()
+                existing_chunks = self.duckdb.get_all_chunks()
+                all_entities = existing_entities + all_entities
+                all_relations = existing_relations + all_relations
+                all_chunks = existing_chunks + all_chunks
             
             # Store entities
             for entity in all_entities:
@@ -269,6 +365,8 @@ class IndexerPipeline:
         self._write_artifacts(
             all_symbols, all_files, call_edges, all_entities, all_relations, all_chunks
         )
+
+        self.incremental_indexer.save(files)
 
         logger.info("Indexing complete")
         if self.config.entity_centric_indexing_enabled:

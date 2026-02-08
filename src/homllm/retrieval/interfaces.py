@@ -143,6 +143,17 @@ class RetrievalConfig:
     # Post-merge candidate cap (applied after hybrid merge)
     post_merge_candidates: int = 0
     
+    # Budget-aware candidate selection
+    context_budget: int = 4000
+    budget_reserve: int = 800
+    budget_aware_selection: bool = True
+    
+    # Granularity mixing
+    granularity_mixing_enabled: bool = True
+    
+    # Hierarchical deduplication
+    hierarchical_dedup_enabled: bool = True
+    
     def __post_init__(self):
         """Set defaults for Plan B config."""
         if not self.granularity_boost_table:
@@ -154,9 +165,19 @@ class RetrievalConfig:
                 "SEARCH": {"medium": 1.8, "fine": 1.5, "coarse": 1.0},
                 "UNKNOWN": {"fine": 1.0, "medium": 1.0, "coarse": 1.0},
             }
+
+        # Backward-compatible intent aliases.
+        if "EXPLANATORY" not in self.granularity_boost_table and "EXPLAIN" in self.granularity_boost_table:
+            self.granularity_boost_table["EXPLANATORY"] = dict(
+                self.granularity_boost_table["EXPLAIN"]
+            )
+        if "IMPLEMENTATION" not in self.granularity_boost_table and "IMPLEMENT" in self.granularity_boost_table:
+            self.granularity_boost_table["IMPLEMENTATION"] = dict(
+                self.granularity_boost_table["IMPLEMENT"]
+            )
         
         if not self.graph_stitch_relation_priority:
             self.graph_stitch_relation_priority = [
-                "calls", "overrides", "imports", "uses", "inherits", "type_annotates"
+                "resolves_to", "calls", "overrides", "uses", "imports", "inherits", "type_annotates"
             ]
 

@@ -21,15 +21,22 @@ logger = logging.getLogger(__name__)
 
 # Relation priority order (higher = more important)
 DEFAULT_RELATION_PRIORITY: list[str] = [
+    "resolves_to",
     "calls",
     "overrides",
-    "imports",
     "uses",
+    "imports",
     "inherits",
     "type_annotates",
 ]
 
-HIGH_PRIORITY_RELATIONS: set[str] = {"DEFINES", "CALLS", "INHERITS", "OVERRIDES"}
+HIGH_PRIORITY_RELATIONS: set[str] = {
+    "DEFINES",
+    "CALLS",
+    "RESOLVES_TO",
+    "INHERITS",
+    "OVERRIDES",
+}
 LOW_PRIORITY_RELATIONS: set[str] = {"IMPORTS", "USES"}
 
 
@@ -49,7 +56,7 @@ class GraphStitchConfig:
     def __post_init__(self):
         if self.relation_priority is None:
             self.relation_priority = DEFAULT_RELATION_PRIORITY.copy()
-        self.relation_priority = [str(r).upper() for r in self.relation_priority]
+        self.relation_priority = [str(r).lower() for r in self.relation_priority]
 
 
 @dataclass(frozen=True)
@@ -231,7 +238,10 @@ class GraphStitchExpander:
         additions = 0
         
         # Sort related by priority (relation type) then hop count
-        priority_order = {r: i for i, r in enumerate(self.config.relation_priority)}
+        priority_order = {
+            str(relation).upper(): index
+            for index, relation in enumerate(self.config.relation_priority)
+        }
         related.sort(
             key=lambda e: (
                 priority_order.get(e.relation_type, 999),

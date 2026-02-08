@@ -148,6 +148,7 @@ class TestEntityTypes:
         assert RelationType.DEFINES.value == "defines"
         assert RelationType.USES.value == "uses"
         assert RelationType.IMPORTS.value == "imports"
+        assert RelationType.RESOLVES_TO.value == "resolves_to"
         assert RelationType.INHERITS.value == "inherits"
         assert RelationType.OVERRIDES.value == "overrides"
         assert RelationType.TYPE_ANNOTATES.value == "type_annotates"

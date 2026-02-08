@@ -67,27 +67,34 @@ class BM25Retriever:
             # Convert to candidates
             candidates = []
             for doc_id, score in results:
-                # Parse doc_id to extract file and symbol info
-                # Format: file_id:symbol_id
-                parts = doc_id.split(":", 1)
-                file_id = parts[0] if parts else ""
-                symbol_id = parts[1] if len(parts) > 1 else None
-
-                # Load content from DuckDB
+                file_path = ""
+                symbol_id = None
                 content = ""
-                if symbol_id and self._duckdb:
+                granularity_level = None
+
+                if self._duckdb:
                     try:
-                        content = self._duckdb.get_symbol_content(symbol_id) or ""
+                        candidate_data = self._duckdb.get_document_candidate_data(doc_id)
                     except Exception as e:
-                        logger.warning(f"Failed to load content for {symbol_id}: {e}")
+                        logger.warning(f"Failed to load content for {doc_id}: {e}")
+                        candidate_data = None
+                    if candidate_data:
+                        file_path = candidate_data.get("file", "")
+                        symbol_id = candidate_data.get("symbol_id")
+                        content = candidate_data.get("content", "")
+                        granularity_level = candidate_data.get("granularity_level")
+                elif ":" in doc_id:
+                    symbol_id = doc_id.split(":", 1)[1]
+                    file_path = doc_id.split(":", 1)[0]
 
                 candidate = Candidate(
                     doc_id=doc_id,
-                    file=file_id,
+                    file=file_path,
                     symbol_id=symbol_id,
                     content=content,
                     bm25_score=float(score),
                     provenance=("bm25",),
+                    granularity_level=granularity_level,
                 )
                 candidates.append(candidate)
 

@@ -151,6 +151,9 @@ class Config(BaseModel):
         diversity_mmr_cfg = ret_cfg.get("diversity_mmr", {})
         granularity_boost_cfg = ret_cfg.get("granularity_boost", {})
         graph_stitch_cfg = ret_cfg.get("graph_stitch", {})
+        budget_cfg = ret_cfg.get("budget", {})
+        granularity_mix_cfg = ret_cfg.get("granularity_mixing", {})
+        dedup_cfg = ret_cfg.get("hierarchical_dedup", {})
 
         return RetrievalConfig(
             # Core retrieval settings
@@ -183,12 +186,17 @@ class Config(BaseModel):
             graph_stitch_min_confidence=graph_stitch_cfg.get("min_confidence", 0.5),
             graph_stitch_relation_priority=graph_stitch_cfg.get(
                 "relation_priority",
-                ["calls", "overrides", "imports", "uses", "inherits", "type_annotates"]
+                ["resolves_to", "calls", "overrides", "uses", "imports", "inherits", "type_annotates"]
             ),
             graph_cache_enabled=graph_stitch_cfg.get("graph_cache_enabled", True),
             graph_stitch_beam_high=graph_stitch_cfg.get("graph_stitch_beam_high", 8),
             graph_stitch_beam_low=graph_stitch_cfg.get("graph_stitch_beam_low", 3),
             post_merge_candidates=ret_cfg.get("post_merge_candidates", 0),
+            context_budget=budget_cfg.get("context_budget", 4000),
+            budget_reserve=budget_cfg.get("reserve", 800),
+            budget_aware_selection=budget_cfg.get("enabled", True),
+            granularity_mixing_enabled=granularity_mix_cfg.get("enabled", True),
+            hierarchical_dedup_enabled=dedup_cfg.get("enabled", True),
         )
     
     def _parse_granularity_boost_table(self, cfg: dict) -> dict:

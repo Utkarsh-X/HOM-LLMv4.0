@@ -21,6 +21,26 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _extract_intelligence_cfg(config: "Config") -> dict[str, Any]:
+    """
+    Extract intelligence configuration from the runtime Config object.
+
+    Supports current `Config` shape (`config.intelligence`) and a legacy
+    fallback (`config.cfg["intelligence"]`) used by older call sites.
+    """
+    intelligence_cfg = getattr(config, "intelligence", None)
+    if isinstance(intelligence_cfg, dict):
+        return intelligence_cfg
+
+    legacy_cfg = getattr(config, "cfg", None)
+    if isinstance(legacy_cfg, dict):
+        legacy_intelligence = legacy_cfg.get("intelligence", {})
+        if isinstance(legacy_intelligence, dict):
+            return legacy_intelligence
+
+    return {}
+
+
 def get_fixer_config(config: "Config") -> FixerConfig:
     """
     Parse FixerConfig from Config object.
@@ -31,7 +51,7 @@ def get_fixer_config(config: "Config") -> FixerConfig:
     Returns:
         FixerConfig with parsed or default values
     """
-    intelligence_cfg = config.cfg.get("intelligence", {})
+    intelligence_cfg = _extract_intelligence_cfg(config)
     
     # Check if fixer is enabled
     enabled = intelligence_cfg.get("mechanical_fixer_enabled", True)
@@ -78,7 +98,7 @@ def get_abrm_config(config: "Config") -> ABRMConfig:
     Returns:
         ABRMConfig with parsed or default values
     """
-    intelligence_cfg = config.cfg.get("intelligence", {})
+    intelligence_cfg = _extract_intelligence_cfg(config)
     
     enabled = intelligence_cfg.get("abrm_enabled", True)
     disable_on_cold_start = intelligence_cfg.get("abrm_disable_on_cold_start", True)
