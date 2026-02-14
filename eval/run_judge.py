@@ -7,7 +7,7 @@ Constraints:
 - Uses separate judge config (model + API key).
 - No imports from homllm core.
 - Read-only baseline (no regeneration).
-- Append-only outputs.
+- Deterministic output writes (overwrite by default, explicit append optional).
 """
 
 from __future__ import annotations
@@ -66,10 +66,26 @@ def read_jsonl(path: Path) -> List[Dict]:
     return records
 
 
-def write_jsonl(path: Path, records: List[Dict]) -> None:
-    with open(path, "a", encoding="utf-8") as f:
+def write_jsonl(path: Path, records: List[Dict], mode: str = "w") -> None:
+    with open(path, mode, encoding="utf-8") as f:
         for rec in records:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+
+def dedupe_records_by_query_id(records: List[Dict]) -> List[Dict]:
+    """
+    Keep one record per query_id.
+
+    If duplicates exist, latest record wins while preserving first-seen order.
+    """
+    order: List[Any] = []
+    by_qid: Dict[Any, Dict] = {}
+    for rec in records:
+        qid = rec.get("query_id")
+        if qid not in by_qid:
+            order.append(qid)
+        by_qid[qid] = rec
+    return [by_qid[qid] for qid in order]
 
 
 # ------------------------------- RATE LIMITER -------------------------------
@@ -252,6 +268,86 @@ def ensure_gemini_client(cfg: JudgeConfig):
     return genai.Client(api_key=cfg.api_key)
 
 
+def _extract_balanced_json_object(text: str) -> Optional[str]:
+    """Extract the first balanced JSON object from free-form text."""
+    start = text.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+    return None
+
+
+def _strip_code_fences(text: str) -> str:
+    """Remove common markdown wrappers around JSON output."""
+    stripped = text.strip()
+    stripped = re.sub(r"^```(?:json)?\s*", "", stripped, flags=re.IGNORECASE)
+    stripped = re.sub(r"\s*```$", "", stripped)
+    return stripped.strip()
+
+
+def _repair_json_commas(text: str) -> str:
+    """Repair a common invalid JSON pattern: trailing commas."""
+    return re.sub(r",\s*([}\]])", r"\1", text)
+
+
+def _parse_judge_json(content: str) -> Dict:
+    """
+    Parse judge JSON robustly from model output.
+
+    Attempts:
+    1) raw parse
+    2) parse fenced-stripped text
+    3) parse balanced JSON object
+    4) parse repaired trailing-comma JSON
+    """
+    candidates: List[str] = []
+    raw = content.strip()
+    if raw:
+        candidates.append(raw)
+    stripped = _strip_code_fences(raw)
+    if stripped and stripped not in candidates:
+        candidates.append(stripped)
+    balanced = _extract_balanced_json_object(stripped)
+    if balanced and balanced not in candidates:
+        candidates.append(balanced)
+    if balanced:
+        repaired = _repair_json_commas(balanced)
+        if repaired and repaired not in candidates:
+            candidates.append(repaired)
+
+    last_error: Optional[Exception] = None
+    for candidate in candidates:
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError as exc:
+            last_error = exc
+
+    raise RuntimeError(
+        f"Failed to parse judge JSON after recovery attempts. Raw prefix: {raw[:200]!r}"
+    ) from last_error
+
+
 def call_judge_openai(client, cfg: JudgeConfig, messages: List[Dict[str, str]]) -> Dict:
     completion = client.chat.completions.create(
         model=cfg.model,
@@ -277,27 +373,39 @@ def call_judge_gemini(client, cfg: JudgeConfig, messages: List[Dict[str, str]]) 
     response = client.models.generate_content(
         model=cfg.model,
         contents=prompt,
-        config={"temperature": 0, "max_output_tokens": 4000},
+        config={
+            "temperature": 0,
+            "max_output_tokens": 4000,
+            "response_mime_type": "application/json",
+        },
     )
 
     content = response.text if response.text else ""
     if not content:
         raise RuntimeError("Gemini judge returned empty content.")
 
-    json_match = re.search(r'\{[\s\S]*\}', content)
-    if json_match:
-        content = json_match.group(0)
-
     try:
-        return json.loads(content)
-    except json.JSONDecodeError:
-        sys.stderr.write(f"[WARN] JSON parse failed, returning error structure\n")
-        return {
-            "scores": {},
-            "verdict": "error",
-            "explanation": f"JSON parse failed: {content[:200]}...",
-            "key_differences": [],
-        }
+        return _parse_judge_json(content)
+    except Exception:
+        # One strict retry with explicit format constraints.
+        retry_prompt = (
+            f"{prompt}\n\n"
+            "IMPORTANT: Return exactly one valid JSON object only. "
+            "No markdown, no code fences, no comments, no trailing commas."
+        )
+        retry = client.models.generate_content(
+            model=cfg.model,
+            contents=retry_prompt,
+            config={
+                "temperature": 0,
+                "max_output_tokens": 4000,
+                "response_mime_type": "application/json",
+            },
+        )
+        retry_text = retry.text if retry.text else ""
+        if not retry_text:
+            raise RuntimeError("Gemini judge returned empty content on retry.")
+        return _parse_judge_json(retry_text)
 
 
 def call_judge(client, cfg: JudgeConfig, messages: List[Dict[str, str]]) -> Dict:
@@ -371,12 +479,12 @@ def compute_verdict_from_scores(scores: Dict) -> str:
         "improved", "regressed", or "equal"
     """
     overall = scores.get("overall_quality", {})
-    if isinstance(overall, dict):
+    if isinstance(overall, dict) and ("baseline" in overall) and ("candidate" in overall):
         baseline = overall.get("baseline", 3)
         candidate = overall.get("candidate", 3)
     else:
-        # Fallback if not a dict
-        return "equal"
+        # Do not silently mark malformed judge output as equal.
+        return "error"
     
     if candidate > baseline:
         return "improved"
@@ -384,6 +492,29 @@ def compute_verdict_from_scores(scores: Dict) -> str:
         return "regressed"
     else:
         return "equal"
+
+
+def validate_paired_scores(scores: Dict) -> None:
+    """
+    Enforce a strict score schema for judge output integrity.
+    """
+    if not isinstance(scores, dict):
+        raise ValueError("Judge output 'scores' must be an object.")
+
+    missing = [metric for metric in METRIC_ORDER if metric not in scores]
+    if missing:
+        raise ValueError(f"Judge output missing metrics: {', '.join(missing)}")
+
+    for metric in METRIC_ORDER:
+        raw = scores.get(metric)
+        if not isinstance(raw, dict):
+            raise ValueError(f"Metric '{metric}' must be a paired score object.")
+        for side in ("baseline", "candidate"):
+            value = raw.get(side)
+            if not isinstance(value, (int, float)):
+                raise ValueError(f"Metric '{metric}.{side}' must be numeric.")
+            if value < 1 or value > 5:
+                raise ValueError(f"Metric '{metric}.{side}' must be in [1, 5].")
 
 
 # ------------------------------- OUTPUT FORMATTING -------------------------------
@@ -566,6 +697,11 @@ def main() -> None:
     parser.add_argument("--judge-config", type=Path, required=True, help="Path to judge_config.json")
     parser.add_argument("--output", type=Path, help="Optional output path for judge_results.jsonl")
     parser.add_argument(
+        "--append-output",
+        action="store_true",
+        help="Append to existing output path (default behavior is overwrite with de-dup).",
+    )
+    parser.add_argument(
         "--rpm", type=int, default=None,
         help="Rate limit: max requests per minute to LLM (overrides config, 0=unlimited)"
     )
@@ -586,6 +722,7 @@ def main() -> None:
         client = ensure_openai_client(cfg)
 
     output_path = args.output or args.responses.parent / "judge_results.jsonl"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Initialize rate limiter
     # CLI --rpm overrides config file setting
@@ -632,6 +769,7 @@ def main() -> None:
             # The LLM sometimes hallucinates the verdict, saying "improved" when
             # the scores clearly show the candidate performed worse.
             scores = judged.get("scores", {})
+            validate_paired_scores(scores)
             verdict = compute_verdict_from_scores(scores)
             llm_verdict = judged.get("verdict", "unknown")
             if verdict != llm_verdict:
@@ -658,23 +796,29 @@ def main() -> None:
             "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         }
         records.append(record)
-        write_jsonl(output_path, [record])
 
     if not records:
         print("\nNo queries were judged successfully.")
         return
 
+    if args.append_output and output_path.exists():
+        existing = read_jsonl(output_path)
+        merged = dedupe_records_by_query_id(existing + records)
+    else:
+        merged = dedupe_records_by_query_id(records)
+    write_jsonl(output_path, merged, mode="w")
+
     # Format date
     date_str = datetime.now().strftime("%B %d, %Y")
 
     # ====================== PRINT FULL REPORT ======================
-    print_header(run_id, date_str, model_name, len(records))
-    print_summary(records, run_id)
+    print_header(run_id, date_str, model_name, len(merged))
+    print_summary(merged, run_id)
 
     # Separate by verdict
-    regressed = [r for r in records if r.get("verdict") == "regressed"]
-    improved = [r for r in records if r.get("verdict") == "improved"]
-    equal = [r for r in records if r.get("verdict") == "equal"]
+    regressed = [r for r in merged if r.get("verdict") == "regressed"]
+    improved = [r for r in merged if r.get("verdict") == "improved"]
+    equal = [r for r in merged if r.get("verdict") == "equal"]
 
     # Print regressions first (priority)
     if regressed:
@@ -701,10 +845,10 @@ def main() -> None:
             print_query_detail(r, run_id)
 
     # Overall averages
-    print_average_scores(records, run_id)
+    print_average_scores(merged, run_id)
 
     # Final interpretation
-    print_final_summary(records)
+    print_final_summary(merged)
 
     # Footer
     print()

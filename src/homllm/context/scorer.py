@@ -1,6 +1,7 @@
 """Block scorer implementation."""
 
 import logging
+from collections import Counter
 from typing import Optional
 
 from homllm.context.interfaces import (
@@ -16,6 +17,8 @@ logger = logging.getLogger(__name__)
 
 class ContextBlockScorer(BlockScorer):
     """Scores context blocks for selection."""
+
+    _FILE_DIVERSITY_BETA = 0.2
 
     def __init__(self, embedder: Optional[object] = None, config: Optional[ContextConfig] = None):
         """
@@ -45,29 +48,36 @@ class ContextBlockScorer(BlockScorer):
         - novelty_score: Difference from selected
         - coherence_score: Fit with current context
         """
-        scored = []
+        scored: list[ScoredBlock] = []
 
-        # Compute novelty scores (difference from selected blocks)
-        selected_content = {b.content[:100] for b in selected_blocks}
+        # Precompute raw semantic scores from ranking traces.
+        semantic_raw: dict[str, float] = {}
+        for block in blocks:
+            trace = debug_traces.get(block.block_id)
+            if trace:
+                semantic_raw[block.block_id] = trace.base_score + trace.rerank_score
+            else:
+                semantic_raw[block.block_id] = 0.0
+
+        raw_values = list(semantic_raw.values())
+        raw_min = min(raw_values) if raw_values else 0.0
+        raw_max = max(raw_values) if raw_values else 0.0
+        raw_range = raw_max - raw_min
 
         for block in blocks:
-            # Get semantic score from debug trace
-            trace = debug_traces.get(block.block_id)
-            semantic_score = trace.final_score if trace else 0.0
+            # Normalize semantic score to [0, 1] for stability
+            raw_score = semantic_raw.get(block.block_id, 0.0)
+            if raw_range > 0:
+                semantic_score = (raw_score - raw_min) / raw_range
+            else:
+                semantic_score = 0.5 if raw_values else 0.0
 
             # Name score (identifier overlap with query)
             name_score = self._compute_name_score(block, query)
 
-            # Structural priority (from provenance)
-            structural_priority = self._compute_structural_priority(block)
-
-            # Novelty score (difference from selected)
-            novelty_score = self._compute_novelty_score(block, selected_content)
-
-            # Coherence score (fit with current context)
-            coherence_score = self._compute_coherence_score(
-                block, selected_blocks, query
-            )
+            structural_priority = 0.0
+            novelty_score = 0.0
+            coherence_score = 0.0
 
             # Final score (weighted combination - all weights from config)
             if self.config:
@@ -100,10 +110,39 @@ class ContextBlockScorer(BlockScorer):
 
             scored.append(scored_block)
 
-        # Sort by final score descending
-        scored.sort(key=lambda s: s.final_score, reverse=True)
+        # Context pipeline preserves order downstream (`preserve_order=True` in budget allocation).
+        # So diversification must be represented as a deterministic ordering here, not as token caps.
+        distinct_files = len({b.block.file for b in scored if b.block.file})
+        if distinct_files <= 1:
+            return scored
 
-        return scored
+        remaining: list[tuple[int, ScoredBlock]] = list(enumerate(scored))
+        selected: list[ScoredBlock] = []
+        per_file: Counter[str] = Counter()
+
+        while remaining:
+            best_i = 0
+            best_score = None
+            for i, (orig_idx, sb) in enumerate(remaining):
+                file_key = sb.block.file or ""
+                decay = 1.0 / (1.0 + self._FILE_DIVERSITY_BETA * float(per_file.get(file_key, 0)))
+                adjusted = sb.final_score * decay
+                key = (adjusted, -orig_idx)
+                if best_score is None or key > best_score:
+                    best_score = key
+                    best_i = i
+            orig_idx, sb = remaining.pop(best_i)
+            selected.append(sb)
+            per_file[sb.block.file or ""] += 1
+
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "[CONTEXT_SCORER] diversified_order distinct_files=%s per_file=%s",
+                distinct_files,
+                dict(sorted(per_file.items(), key=lambda kv: (-kv[1], kv[0]))),
+            )
+
+        return selected
 
     def _compute_name_score(self, block: ContextBlock, query: str) -> float:
         """Compute identifier overlap score."""
@@ -118,57 +157,3 @@ class ContextBlockScorer(BlockScorer):
 
         overlap = len(query_terms & symbol_terms)
         return overlap / max(len(query_terms), len(symbol_terms))
-
-    def _compute_structural_priority(self, block: ContextBlock) -> float:
-        """Compute structural priority from provenance."""
-        priority = 0.0
-
-        # Use config values if available, otherwise fallback to defaults
-        decorator_bonus = self.config.structural_priority_decorator_bonus if self.config else 0.3
-        callgraph_bonus = self.config.structural_priority_callgraph_bonus if self.config else 0.2
-        entrypoint_bonus = self.config.structural_priority_entrypoint_bonus if self.config else 0.5
-        cap = self.config.structural_priority_cap if self.config else 1.0
-
-        if "expansion:decorator" in block.provenance:
-            priority += decorator_bonus
-
-        if "expansion:callee" in block.provenance:
-            priority += callgraph_bonus
-
-        # Check if entrypoint (main, run, etc.)
-        if block.symbol_name:
-            entrypoint_names = {"main", "run", "start", "entry", "init"}
-            if block.symbol_name.lower() in entrypoint_names:
-                priority += entrypoint_bonus
-
-        return min(priority, cap)
-
-    def _compute_novelty_score(
-        self, block: ContextBlock, selected_content: set[str]
-    ) -> float:
-        """Compute novelty (difference from selected blocks)."""
-        block_preview = block.content[:100]
-        if block_preview in selected_content:
-            return 0.0  # Not novel
-        return 1.0  # Novel
-
-    def _compute_coherence_score(
-        self,
-        block: ContextBlock,
-        selected_blocks: list[ContextBlock],
-        query: str,
-    ) -> float:
-        """Compute coherence (fit with current context)."""
-        if not selected_blocks:
-            return 1.0  # First block is always coherent
-
-        # Use config values if available, otherwise fallback to defaults
-        same_file_bonus = self.config.coherence_same_file_bonus if self.config else 0.8
-        different_file_bonus = self.config.coherence_different_file_bonus if self.config else 0.5
-
-        # Simple heuristic: check if block is from same file
-        selected_files = {b.file for b in selected_blocks}
-        if block.file in selected_files:
-            return same_file_bonus
-
-        return different_file_bonus

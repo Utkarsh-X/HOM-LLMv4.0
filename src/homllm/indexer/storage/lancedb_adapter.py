@@ -141,6 +141,7 @@ class LanceDBAdapter:
 
         except Exception as e:
             logger.error(f"Failed to index vectors: {e}")
+            raise
 
     def delete_documents(self, doc_ids: list[str]) -> None:
         """Delete vectors by document IDs."""

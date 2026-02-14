@@ -10,6 +10,7 @@ import json
 import sys
 import threading
 import time
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 import logging
@@ -154,6 +155,11 @@ def main():
     parser.add_argument("--incremental", action="store_true", help="Incremental indexing")
     parser.add_argument("--json", action="store_true", help="Export JSON telemetry")
     parser.add_argument("--progress-interval", type=int, default=10, help="Progress update interval (files)")
+    parser.add_argument(
+        "--skip-vectors",
+        action="store_true",
+        help="Skip vector indexing (BM25 + metadata only). Use only when embeddings are unavailable.",
+    )
 
     args = parser.parse_args()
 
@@ -170,6 +176,8 @@ def main():
     try:
         config = Config.from_file(args.config)
         indexer_config = config.get_indexer_config()
+        if args.skip_vectors:
+            indexer_config = replace(indexer_config, vector_indexing_enabled=False)
     except Exception as e:
         logger.error(f"Error loading config: {e}")
         sys.exit(1)

@@ -119,6 +119,12 @@ def apply_granularity_boost(
                 hybrid_score=new_score,
                 provenance=candidate.provenance + (f"granularity_boost:{granularity}:{boost}",),
                 granularity_level=granularity,
+                span_start=candidate.span_start,
+                span_end=candidate.span_end,
+                parent_symbol_id=candidate.parent_symbol_id,
+                entity_ids=candidate.entity_ids,
+                doc_type=candidate.doc_type,
+                semantic_embedding=candidate.semantic_embedding,
             )
             boosted.append(boosted_candidate)
             boost_count += 1
@@ -138,6 +144,12 @@ def apply_granularity_boost(
                 hybrid_score=candidate.hybrid_score,
                 provenance=candidate.provenance,
                 granularity_level=granularity,
+                span_start=candidate.span_start,
+                span_end=candidate.span_end,
+                parent_symbol_id=candidate.parent_symbol_id,
+                entity_ids=candidate.entity_ids,
+                doc_type=candidate.doc_type,
+                semantic_embedding=candidate.semantic_embedding,
             ))
     
     if boost_count > 0:

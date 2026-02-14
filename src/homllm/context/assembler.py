@@ -32,16 +32,23 @@ class BlockAssembler:
 
             # Parse symbol_id to extract line numbers if available
             # Format: file_id:symbol_id or symbol_id:start_line:end_line
-            start_line = 1
-            end_line = len(content.split("\n")) if content else 1
+            start_line = candidate.span_start if candidate.span_start is not None else 1
+            if candidate.span_end is not None:
+                end_line = candidate.span_end
+            else:
+                end_line = start_line + (len(content.split("\n")) - 1 if content else 0)
 
             if symbol_id and ":" in symbol_id:
                 parts = symbol_id.split(":")
                 # Try to extract line numbers if present
                 try:
                     if len(parts) >= 3:
-                        start_line = int(parts[-2])
-                        end_line = int(parts[-1])
+                        parsed_start = int(parts[-2])
+                        parsed_end = int(parts[-1])
+                        if candidate.span_start is None:
+                            start_line = parsed_start
+                        if candidate.span_end is None:
+                            end_line = parsed_end
                 except ValueError:
                     pass
 

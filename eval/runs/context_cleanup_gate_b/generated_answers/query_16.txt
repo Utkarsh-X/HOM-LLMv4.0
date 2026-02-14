@@ -1,0 +1,7 @@
+QUERY_ID   : 16
+RUN_ID     : 1becbd6c-275b-4e2f-949b-fee10304c1cf
+MODEL      : none
+PROVIDER   : none
+STATUS     : SKIPPED
+--- ANSWER ---
+[diagnostics-only] Skipped generation.

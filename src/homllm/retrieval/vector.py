@@ -76,6 +76,11 @@ class VectorRetriever:
                 file_path = metadata.get("file_path") or metadata.get("file") or ""
                 symbol_id = metadata.get("symbol_id")
                 granularity_level = metadata.get("granularity_level")
+                span_start = None
+                span_end = None
+                parent_symbol_id = None
+                entity_ids: tuple[str, ...] = ()
+                doc_type = None
 
                 if self._duckdb:
                     candidate_data = self._duckdb.get_document_candidate_data(doc_id)
@@ -86,6 +91,11 @@ class VectorRetriever:
                         granularity_level = candidate_data.get(
                             "granularity_level", granularity_level
                         )
+                        span_start = candidate_data.get("span_start")
+                        span_end = candidate_data.get("span_end")
+                        parent_symbol_id = candidate_data.get("parent_symbol_id")
+                        entity_ids = tuple(candidate_data.get("entity_ids") or ())
+                        doc_type = candidate_data.get("doc_type")
                 elif not symbol_id and ":" in doc_id:
                     symbol_id = doc_id.split(":", 1)[1]
 
@@ -97,6 +107,11 @@ class VectorRetriever:
                     vector_score=float(score),
                     provenance=("vector",),
                     granularity_level=granularity_level,
+                    span_start=span_start,
+                    span_end=span_end,
+                    parent_symbol_id=parent_symbol_id,
+                    entity_ids=entity_ids,
+                    doc_type=doc_type,
                 )
                 candidates.append(candidate)
 

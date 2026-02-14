@@ -343,10 +343,70 @@ class QueryTelemetry:
         }
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(output_path, "w") as f:
-            json.dump(telemetry_data, f, indent=2)
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(telemetry_data, f, indent=2, sort_keys=True)
 
         print_telemetry("TELEMETRY", json_export=str(output_path))
+
+
+def _dump_candidate_diagnostics(
+    run_id: str,
+    retrieval_candidates,
+    ranking_output,
+    enabled: bool,
+) -> None:
+    """Write diagnostic-only candidate dumps for retrieval and ranking (no behavior changes)."""
+
+    if not enabled:
+        return
+
+    trace_by_id: dict[str, object] = {}
+    try:
+        for t in getattr(ranking_output, "debug_traces", ()) or ():
+            cid = getattr(t, "candidate_id", None)
+            if cid:
+                trace_by_id[str(cid)] = t
+    except Exception:
+        trace_by_id = {}
+
+    retrieval_top20 = []
+    for c in list(retrieval_candidates or [])[:20]:
+        retrieval_top20.append(
+            {
+                "doc_id": getattr(c, "doc_id", None),
+                "file": getattr(c, "file", None),
+                "bm25_score": float(getattr(c, "bm25_score", 0.0) or 0.0),
+                "vector_score": float(getattr(c, "vector_score", 0.0) or 0.0),
+                "hybrid_score": float(getattr(c, "hybrid_score", 0.0) or 0.0),
+            }
+        )
+
+    ranking_top20 = []
+    ranked = list(getattr(ranking_output, "ranked_candidates", ()) or ())[:20]
+    for c in ranked:
+        doc_id = str(getattr(c, "doc_id", "") or "")
+        t = trace_by_id.get(doc_id)
+        ranking_top20.append(
+            {
+                "doc_id": getattr(c, "doc_id", None),
+                "file": getattr(c, "file", None),
+                "base_score": float(getattr(t, "base_score", 0.0) or 0.0),
+                "rerank_score": float(getattr(t, "rerank_score", 0.0) or 0.0),
+                "structural_score": float(getattr(t, "struct_bonus", 0.0) or 0.0),
+                "final_score": float(getattr(t, "final_score", 0.0) or 0.0),
+            }
+        )
+
+    payload = {
+        "run_id": run_id,
+        "retrieval_top20": retrieval_top20,
+        "ranking_top20": ranking_top20,
+    }
+
+    out_path = Path("artifacts") / "runs" / run_id / "candidate_diagnostics.json"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
 
 
 def _run_and_save_diagnostic_layers(
@@ -386,9 +446,98 @@ def _run_and_save_diagnostic_layers(
     if "p3" in selected:
         from homllm.instability import run_instability
         from homllm.instability.interfaces import RunRecord
+        from homllm.sufficiency.intent import classify_intent
+
         intent = getattr(p1_result, "intent", "UNKNOWN") if p1_result else "UNKNOWN"
         verdict = getattr(p1_result, "final_verdict", "SUFFICIENT") if p1_result else "SUFFICIENT"
-        runs = (
+
+        def _embed_query_safe(text: str) -> tuple[float, ...] | None:
+            try:
+                v = embedder.embed_query(text) if embedder is not None else None
+                if v is None:
+                    return None
+                values = tuple(float(x) for x in (v.values if hasattr(v, "values") else v))
+                # Treat all-zero (or near-zero) vectors as "embedding unavailable" to avoid
+                # pathological bucketing where even the current run is excluded.
+                norm2 = sum(x * x for x in values)
+                if norm2 <= 1e-12:
+                    return None
+                return values
+            except Exception:
+                return None
+
+        # Build a lightweight history from prior artifact runs (best-effort).
+        # This makes P3 informative (avoids permanent cold_start due to evidence_volume=1).
+        history: list[RunRecord] = []
+        artifacts_root = Path("artifacts") / "runs"
+        try:
+            run_dirs = sorted(
+                [p for p in artifacts_root.iterdir() if p.is_dir()],
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            for p in run_dirs[:200]:
+                if p.name == run_id:
+                    continue
+                telemetry_path = p / "telemetry.json"
+                if not telemetry_path.exists():
+                    continue
+                try:
+                    telemetry = json.loads(telemetry_path.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                hist_query = telemetry.get("query", "")
+                if not isinstance(hist_query, str) or not hist_query.strip():
+                    continue
+
+                hist_intent = classify_intent(hist_query).intent
+                if hist_intent != intent:
+                    continue
+
+                chunk_ids: tuple[str, ...] = ()
+                ctx_diag_path = p / "context_diagnostics.json"
+                if ctx_diag_path.exists():
+                    try:
+                        ctx_diag = json.loads(ctx_diag_path.read_text(encoding="utf-8"))
+                        l1_blocks = (ctx_diag.get("level1", {}) or {}).get("blocks", []) or []
+                        chunk_ids = tuple(
+                            b.get("block_id")
+                            for b in l1_blocks
+                            if isinstance(b, dict) and b.get("block_id")
+                        )
+                    except Exception:
+                        chunk_ids = ()
+
+                # Verdict is optional; default to SUFFICIENT if unknown.
+                hist_verdict = "SUFFICIENT"
+                diag_layers_path = p / "diagnostics.json"
+                if diag_layers_path.exists():
+                    try:
+                        diag_layers = json.loads(diag_layers_path.read_text(encoding="utf-8"))
+                        p1 = (diag_layers.get("layers", {}) or {}).get("p1", {}) or {}
+                        hist_verdict = p1.get("final_verdict") or hist_verdict
+                    except Exception:
+                        pass
+
+                history.append(
+                    RunRecord(
+                        query=hist_query,
+                        intent=hist_intent,
+                        chunk_ids=chunk_ids,
+                        file_paths=(),
+                        answer_text="",
+                        final_verdict=hist_verdict,
+                        policy_influenced=False,
+                        query_embedding=_embed_query_safe(hist_query),
+                    )
+                )
+                if len(history) >= 40:
+                    break
+        except Exception:
+            history = []
+
+        # Include current run as the final record.
+        history.append(
             RunRecord(
                 query=query,
                 intent=intent,
@@ -397,9 +546,11 @@ def _run_and_save_diagnostic_layers(
                 answer_text="",
                 final_verdict=verdict,
                 policy_influenced=False,
-            ),
+                query_embedding=_embed_query_safe(query),
+            )
         )
-        p3_result = run_instability(runs, intent, reference_embedding=None)
+
+        p3_result = run_instability(tuple(history), intent, reference_embedding=_embed_query_safe(query))
         out["p3"] = p3_result.to_dict()
 
     if "p4" in selected:
@@ -529,6 +680,11 @@ def main():
                         help="Comma-separated: p1,p2,p3,p4. Run P1–P4 diagnostic layers and save to a separate file (e.g. p1,p2 or p1,p2,p3,p4).")
     parser.add_argument("--context-diagnostics", action="store_true",
                         help="Run L1/L2/L3 context diagnostics (per-block, relational, summary) and save to context_diagnostics.json")
+    parser.add_argument(
+        "--diagnostics-only",
+        action="store_true",
+        help="Stop after retrieval/ranking/context (+ optional diagnostics). Skips Plan C and generation.",
+    )
 
     args = parser.parse_args()
 
@@ -580,6 +736,7 @@ def main():
         intent_source = "inferred"
 
     logger.info("[INTENT] value=%s source=%s", intent.value, intent_source)
+    diagnostics_enabled = bool(args.diagnostic_layers) or bool(args.context_diagnostics)
 
     try:
         # Initialize presentation renderer (architecture-safe, deterministic)
@@ -622,6 +779,7 @@ def main():
             bm25_ms=retrieval_result.metadata.get("bm25_ms"),
             vector_ms=retrieval_result.metadata.get("vector_ms"),
             merge_ms=retrieval_result.metadata.get("merge_ms"),
+            mmr_ms_merger=retrieval_result.metadata.get("mmr_ms_merger"),
             granularity_ms=retrieval_result.metadata.get("granularity_ms"),
             graph_stitch_ms=retrieval_result.metadata.get("graph_stitch_ms"),
             expansion_ms=retrieval_result.metadata.get("expansion_ms"),
@@ -674,6 +832,16 @@ def main():
             candidates=len(ranking_output.ranked_candidates),
             reranker=ranking_output.metadata.reranker_used,
             reranker_unavailable=ranking_output.metadata.reranker_unavailable,
+            set_optimization=ranking_output.metadata.set_optimization,
+            signal_profile=ranking_output.metadata.signal_profile,
+        )
+
+        # Diagnostic-only candidate dump (no behavior changes).
+        _dump_candidate_diagnostics(
+            run_id=telemetry.run_id,
+            retrieval_candidates=retrieval_result.candidates,
+            ranking_output=ranking_output,
+            enabled=bool(args.diagnostic_layers) or bool(args.context_diagnostics),
         )
 
         # Phase 3: Context Assembly
@@ -699,6 +867,24 @@ def main():
             token_budget=context_artifact.token_budget,
             generation_reserve=context_config.generation_reserve_tokens,
             tokens_remaining=context_config.max_tokens - context_artifact.used_tokens,
+            stage_counts=context_artifact.provenance.get("stage_counts"),
+            drop_trace=(
+                context_artifact.provenance.get("context_drop_trace")
+                if diagnostics_enabled
+                else None
+            ),
+            context_synthesis=context_artifact.provenance.get("context_synthesis"),
+            context_integration=context_artifact.provenance.get("context_integration"),
+            stage_file_histograms=(
+                context_artifact.provenance.get("stage_file_histograms")
+                if diagnostics_enabled
+                else None
+            ),
+            scored_order_top10=(
+                context_artifact.provenance.get("scored_order_top10")
+                if diagnostics_enabled
+                else None
+            ),
         )
 
         # Phase 4: Intelligence Analysis + Context Application
@@ -798,6 +984,29 @@ def main():
                 context_artifact,
                 telemetry.run_id,
             )
+
+        # Diagnostics-only mode: export telemetry and exit without generation.
+        if getattr(args, "diagnostics_only", False):
+            gen_start = time.perf_counter()
+            gen_end = time.perf_counter()
+            telemetry.record_phase(
+                "GENERATION",
+                gen_start,
+                gen_end,
+                provider="none",
+                model="none",
+                tokens_in=0,
+                tokens_out=0,
+                status="SKIPPED",
+                finish_reason="diagnostics_only",
+            )
+
+            if args.json:
+                artifacts_path = Path("artifacts") / "runs" / telemetry.run_id
+                telemetry.write_json(artifacts_path / "telemetry.json")
+
+            print_answer_box("[diagnostics-only] Skipped generation.")
+            return
 
         # =====================================================================
         # Plan C: Mechanical Fixer + ABRM Activation

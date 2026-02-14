@@ -143,16 +143,32 @@ class DiagnosticController:
                     blocks=(),
                     result=None,
                 )
+
+            # Prefer token counts produced by the context pipeline (allocated tokens),
+            # falling back to cheap estimation when provenance is unavailable.
+            token_map: dict[str, int] = {}
+            try:
+                prov_blocks = (context.provenance or {}).get("blocks", [])
+                for entry in prov_blocks:
+                    block_id = entry.get("block_id")
+                    tokens = entry.get("tokens")
+                    if block_id and isinstance(tokens, (int, float)):
+                        token_map[str(block_id)] = int(tokens)
+            except Exception:
+                token_map = {}
             
             # Analyze each block
             intra_blocks: list[IntraBlockDiagnostic] = []
             
             for block in context.blocks:
-                diagnostic = self._analyze_block(block)
+                diagnostic = self._analyze_block(block, token_count_override=token_map.get(block.block_id))
                 intra_blocks.append(diagnostic)
             
             # Build aggregate result
             total_tokens = sum(b.tokens for b in intra_blocks)
+            # Align with the context artifact accounting when available.
+            if getattr(context, "used_tokens", 0):
+                total_tokens = int(context.used_tokens)
             
             result = ContextDiagnosticResult(
                 query_id=context.query_id,
@@ -162,6 +178,61 @@ class DiagnosticController:
                 token_budget=context.token_budget,
                 used_budget_pct=(total_tokens / context.token_budget * 100) if context.token_budget > 0 else 0.0,
             )
+
+            # Populate block-level summary for downstream diagnostics consumers.
+            block_infos: list[ContextBlockInfo] = []
+            for idx, block in enumerate(context.blocks):
+                per_block_tokens = token_map.get(block.block_id)
+                if per_block_tokens is None:
+                    # Fall back to the analyzer's accounting (heuristic) rather than lying.
+                    per_block_tokens = intra_blocks[idx].tokens if idx < len(intra_blocks) else 0
+
+                block_infos.append(
+                    ContextBlockInfo(
+                        block_id=block.block_id,
+                        file=block.file,
+                        start_line=block.start_line,
+                        end_line=block.end_line,
+                        tokens=int(per_block_tokens),
+                        provenance=tuple(block.provenance),
+                        position=idx,
+                    )
+                )
+            result.blocks = block_infos
+
+            # Derived signals (reusing the semantics from ContextDiagnostics).
+            if result.blocks and result.total_tokens > 0:
+                sorted_blocks = sorted(result.blocks, key=lambda b: b.tokens, reverse=True)
+                top_k = 5
+                top_tokens = sum(b.tokens for b in sorted_blocks[:top_k])
+                result.top_k_token_concentration = (top_tokens / result.total_tokens) * 100
+
+                # Simple redundancy signal: many blocks from the same file.
+                file_groups: dict[str, list[ContextBlockInfo]] = {}
+                for bi in result.blocks:
+                    file_groups.setdefault(bi.file, []).append(bi)
+
+                for file, blocks in file_groups.items():
+                    if len(blocks) >= 3:
+                        result.redundant_blocks.append(
+                            {
+                                "file": file,
+                                "block_count": len(blocks),
+                                "total_tokens": sum(b.tokens for b in blocks),
+                                "lines_covered": (
+                                    min(b.start_line for b in blocks),
+                                    max(b.end_line for b in blocks),
+                                ),
+                            }
+                        )
+                        result.warnings.append(f"Potential redundancy: {len(blocks)} blocks from {file}")
+
+                if result.used_budget_pct > 95:
+                    result.warnings.append(f"Near budget limit: {result.used_budget_pct:.1f}% used")
+                if result.top_k_token_concentration > 80 and len(result.blocks) > 10:
+                    result.warnings.append(
+                        f"High token concentration: top {top_k} blocks use {result.top_k_token_concentration:.0f}% of tokens"
+                    )
             
             return StructuralDiagnostics(
                 status="available",
@@ -246,10 +317,22 @@ class DiagnosticController:
                     result=None,
                 )
             
+            # Build block metadata for concept coverage
+            context_blocks: dict[str, dict] = {}
+            try:
+                for block in context.blocks:
+                    context_blocks[block.block_id] = {
+                        "file": block.file,
+                        "preview": (block.content or "")[:300],
+                    }
+            except Exception:
+                context_blocks = {}
+
             # Run alignment analysis
             result = self._alignment_analyzer.analyze(
                 query=query,
                 blocks=list(level1.blocks),
+                context_blocks=context_blocks,
             )
             
             return CognitiveDiagnostics(
@@ -265,14 +348,22 @@ class DiagnosticController:
                 result=None,
             )
     
-    def _analyze_block(self, block: ContextBlock) -> IntraBlockDiagnostic:
+    def _analyze_block(
+        self,
+        block: ContextBlock,
+        token_count_override: int | None = None,
+    ) -> IntraBlockDiagnostic:
         """
         Analyze a single context block.
         
         Uses BlockContentAnalyzer to produce IntraBlockDiagnostic.
         """
-        # Estimate tokens from content
-        token_count = max(1, len(block.content.split()) // 2)
+        # Prefer context pipeline token accounting when available.
+        if token_count_override is not None:
+            token_count = max(1, int(token_count_override))
+        else:
+            # Estimate tokens from content (cheap, deterministic)
+            token_count = max(1, len(block.content.split()) // 2)
         
         return self._block_analyzer.analyze(
             content=block.content,

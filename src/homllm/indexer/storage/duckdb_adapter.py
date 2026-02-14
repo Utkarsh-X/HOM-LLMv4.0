@@ -335,7 +335,7 @@ class DuckDBAdapter:
 
         chunk_row = self.conn.execute(
             """
-            SELECT file_path, content, granularity_level, entity_ids
+            SELECT file_path, content, granularity_level, entity_ids, span_start, span_end
             FROM chunks
             WHERE chunk_id = ?
             """,
@@ -344,6 +344,16 @@ class DuckDBAdapter:
         if chunk_row:
             entity_ids = json.loads(chunk_row[3]) if chunk_row[3] else []
             symbol_id = entity_ids[0] if entity_ids else None
+            parent_symbol_id = None
+            if symbol_id:
+                try:
+                    parent_symbol_id = self.conn.execute(
+                        "SELECT parent_id FROM symbols WHERE symbol_id = ?",
+                        [symbol_id],
+                    ).fetchone()
+                    parent_symbol_id = parent_symbol_id[0] if parent_symbol_id else None
+                except Exception:
+                    parent_symbol_id = None
             return {
                 "doc_id": doc_id,
                 "file": chunk_row[0],
@@ -351,13 +361,16 @@ class DuckDBAdapter:
                 "content": chunk_row[1],
                 "granularity_level": chunk_row[2],
                 "entity_ids": entity_ids,
+                "span_start": chunk_row[4],
+                "span_end": chunk_row[5],
+                "parent_symbol_id": parent_symbol_id,
                 "doc_type": "chunk",
             }
 
         symbol_id = doc_id.split(":", 1)[1] if ":" in doc_id else doc_id
         symbol_row = self.conn.execute(
             """
-            SELECT f.path, s.content, e.granularity_level
+            SELECT f.path, s.content, e.granularity_level, s.start_line, s.end_line, s.parent_id
             FROM symbols s
             LEFT JOIN files f ON f.file_id = s.file_id
             LEFT JOIN entities e ON e.entity_id = s.symbol_id
@@ -373,6 +386,9 @@ class DuckDBAdapter:
                 "content": symbol_row[1] or "",
                 "granularity_level": symbol_row[2],
                 "entity_ids": [symbol_id],
+                "span_start": symbol_row[3],
+                "span_end": symbol_row[4],
+                "parent_symbol_id": symbol_row[5],
                 "doc_type": "symbol",
             }
 

@@ -7,14 +7,12 @@ Extended for Plan B: Retrieval Layer Activation with:
 - Graph-based structural expansion (GRAPH_STITCH)
 """
 
-import hashlib
 import logging
 import time
 import uuid
 from pathlib import Path
 from typing import Optional
 
-from homllm.common.config import Config
 from homllm.common.types import Intent
 from homllm.indexer.embedder import QwenEmbedder
 from homllm.indexer.storage.duckdb_adapter import DuckDBAdapter
@@ -331,7 +329,7 @@ class RetrievalPipeline:
                     "total_ms": round(total_ms, 2),
                     "mmr_candidates": getattr(self.merger, "last_metrics", {}).get("mmr_candidates"),
                     "mmr_emb_ms": getattr(self.merger, "last_metrics", {}).get("mmr_emb_ms"),
-                    "mmr_ms": getattr(self.merger, "last_metrics", {}).get("mmr_ms"),
+                    "mmr_ms_merger": getattr(self.merger, "last_metrics", {}).get("mmr_ms"),
                     "mmr_error": getattr(self.merger, "last_metrics", {}).get("mmr_error"),
                     "budget_used_tokens": budget_used,
                     "budget_effective_tokens": budget_effective,

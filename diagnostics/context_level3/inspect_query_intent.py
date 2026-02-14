@@ -258,6 +258,28 @@ class QueryIntentAnalyzer:
         # Extract backtick code references
         backtick = re.findall(r'`([^`]+)`', query)
         concepts.extend(backtick)
+
+        # Fallback: extract meaningful tokens from natural language
+        token_matches = re.findall(r"\b[A-Za-z0-9_]+\b", query)
+        l_level_matches = re.findall(r"\bL\d+\b", query)
+        token_matches.extend(l_level_matches)
+        stopwords = {
+            "what", "when", "where", "which", "who", "whom", "why", "how",
+            "does", "do", "did", "is", "are", "was", "were", "be", "been",
+            "the", "a", "an", "and", "or", "but", "if", "then", "than",
+            "this", "that", "these", "those", "with", "without", "about",
+            "into", "from", "to", "of", "for", "in", "on", "at", "by",
+            "all", "any", "each", "every", "some", "most", "many", "few",
+            "miss", "misses", "work", "working", "happens", "happen",
+            "explain", "describe", "show", "tell", "trace", "resolve",
+        }
+        for token in token_matches:
+            if len(token) < 2:
+                continue
+            token_lower = token.lower()
+            if token_lower in stopwords:
+                continue
+            concepts.append(token)
         
         # Remove duplicates while preserving order
         seen = set()
@@ -266,7 +288,7 @@ class QueryIntentAnalyzer:
             if c.lower() not in seen:
                 seen.add(c.lower())
                 unique.append(c)
-        
+
         return unique
     
     def _is_explanatory(self, query: str, actions: list[ActionVerb]) -> bool:

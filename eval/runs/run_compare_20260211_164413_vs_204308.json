@@ -1,0 +1,497 @@
+{
+  "runs": {
+    "old": "eval/runs/run_20260211_164413/responses.jsonl",
+    "new": "eval/runs/run_20260211_204308/responses.jsonl"
+  },
+  "queries": {
+    "1": {
+      "query_text": "Trace the execution flow when an admin user calls the admin_search_endpoint through all layers including decorators, cache, optimizer, and ranking.",
+      "concepts": [
+        "execution",
+        "flow",
+        "admin",
+        "user",
+        "calls",
+        "admin_search_endpoint",
+        "through",
+        "layers",
+        "including",
+        "decorators",
+        "cache",
+        "optimizer",
+        "ranking"
+      ],
+      "old": {
+        "blocks": 10,
+        "distinct_files": 10,
+        "tokens_per_block": [
+          147,
+          15,
+          11,
+          99,
+          81,
+          29,
+          31,
+          572,
+          190,
+          582
+        ],
+        "coverage_final": 0.6923076923076923,
+        "coverage_curve": [
+          0.0,
+          0.07692307692307693,
+          0.07692307692307693,
+          0.38461538461538464,
+          0.46153846153846156,
+          0.46153846153846156,
+          0.5384615384615384,
+          0.6923076923076923,
+          0.6923076923076923,
+          0.6923076923076923
+        ],
+        "redundancy_curve": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "coverage_plateau_index": null
+      },
+      "new": {
+        "blocks": 8,
+        "distinct_files": 8,
+        "tokens_per_block": [
+          88,
+          99,
+          15,
+          81,
+          147,
+          31,
+          11,
+          136
+        ],
+        "coverage_final": 0.6923076923076923,
+        "coverage_curve": [
+          0.3076923076923077,
+          0.46153846153846156,
+          0.5384615384615384,
+          0.6153846153846154,
+          0.6153846153846154,
+          0.6923076923076923,
+          0.6923076923076923,
+          0.6923076923076923
+        ],
+        "redundancy_curve": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "coverage_plateau_index": null
+      }
+    },
+    "3": {
+      "query_text": "How does the query optimizer resolve conflicts between PREDICATE_PUSHDOWN and CONSTANT_FOLDING rules, and what is the priority order of the optimization rules?",
+      "concepts": [
+        "query",
+        "optimizer",
+        "conflicts",
+        "between",
+        "predicate_pushdown",
+        "constant_folding",
+        "rules",
+        "priority",
+        "order",
+        "optimization"
+      ],
+      "old": {
+        "blocks": 2,
+        "distinct_files": 2,
+        "tokens_per_block": [
+          29,
+          408
+        ],
+        "coverage_final": 0.7,
+        "coverage_curve": [
+          0.2,
+          0.7
+        ],
+        "redundancy_curve": [
+          0.0,
+          0.0
+        ],
+        "coverage_plateau_index": null
+      },
+      "new": {
+        "blocks": 5,
+        "distinct_files": 2,
+        "tokens_per_block": [
+          101,
+          29,
+          114,
+          408,
+          64
+        ],
+        "coverage_final": 0.7,
+        "coverage_curve": [
+          0.7,
+          0.7,
+          0.7,
+          0.7,
+          0.7
+        ],
+        "redundancy_curve": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "coverage_plateau_index": 1
+      }
+    },
+    "5": {
+      "query_text": "What happens when L1 memory, L2 Redis, and L3 database caches all miss, and how does cache promotion work?",
+      "concepts": [
+        "happens",
+        "l1",
+        "memory",
+        "l2",
+        "redis",
+        "l3",
+        "database",
+        "caches",
+        "miss",
+        "cache",
+        "promotion",
+        "work"
+      ],
+      "old": {
+        "blocks": 5,
+        "distinct_files": 5,
+        "tokens_per_block": [
+          15,
+          112,
+          57,
+          1728,
+          67
+        ],
+        "coverage_final": 0.8333333333333334,
+        "coverage_curve": [
+          0.0,
+          0.0,
+          0.08333333333333333,
+          0.8333333333333334,
+          0.8333333333333334
+        ],
+        "redundancy_curve": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "coverage_plateau_index": null
+      },
+      "new": {
+        "blocks": 4,
+        "distinct_files": 1,
+        "tokens_per_block": [
+          38,
+          69,
+          396,
+          279
+        ],
+        "coverage_final": 0.5833333333333334,
+        "coverage_curve": [
+          0.3333333333333333,
+          0.4166666666666667,
+          0.5833333333333334,
+          0.5833333333333334
+        ],
+        "redundancy_curve": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "coverage_plateau_index": null
+      }
+    },
+    "8": {
+      "query_text": "How does ConnectionPool behave when all connections are in use and callers wait or time out?",
+      "concepts": [
+        "connectionpool",
+        "behave",
+        "connections",
+        "use",
+        "callers",
+        "wait",
+        "time",
+        "out"
+      ],
+      "old": {
+        "blocks": 9,
+        "distinct_files": 9,
+        "tokens_per_block": [
+          29,
+          11,
+          31,
+          76,
+          298,
+          89,
+          871,
+          64,
+          36
+        ],
+        "coverage_final": 0.625,
+        "coverage_curve": [
+          0.0,
+          0.0,
+          0.0,
+          0.125,
+          0.25,
+          0.375,
+          0.625,
+          0.625,
+          0.625
+        ],
+        "redundancy_curve": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "coverage_plateau_index": null
+      },
+      "new": {
+        "blocks": 4,
+        "distinct_files": 1,
+        "tokens_per_block": [
+          124,
+          106,
+          141,
+          408
+        ],
+        "coverage_final": 0.625,
+        "coverage_curve": [
+          0.625,
+          0.625,
+          0.625,
+          0.625
+        ],
+        "redundancy_curve": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "coverage_plateau_index": 1
+      }
+    },
+    "16": {
+      "query_text": "How does BatchProcessor handle partial failures and implement at-least-once semantics?",
+      "concepts": [
+        "batchprocessor",
+        "handle",
+        "partial",
+        "failures",
+        "implement",
+        "least",
+        "once",
+        "semantics"
+      ],
+      "old": {
+        "blocks": 11,
+        "distinct_files": 11,
+        "tokens_per_block": [
+          11,
+          30,
+          29,
+          525,
+          60,
+          31,
+          180,
+          81,
+          270,
+          168,
+          29
+        ],
+        "coverage_final": 0.625,
+        "coverage_curve": [
+          0.0,
+          0.0,
+          0.0,
+          0.25,
+          0.25,
+          0.25,
+          0.375,
+          0.375,
+          0.5,
+          0.625,
+          0.625
+        ],
+        "redundancy_curve": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "coverage_plateau_index": null
+      },
+      "new": {
+        "blocks": 12,
+        "distinct_files": 10,
+        "tokens_per_block": [
+          525,
+          180,
+          168,
+          11,
+          30,
+          29,
+          60,
+          31,
+          64,
+          81,
+          45,
+          270
+        ],
+        "coverage_final": 0.625,
+        "coverage_curve": [
+          0.25,
+          0.375,
+          0.5,
+          0.5,
+          0.5,
+          0.5,
+          0.5,
+          0.5,
+          0.5,
+          0.5,
+          0.5,
+          0.625
+        ],
+        "redundancy_curve": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "coverage_plateau_index": 3
+      }
+    },
+    "18": {
+      "query_text": "How do all 5 optimizer rules combine with execution timing and plan caching in complex queries?",
+      "concepts": [
+        "optimizer",
+        "rules",
+        "combine",
+        "execution",
+        "timing",
+        "plan",
+        "caching",
+        "complex",
+        "queries"
+      ],
+      "old": {
+        "blocks": 8,
+        "distinct_files": 8,
+        "tokens_per_block": [
+          15,
+          1102,
+          29,
+          147,
+          408,
+          250,
+          31,
+          159
+        ],
+        "coverage_final": 0.7777777777777778,
+        "coverage_curve": [
+          0.0,
+          0.4444444444444444,
+          0.4444444444444444,
+          0.4444444444444444,
+          0.6666666666666666,
+          0.7777777777777778,
+          0.7777777777777778,
+          0.7777777777777778
+        ],
+        "redundancy_curve": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "coverage_plateau_index": null
+      },
+      "new": {
+        "blocks": 7,
+        "distinct_files": 6,
+        "tokens_per_block": [
+          1102,
+          101,
+          250,
+          29,
+          15,
+          408,
+          147
+        ],
+        "coverage_final": 0.7777777777777778,
+        "coverage_curve": [
+          0.4444444444444444,
+          0.6666666666666666,
+          0.7777777777777778,
+          0.7777777777777778,
+          0.7777777777777778,
+          0.7777777777777778,
+          0.7777777777777778
+        ],
+        "redundancy_curve": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "coverage_plateau_index": 3
+      }
+    }
+  }
+}

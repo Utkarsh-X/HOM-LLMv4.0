@@ -123,6 +123,7 @@ class BudgetManager(Protocol):
         query_features: dict,  # Query metadata
         config: BudgetConfig,
         tokenizer: object,  # Tokenizer for exact counting
+        preserve_order: bool = False,
     ) -> list[AllocatedBlock]:
         """
         Assigns token budgets per block.

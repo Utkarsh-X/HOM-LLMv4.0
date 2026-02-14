@@ -83,9 +83,25 @@ class BM25Retriever:
                         symbol_id = candidate_data.get("symbol_id")
                         content = candidate_data.get("content", "")
                         granularity_level = candidate_data.get("granularity_level")
+                        span_start = candidate_data.get("span_start")
+                        span_end = candidate_data.get("span_end")
+                        parent_symbol_id = candidate_data.get("parent_symbol_id")
+                        entity_ids = tuple(candidate_data.get("entity_ids") or ())
+                        doc_type = candidate_data.get("doc_type")
+                    else:
+                        span_start = None
+                        span_end = None
+                        parent_symbol_id = None
+                        entity_ids = ()
+                        doc_type = None
                 elif ":" in doc_id:
                     symbol_id = doc_id.split(":", 1)[1]
                     file_path = doc_id.split(":", 1)[0]
+                    span_start = None
+                    span_end = None
+                    parent_symbol_id = None
+                    entity_ids = ()
+                    doc_type = None
 
                 candidate = Candidate(
                     doc_id=doc_id,
@@ -95,6 +111,11 @@ class BM25Retriever:
                     bm25_score=float(score),
                     provenance=("bm25",),
                     granularity_level=granularity_level,
+                    span_start=span_start,
+                    span_end=span_end,
+                    parent_symbol_id=parent_symbol_id,
+                    entity_ids=entity_ids,
+                    doc_type=doc_type,
                 )
                 candidates.append(candidate)
 

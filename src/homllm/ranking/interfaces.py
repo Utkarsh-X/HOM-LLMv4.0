@@ -39,6 +39,8 @@ class RankMetadata:
     reranker_used: bool
     reranker_unavailable: bool
     candidate_count: int
+    set_optimization: dict | None = None
+    signal_profile: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -77,6 +79,37 @@ class RankConfig:
     struct_decorator_bonus: float = 0.05
     struct_callgraph_bonus: float = 0.05
     struct_bonus_cap: float = 0.2
+    # Graph proximity configuration
+    graph_max_depth: int = 4
+    graph_anchor_k: int = 5
+    # Structural deduplication configuration
+    dedup_file_entropy_threshold: float = 0.6
+    # Reranker gating configuration
+    reranker_gating_enabled: bool = True
+    reranker_margin_threshold: float = 0.2
+    reranker_entropy_threshold: float = 0.7
+    reranker_disagreement_threshold: float = 0.5
+    reranker_gating_top_k: int = 50
+    reranker_gating_min_candidates: int = 3
+    # Phase 2: adaptive weights and two-pass
+    phase2_enabled: bool = False
+    adaptive_weights_enabled: bool = False
+    two_pass_enabled: bool = False
+    two_pass_seed_k: int = 20
+    two_pass_max_depth: int = 3
+    two_pass_decay: float = 0.8
+    # Phase 2: MMR selection
+    mmr_enabled: bool = False
+    mmr_top_n: int = 30
+    mmr_lambda: float = 0.7
+    # Set optimization (global selection)
+    set_opt_enabled: bool = False
+    set_opt_token_budget: int = 3200
+    set_opt_w_relevance: float = 1.0
+    set_opt_w_structural: float = 0.6
+    set_opt_w_coverage: float = 0.8
+    set_opt_w_redundancy: float = 0.5
+    set_opt_w_dispersion: float = 0.4
 
 
 class Reranker(Protocol):

@@ -1,0 +1,17 @@
+{
+  "run_name": "config_cleanup_gate_a",
+  "created_at": "2026-02-14T09:33:08.973836Z",
+  "config": "configs\\default.yaml",
+  "provider": null,
+  "model": null,
+  "intent": null,
+  "diagnostics_only": true,
+  "selection": [
+    1,
+    3,
+    5,
+    8,
+    16,
+    18
+  ]
+}

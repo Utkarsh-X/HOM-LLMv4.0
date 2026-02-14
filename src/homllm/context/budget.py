@@ -17,6 +17,7 @@ class TokenBudgetManager:
         query_features: dict,
         config: BudgetConfig,
         tokenizer: Optional[object] = None,
+        preserve_order: bool = False,
     ) -> list[AllocatedBlock]:
         """
         Assigns token budgets per block.
@@ -32,15 +33,32 @@ class TokenBudgetManager:
         allocated = []
         remaining_budget = config.max_tokens
 
-        # Sort by score (structural blocks get priority multiplier)
-        sorted_blocks = sorted(
-            blocks,
-            key=lambda b: (
-                b.structural_priority * config.structural_priority_multiplier
-                + b.final_score
-            ),
-            reverse=True,
-        )
+        integration_pressure = float(query_features.get("integration_pressure", 0.0) or 0.0)
+        # Continuous modulation factors (bounded). Preserve order; never re-rank.
+        # Higher pressure => smaller per-block cap and stronger truncation for repeats/overlaps.
+        base_cap_ratio = 0.50
+        min_cap_ratio = 0.20
+        cap_ratio = base_cap_ratio - (0.30 * integration_pressure)
+        cap_ratio = min(max(cap_ratio, min_cap_ratio), base_cap_ratio)
+        per_block_cap = int(max(1, cap_ratio * config.max_tokens))
+
+        redundancy_penalty_scale = 1.0 + 0.50 * integration_pressure
+
+        if preserve_order:
+            sorted_blocks = list(blocks)
+        else:
+            # Sort by score (structural blocks get priority multiplier)
+            sorted_blocks = sorted(
+                blocks,
+                key=lambda b: (
+                    b.structural_priority * config.structural_priority_multiplier
+                    + b.final_score
+                ),
+                reverse=True,
+            )
+
+        allocated_files: dict[str, int] = {}
+        allocated_blocks: list[AllocatedBlock] = []
 
         for scored_block in sorted_blocks:
             if remaining_budget <= 0:
@@ -59,8 +77,20 @@ class TokenBudgetManager:
             else:
                 tokens = self._estimate_tokens(content)
 
-            # Allocate tokens (don't exceed remaining budget)
-            allocated_tokens = min(tokens, remaining_budget)
+            # Allocate tokens (don't exceed remaining budget), with soft caps.
+            local_cap = per_block_cap
+
+            # Redundancy soft penalty based on span overlap with already allocated blocks.
+            # (Continuous; no hard cutoffs.)
+            redundancy_ratio = self._max_span_overlap_ratio(block, [ab.block for ab in allocated_blocks])
+            if redundancy_ratio > 0:
+                factor = 1.0 + (redundancy_penalty_scale - 1.0) * redundancy_ratio
+                local_cap = max(1, int(local_cap / factor))
+
+            if len(sorted_blocks) <= 1:
+                allocated_tokens = min(tokens, remaining_budget)
+            else:
+                allocated_tokens = min(tokens, remaining_budget, local_cap)
             remaining_budget -= allocated_tokens
 
             # Truncate content if needed
@@ -78,6 +108,30 @@ class TokenBudgetManager:
             )
 
             allocated.append(allocated_block)
+            allocated_blocks.append(allocated_block)
+            if block.file:
+                allocated_files[block.file] = allocated_files.get(block.file, 0) + 1
+
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "[BUDGET] file=%s file_count=%s tokens=%s cap=%s allocated=%s remaining=%s overlap=%.3f",
+                    block.file,
+                    allocated_files.get(block.file, 0) if block.file else 0,
+                    tokens,
+                    local_cap,
+                    allocated_tokens,
+                    remaining_budget,
+                    float(redundancy_ratio),
+                )
+
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "[BUDGET] done selected_blocks=%s used_tokens=%s max_tokens=%s per_file=%s",
+                len(allocated_blocks),
+                sum(ab.allocated_tokens for ab in allocated_blocks),
+                config.max_tokens,
+                dict(sorted(allocated_files.items(), key=lambda kv: (-kv[1], kv[0]))),
+            )
 
         return allocated
 
@@ -109,3 +163,29 @@ class TokenBudgetManager:
         if last_space > estimated_chars * 0.8:  # Keep if reasonable
             return truncated[:last_space] + "\n..."
         return truncated + "..."
+
+    def _max_span_overlap_ratio(self, block, prior_blocks) -> float:
+        if not prior_blocks:
+            return 0.0
+        best = 0.0
+        for other in prior_blocks:
+            best = max(best, self._span_overlap_ratio(block, other))
+        return best
+
+    def _span_overlap_ratio(self, a, b) -> float:
+        if a.file != b.file:
+            return 0.0
+        if a.start_line is None or a.end_line is None:
+            return 0.0
+        if b.start_line is None or b.end_line is None:
+            return 0.0
+        start = max(int(a.start_line), int(b.start_line))
+        end = min(int(a.end_line), int(b.end_line))
+        if start > end:
+            return 0.0
+        overlap = end - start + 1
+        length = min(
+            max(int(a.end_line) - int(a.start_line) + 1, 1),
+            max(int(b.end_line) - int(b.start_line) + 1, 1),
+        )
+        return overlap / length

@@ -1,10 +1,12 @@
 """Reranker implementation using cross-encoder."""
 
 import logging
+import os
 from typing import Optional
 
 import torch
 
+from homllm.common.hf_cache import resolve_snapshot_dir
 from homllm.ranking.interfaces import Reranker
 
 logger = logging.getLogger(__name__)
@@ -37,9 +39,12 @@ class QwenReranker(Reranker):
         self._tokenizer: Optional[object] = None
         self._device = "cuda" if torch.cuda.is_available() else "cpu"
         self._available = False
+        self._load_error: Optional[str] = None
 
         if AutoModelForSequenceClassification is not None:
             self._load_model()
+        else:
+            print("[RERANKER] transformers not available", flush=True)
 
     def _load_model(self) -> None:
         """Load reranker model."""
@@ -48,12 +53,22 @@ class QwenReranker(Reranker):
 
         try:
             logger.info(f"[RERANKER MODEL] Resolved: {self.model_name}")
+            # Allow alternate reranker checkpoints that include a trained head.
+            # Keep a warning for non-canonical names but do not hard-fail.
             if self.model_name != RERANKER_MODEL_NAME:
-                raise ValueError(
-                    f"Reranker model mismatch: expected '{RERANKER_MODEL_NAME}', "
-                    f"got '{self.model_name}'. No fallbacks allowed."
+                logger.warning(
+                    "Non-canonical reranker model: %s", self.model_name
                 )
-            self._tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+            offline_mode = os.environ.get("HOMLLM_OFFLINE", "0").strip() != "0"
+            local_only = offline_mode
+            resolved = resolve_snapshot_dir(self.model_name)
+            model_source = str(resolved) if resolved is not None else self.model_name
+
+            self._tokenizer = AutoTokenizer.from_pretrained(
+                model_source,
+                trust_remote_code=True,
+                local_files_only=local_only,
+            )
             
             # Ensure padding token is set for batched inference
             # Try multiple fallbacks since some models don't have proper defaults
@@ -69,10 +84,33 @@ class QwenReranker(Reranker):
                     self._tokenizer.add_special_tokens({'pad_token': '[PAD]'})
                     logger.info("Added new [PAD] token for batched inference")
             
-            self._model = AutoModelForSequenceClassification.from_pretrained(
-                self.model_name,
-                trust_remote_code=True,
-            ).to(self._device)
+            dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+            try:
+                import accelerate  # noqa: F401
+                use_device_map = True
+            except Exception:
+                use_device_map = False
+
+            if use_device_map:
+                self._model = AutoModelForSequenceClassification.from_pretrained(
+                    model_source,
+                    trust_remote_code=True,
+                    local_files_only=local_only,
+                    num_labels=1,
+                    dtype=dtype,
+                    device_map="auto",
+                )
+            else:
+                logger.warning(
+                    "accelerate not available; loading reranker without device_map"
+                )
+                self._model = AutoModelForSequenceClassification.from_pretrained(
+                    model_source,
+                    trust_remote_code=True,
+                    local_files_only=local_only,
+                    num_labels=1,
+                    dtype=dtype,
+                ).to(self._device)
             
             # Sync model config with tokenizer's pad_token_id
             if self._model.config.pad_token_id is None and self._tokenizer.pad_token_id is not None:
@@ -81,9 +119,11 @@ class QwenReranker(Reranker):
             
             self._model.eval()
             self._available = True
+            self._load_error = None
             logger.info("Reranker model loaded")
 
         except Exception as e:
+            self._load_error = str(e)
             logger.error(f"Failed to load reranker model: {e}")
             self._model = None
             self._tokenizer = None
@@ -196,4 +236,16 @@ class QwenReranker(Reranker):
 
     def healthcheck(self) -> bool:
         """Check if reranker is available."""
+        if not self._available:
+            if self._load_error:
+                logger.warning(
+                    "Reranker unavailable: %s", self._load_error
+                )
+                print(
+                    f"[RERANKER] unavailable: {self._load_error}",
+                    flush=True,
+                )
+            else:
+                logger.warning("Reranker unavailable: not loaded")
+                print("[RERANKER] unavailable: not loaded", flush=True)
         return self._available

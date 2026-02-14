@@ -34,9 +34,10 @@ PATTERNS_EXAMPLE = re.compile(
 
 # Explanatory: why / how / explain / reason / step by / causal
 PATTERNS_DETAILED = re.compile(
-    r"\b(why\b|how\s+does|how\s+do\s+we|explain|reason\s+why|"
+    r"\b(why\b|how\s+does|how\s+do\b|how\s+do\s+we|explain|reason\s+why|"
     r"step\s+by\s+step|step-by-step|causal|because\s+of|"
-    r"what\s+causes|why\s+does|mechanism|underlying)\b",
+    r"what\s+causes|why\s+does|mechanism|underlying|"
+    r"execution\s+flow|trace\s+.*\s+flow|through\s+all\s+layers?|lifecycle)\b",
     re.IGNORECASE,
 )
 

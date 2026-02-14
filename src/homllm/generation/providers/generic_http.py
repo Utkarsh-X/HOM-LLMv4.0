@@ -71,7 +71,7 @@ class GenericHTTPProvider(ProviderConnector):
                 f"{self.base_url}/v1/chat/completions",
                 json=payload,
                 headers=self.headers,
-                timeout=60,
+                timeout=180,
             )
             response.raise_for_status()
 
@@ -120,7 +120,7 @@ class GenericHTTPProvider(ProviderConnector):
                 json=payload,
                 headers=self.headers,
                 stream=True,
-                timeout=60,
+                timeout=180,
             )
             response.raise_for_status()
 

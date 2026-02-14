@@ -8,7 +8,7 @@ No learning loops, no runtime mutation.
 from __future__ import annotations
 
 # Cold-start guard (spec § Stage 0): evidence_volume < N → UNSTABLE_CONTEXT
-COLD_START_MIN_RUNS = 5
+COLD_START_MIN_RUNS = 2
 
 # Bucketing: coarse embedding proximity (spec § Query Bucketing)
 # Cosine similarity ≥ threshold → same bucket. Prefer over-separation.

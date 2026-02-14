@@ -52,6 +52,7 @@ class IndexerConfig:
     ignore_patterns: list[str]
     chunk_max_lines: int
     storage: StorageConfig
+    vector_indexing_enabled: bool = True
     embedding_model: str = "Qwen/Qwen3-Embedding-0.6B"
     embedding_dimension: int = 1024
     embedding_max_tokens: int = 8192
@@ -130,6 +131,7 @@ class Config(BaseModel):
             ignore_patterns=idx_cfg["ignore_patterns"],
             chunk_max_lines=idx_cfg["chunk_max_lines"],
             storage=storage_cfg,
+            vector_indexing_enabled=idx_cfg.get("vector_indexing_enabled", True),
             embedding_model=idx_cfg.get("embedding_model", "Qwen/Qwen3-Embedding-0.6B"),
             embedding_dimension=idx_cfg.get("embedding_dimension", 1024),
             embedding_max_tokens=idx_cfg.get("embedding_max_tokens", 8192),
@@ -216,6 +218,13 @@ class Config(BaseModel):
         rank_cfg = self.ranking
         reranker_cfg = rank_cfg.get("reranker", {})
         weights_cfg = rank_cfg.get("weights", {})
+        gating_cfg = reranker_cfg.get("gating", {})
+        graph_cfg = rank_cfg.get("graph_proximity", {})
+        dedup_cfg = rank_cfg.get("dedup", {})
+        phase2_cfg = rank_cfg.get("phase2", {})
+        two_pass_cfg = rank_cfg.get("two_pass", {})
+        mmr_cfg = rank_cfg.get("mmr_selection", {})
+        set_opt_cfg = rank_cfg.get("set_optimization", {})
 
         struct_weights = weights_cfg.get("struct", {})
         return RankConfig(
@@ -232,6 +241,37 @@ class Config(BaseModel):
             struct_decorator_bonus=struct_weights.get("decorator_bonus", 0.05),
             struct_callgraph_bonus=struct_weights.get("callgraph_bonus", 0.05),
             struct_bonus_cap=struct_weights.get("bonus_cap", 0.2),
+            graph_max_depth=graph_cfg.get("max_depth", 4),
+            graph_anchor_k=graph_cfg.get("anchor_k", 5),
+            dedup_file_entropy_threshold=dedup_cfg.get(
+                "file_entropy_threshold", 0.6
+            ),
+            reranker_gating_enabled=gating_cfg.get("enabled", True),
+            reranker_margin_threshold=gating_cfg.get("threshold_margin", 0.2),
+            reranker_entropy_threshold=gating_cfg.get("threshold_entropy", 0.7),
+            reranker_disagreement_threshold=gating_cfg.get(
+                "threshold_disagreement", 0.5
+            ),
+            reranker_gating_top_k=gating_cfg.get("top_k", 50),
+            reranker_gating_min_candidates=gating_cfg.get(
+                "min_candidates", 3
+            ),
+            phase2_enabled=phase2_cfg.get("enabled", False),
+            adaptive_weights_enabled=phase2_cfg.get("adaptive_weights_enabled", False),
+            two_pass_enabled=two_pass_cfg.get("enabled", False),
+            two_pass_seed_k=two_pass_cfg.get("seed_k", 20),
+            two_pass_max_depth=two_pass_cfg.get("max_depth", 3),
+            two_pass_decay=two_pass_cfg.get("decay", 0.8),
+            mmr_enabled=mmr_cfg.get("enabled", False),
+            mmr_top_n=mmr_cfg.get("top_n", 30),
+            mmr_lambda=mmr_cfg.get("lambda", 0.7),
+            set_opt_enabled=set_opt_cfg.get("enabled", False),
+            set_opt_token_budget=set_opt_cfg.get("token_budget", 3200),
+            set_opt_w_relevance=set_opt_cfg.get("w_relevance", 1.0),
+            set_opt_w_structural=set_opt_cfg.get("w_structural", 0.6),
+            set_opt_w_coverage=set_opt_cfg.get("w_coverage", 0.8),
+            set_opt_w_redundancy=set_opt_cfg.get("w_redundancy", 0.5),
+            set_opt_w_dispersion=set_opt_cfg.get("w_dispersion", 0.4),
         )
 
     def get_context_config(self) -> "ContextConfig":

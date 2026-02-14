@@ -1,0 +1,17 @@
+{
+  "run_name": "retrieval_cleanup_gate_a",
+  "created_at": "2026-02-13T19:49:50.060607Z",
+  "config": "configs\\default.yaml",
+  "provider": null,
+  "model": null,
+  "intent": null,
+  "diagnostics_only": true,
+  "selection": [
+    1,
+    3,
+    5,
+    8,
+    16,
+    18
+  ]
+}

@@ -6,7 +6,7 @@ and stores raw responses plus telemetry for downstream judging and comparison.
 Key guarantees:
 - Does not import or modify core homllm modules.
 - Uses subprocess to call `runtime/run_query.py`.
-- Append-only response storage (JSONL).
+- Deterministic response storage (overwrite by default, append optional).
 - Supports flexible query selection (`--select`).
 - Optional terminal telemetry summary (read-only).
 """
@@ -233,6 +233,8 @@ def run_single_query(
         cmd.extend(["--diagnostic-layers", args.diagnostic_layers])
     if args.context_diagnostics:
         cmd.append("--context-diagnostics")
+    if args.diagnostics_only:
+        cmd.append("--diagnostics-only")
 
     completed = subprocess.run(
         cmd,
@@ -266,7 +268,6 @@ def run_single_query(
         "telemetry_path": str(telemetry_path) if telemetry_path else None,
         "run_id": run_id,
         "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-        "answer_text": answer_text,
     }
 
     if args.telemetry_print and telemetry:
@@ -322,6 +323,8 @@ def run_single_query_inproc(
         argv.extend(["--diagnostic-layers", args.diagnostic_layers])
     if args.context_diagnostics:
         argv.append("--context-diagnostics")
+    if args.diagnostics_only:
+        argv.append("--diagnostics-only")
 
     out_buf = io.StringIO()
     err_buf = io.StringIO()
@@ -409,6 +412,7 @@ def write_run_info(path: Path, args: argparse.Namespace, selected: List[int]) ->
         "provider": args.provider,
         "model": args.model,
         "intent": args.intent,
+        "diagnostics_only": bool(args.diagnostics_only),
         "selection": selected,
     }
     with open(path / "run_info.json", "w", encoding="utf-8") as f:
@@ -429,8 +433,12 @@ def main() -> None:
     parser.add_argument(
         "--telemetry-print",
         action="store_true",
-        default=True,
         help="Print per-query telemetry summary (read-only)",
+    )
+    parser.add_argument(
+        "--append-responses",
+        action="store_true",
+        help="Append to existing responses.jsonl in run directory (default is overwrite).",
     )
     parser.add_argument(
         "--intelligence-levels", type=str, default=None,
@@ -464,6 +472,11 @@ def main() -> None:
         "--reuse-process", action="store_true",
         help="Run queries in-process to reuse caches between queries"
     )
+    parser.add_argument(
+        "--diagnostics-only",
+        action="store_true",
+        help="Pass --diagnostics-only to runtime (skip generation; structural telemetry only).",
+    )
 
     args = parser.parse_args()
 
@@ -486,6 +499,8 @@ def main() -> None:
     write_run_info(run_dir, args, selected_ids)
 
     responses_path = run_dir / "responses.jsonl"
+    if responses_path.exists() and not args.append_responses:
+        responses_path.unlink()
 
     total = len(selected_queries)
     for idx, query in enumerate(selected_queries, start=1):

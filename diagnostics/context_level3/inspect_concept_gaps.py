@@ -76,7 +76,8 @@ class ConceptGapAnalyzer:
         self,
         intent: QueryIntent,
         roles: list[BlockRole],
-        block_concepts: Optional[dict[str, list[str]]] = None
+        block_concepts: Optional[dict[str, list[str]]] = None,
+        context_blocks: Optional[dict[str, dict]] = None,
     ) -> ConceptGapResult:
         """
         Analyze concept coverage gaps.
@@ -97,7 +98,7 @@ class ConceptGapAnalyzer:
         
         # Build concept-to-block mapping
         if block_concepts is None:
-            block_concepts = self._extract_block_concepts(roles)
+            block_concepts = self._extract_block_concepts(roles, context_blocks=context_blocks)
         
         # Analyze each query concept
         for concept in intent.concepts:
@@ -134,17 +135,46 @@ class ConceptGapAnalyzer:
     
     def _extract_block_concepts(
         self,
-        roles: list[BlockRole]
+        roles: list[BlockRole],
+        context_blocks: Optional[dict[str, dict]] = None,
     ) -> dict[str, list[str]]:
-        """Extract concepts from block IDs."""
+        """Extract concepts from block IDs, file paths, and content previews."""
         import re
         
-        block_concepts = {}
-        concept_pattern = re.compile(r'[A-Z]?[a-z]+|[A-Z]+(?=[A-Z][a-z]|\d|\W|$)')
+        block_concepts: dict[str, list[str]] = {}
+        concept_pattern = re.compile(r"[A-Z]?[a-z]+|[A-Z]+(?=[A-Z][a-z]|\d|\W|$)")
+        word_pattern = re.compile(r"\b[A-Za-z0-9_]+\b")
+        stopwords = {
+            "the", "a", "an", "and", "or", "but", "if", "then", "than",
+            "this", "that", "these", "those", "with", "without", "about",
+            "into", "from", "to", "of", "for", "in", "on", "at", "by",
+            "all", "any", "each", "every", "some", "most", "many", "few",
+            "function", "class", "method", "return", "self", "true", "false",
+        }
         
         for role in roles:
             parts = concept_pattern.findall(role.block_id)
-            block_concepts[role.block_id] = [p.lower() for p in parts if len(p) > 2]
+            concepts = [p.lower() for p in parts if len(p) > 2]
+            if context_blocks and role.block_id in context_blocks:
+                block_meta = context_blocks[role.block_id]
+                file_path = block_meta.get("file") or ""
+                preview = block_meta.get("preview") or ""
+                for token in word_pattern.findall(file_path):
+                    token_lower = token.lower()
+                    if len(token_lower) > 2 and token_lower not in stopwords:
+                        concepts.append(token_lower)
+                for token in word_pattern.findall(preview):
+                    token_lower = token.lower()
+                    if len(token_lower) > 2 and token_lower not in stopwords:
+                        concepts.append(token_lower)
+            # Deduplicate while preserving order
+            seen = set()
+            unique = []
+            for c in concepts:
+                if c not in seen:
+                    seen.add(c)
+                    unique.append(c)
+            block_concepts[role.block_id] = unique
         
         return block_concepts
     

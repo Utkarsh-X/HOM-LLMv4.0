@@ -130,10 +130,15 @@ class IndexerPipeline:
         # Initialize storage
         self.duckdb.connect()
         self.duckdb.initialize_schema()
-        self.lancedb.connect()
+        if self.config.vector_indexing_enabled:
+            self.lancedb.connect()
 
         # Compute repo hash
         repo_hash = self._compute_repo_hash(repo_path)
+
+        # Preflight embeddings before any destructive operations (no quality deterioration).
+        if self.config.vector_indexing_enabled:
+            _ = self.embedder.embed_query("embedding_preflight")
 
         # 1. Scan files
         scan_config = ScanConfig(self.config)
@@ -156,13 +161,15 @@ class IndexerPipeline:
             # Full rebuild semantics to avoid stale/duplicate rows.
             self.duckdb.reset_index_data()
             self.tantivy.reset()
-            self.lancedb.reset()
+            if self.config.vector_indexing_enabled:
+                self.lancedb.reset()
 
         for deleted_path in deleted_paths:
             doc_ids = self.duckdb.get_doc_ids_for_file(deleted_path)
             if doc_ids:
                 self.tantivy.delete_documents(doc_ids)
-                self.lancedb.delete_documents(doc_ids)
+                if self.config.vector_indexing_enabled:
+                    self.lancedb.delete_documents(doc_ids)
             self.duckdb.delete_file_data(deleted_path)
 
         for changed_file in files_to_process:
@@ -170,7 +177,8 @@ class IndexerPipeline:
             old_doc_ids = self.duckdb.get_doc_ids_for_file(changed_path)
             if old_doc_ids:
                 self.tantivy.delete_documents(old_doc_ids)
-                self.lancedb.delete_documents(old_doc_ids)
+                if self.config.vector_indexing_enabled:
+                    self.lancedb.delete_documents(old_doc_ids)
             self.duckdb.delete_file_data(changed_path)
 
         # 2. Parse files and collect symbols
@@ -348,8 +356,11 @@ class IndexerPipeline:
         self.tantivy.index(iter(documents_for_bm25))
 
         # 5. Index vectors
-        logger.info(f"Indexing {len(documents_for_vectors)} vectors")
-        self.lancedb.index(iter(documents_for_vectors))
+        if self.config.vector_indexing_enabled:
+            logger.info(f"Indexing {len(documents_for_vectors)} vectors")
+            self.lancedb.index(iter(documents_for_vectors))
+        else:
+            logger.info("Vector indexing disabled; skipping LanceDB indexing")
 
         # 6. Store metadata with schema version
         self.duckdb.set_metadata("version", "1.0")

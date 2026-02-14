@@ -123,7 +123,8 @@ class AlignmentSummaryAnalyzer:
     def analyze(
         self,
         query: str,
-        blocks: list[IntraBlockDiagnostic]
+        blocks: list[IntraBlockDiagnostic],
+        context_blocks: Optional[dict[str, dict]] = None,
     ) -> Level3DiagnosticResult:
         """
         Run complete Level-3 analysis.
@@ -146,7 +147,8 @@ class AlignmentSummaryAnalyzer:
         # 3. Analyze concept gaps
         result.concept_gaps = self.gap_analyzer.analyze(
             result.intent,
-            result.block_roles
+            result.block_roles,
+            context_blocks=context_blocks,
         )
         
         # 4. Analyze cognitive load

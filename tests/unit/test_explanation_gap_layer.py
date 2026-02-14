@@ -89,6 +89,18 @@ def test_classify_depth_intent():
     assert classify_depth_intent("why does it fail") == "EXPLANATORY"
     assert classify_depth_intent("error when loading") == "DEBUGGING"
     assert classify_depth_intent("what is X") == "FACTUAL"
+    assert (
+        classify_depth_intent(
+            "How do all 5 optimizer rules combine with execution timing and plan caching?"
+        )
+        == "EXPLANATORY"
+    )
+    assert (
+        classify_depth_intent(
+            "Trace the execution flow when an admin user calls the admin_search_endpoint through all layers."
+        )
+        == "EXPLANATORY"
+    )
 
 
 # --- History: escalation only; cold-start ---

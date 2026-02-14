@@ -4,6 +4,7 @@ import logging
 from typing import Optional
 
 from homllm.ranking.interfaces import FeatureVector
+from homllm.ranking.graph_proximity import GraphProximity
 from homllm.retrieval.interfaces import Candidate
 
 logger = logging.getLogger(__name__)
@@ -12,7 +13,12 @@ logger = logging.getLogger(__name__)
 class FeatureEnricher:
     """Computes feature vectors for candidates."""
 
-    def __init__(self, callgraph: Optional[dict] = None):
+    def __init__(
+        self,
+        callgraph: Optional[dict] = None,
+        graph_max_depth: int = 4,
+        graph_anchor_k: int = 5,
+    ):
         """
         Initialize feature enricher.
         
@@ -20,6 +26,9 @@ class FeatureEnricher:
             callgraph: Call graph for structural features (optional)
         """
         self.callgraph = callgraph or {}
+        self.graph_proximity = GraphProximity(
+            self.callgraph, max_depth=graph_max_depth, anchor_k=graph_anchor_k
+        )
 
     def enrich(
         self, candidates: list[Candidate], query: str
@@ -50,6 +59,8 @@ class FeatureEnricher:
 
         features: dict[str, FeatureVector] = {}
 
+        distance_map = self.graph_proximity.compute_distance_map(candidates)
+
         for candidate in candidates:
             # Normalize scores to percentiles
             bm25_pct = (
@@ -67,7 +78,12 @@ class FeatureEnricher:
             has_decorator = self._has_decorator(candidate)
 
             # Callgraph distance (inverse, 0 if not connected)
-            callgraph_dist = self._compute_callgraph_distance(candidate)
+            distance = (
+                distance_map.get(candidate.symbol_id)
+                if candidate.symbol_id
+                else None
+            )
+            callgraph_dist = self.graph_proximity.distance_to_score(distance)
 
             features[candidate.doc_id] = FeatureVector(
                 bm25_percentile=bm25_pct,
@@ -79,6 +95,9 @@ class FeatureEnricher:
             )
 
         return features
+
+    def get_distance_map(self, candidates: list[Candidate]) -> dict[str, int]:
+        return self.graph_proximity.compute_distance_map(candidates)
 
     def _compute_name_match(
         self, candidate: Candidate, query_terms: set[str]
@@ -115,15 +134,9 @@ class FeatureEnricher:
         return "expansion:decorator" in candidate.provenance
 
     def _compute_callgraph_distance(self, candidate: Candidate) -> float:
-        """Compute inverse callgraph distance from seed candidates."""
+        """Deprecated: retained for compatibility."""
         if not self.callgraph or not candidate.symbol_id:
             return 0.0
-
-        # Simplified: check if symbol is in callgraph
-        # In production, would compute BFS distance from seed candidates
-        symbol_id = candidate.symbol_id
-        if symbol_id in self.callgraph:
-            # Connected, return inverse distance (1.0 for direct connection)
+        if candidate.symbol_id in self.callgraph:
             return 1.0
-
         return 0.0

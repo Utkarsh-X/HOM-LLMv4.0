@@ -1,12 +1,14 @@
 """Embedding model adapter."""
 
 import logging
+import os
 from typing import Optional
 
 import numpy as np
 import torch
 
 from homllm.common.types import Vector
+from homllm.common.hf_cache import resolve_snapshot_dir
 from homllm.indexer.interfaces import Embedder
 
 logger = logging.getLogger(__name__)
@@ -62,10 +64,22 @@ class QwenEmbedder(Embedder):
                     f"Embedding model mismatch: expected '{EMBEDDING_MODEL_NAME}', "
                     f"got '{self.model_name}'. No fallbacks allowed."
                 )
-            self._tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+
+            # Prefer local snapshot dir (avoids hub API calls even when cached).
+            # If not found, fall back to repo-id loading (may download).
+            offline_mode = os.environ.get("HOMLLM_OFFLINE", "0").strip() != "0"
+            local_only = offline_mode
+            resolved = resolve_snapshot_dir(self.model_name)
+            model_source = str(resolved) if resolved is not None else self.model_name
+
+            self._tokenizer = AutoTokenizer.from_pretrained(
+                model_source,
+                local_files_only=local_only,
+            )
             self._model = AutoModel.from_pretrained(
-                self.model_name,
+                model_source,
                 trust_remote_code=True,
+                local_files_only=local_only,
             ).to(self._device)
             self._model.eval()  # Set to evaluation mode
 
@@ -104,8 +118,15 @@ class QwenEmbedder(Embedder):
             instruction_prefix: Optional instruction prefix for query embedding
         """
         if self._model is None or self._tokenizer is None:
-            # Return zero vector as fallback
-            return Vector(values=tuple([0.0] * self._dimension))
+            # Silent zero vectors create hard-to-detect regressions in retrieval and diagnostics.
+            # Allow explicit opt-in for experiments/tests only.
+            if os.environ.get("HOMLLM_ALLOW_ZERO_EMBEDDINGS", "0").strip() == "1":
+                return Vector(values=tuple([0.0] * self._dimension))
+            raise RuntimeError(
+                "Embedding model is not loaded. Either pre-download the model to the HF cache, "
+                "or set HOMLLM_OFFLINE=0 to allow downloads, or set HOMLLM_ALLOW_ZERO_EMBEDDINGS=1 "
+                "to force a degraded zero-vector fallback."
+            )
 
         try:
             # Prepare input text
@@ -139,7 +160,9 @@ class QwenEmbedder(Embedder):
 
         except Exception as e:
             logger.error(f"Embedding failed: {e}")
-            return Vector(values=tuple([0.0] * self._dimension))
+            if os.environ.get("HOMLLM_ALLOW_ZERO_EMBEDDINGS", "0").strip() == "1":
+                return Vector(values=tuple([0.0] * self._dimension))
+            raise
 
     def embed_code(self, code: str) -> Vector:
         """

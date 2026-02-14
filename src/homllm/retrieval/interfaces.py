@@ -27,6 +27,13 @@ class Candidate:
     
     # Plan B: Granularity level for intent-driven boosting
     granularity_level: str | None = None
+    # Span data for structural ranking/dedup
+    span_start: int | None = None
+    span_end: int | None = None
+    parent_symbol_id: str | None = None
+    entity_ids: tuple[str, ...] = ()
+    doc_type: str | None = None
+    semantic_embedding: tuple[float, ...] | None = None
 
 
 @dataclass(frozen=True)
