@@ -10,6 +10,8 @@ Tests cover:
 
 import pytest
 from pathlib import Path
+from collections import defaultdict
+from types import SimpleNamespace
 
 # Test imports
 import sys
@@ -78,6 +80,78 @@ class TestRetrievalConfigPlanB:
         # Check IMPLEMENTATION boosts fine > medium > coarse
         assert config.granularity_boost_table["IMPLEMENTATION"]["fine"] == 2.0
         assert config.granularity_boost_table["IMPLEMENTATION"]["coarse"] == 0.8
+
+    def test_granularity_mixing_profiles_default_populated(self):
+        """Granularity mixing defaults should be deterministic and complete."""
+        config = RetrievalConfig(
+            bm25_top_k=50,
+            vector_top_k=50,
+            hybrid_method="rrf",
+            rrf_k=10,
+            bm25_weight=0.5,
+            vector_weight=0.5,
+            expansion_enabled=True,
+            expansion_max_additions=4,
+            expansion_min_similarity=0.25,
+        )
+
+        assert "UNKNOWN" in config.granularity_mixing_profiles
+        assert "EXPLAIN" in config.granularity_mixing_profiles
+        assert config.granularity_mixing_profiles["EXPLAIN"]["fine"]["min"] == 3
+        assert config.granularity_mixing_profiles["EXPLAIN"]["fine"]["max"] == 8
+
+    def test_granularity_mixing_profiles_invalid_range_fails(self):
+        """Misconfigured granularity ranges must fail fast."""
+        with pytest.raises(ValueError, match="min cannot exceed max"):
+            RetrievalConfig(
+                bm25_top_k=50,
+                vector_top_k=50,
+                hybrid_method="rrf",
+                rrf_k=10,
+                bm25_weight=0.5,
+                vector_weight=0.5,
+                expansion_enabled=True,
+                expansion_max_additions=4,
+                expansion_min_similarity=0.25,
+                granularity_mixing_profiles={
+                    "UNKNOWN": {
+                        "fine": {"min": 2, "max": 1},
+                        "medium": {"min": 0, "max": 1},
+                        "coarse": {"min": 0, "max": 1},
+                    }
+                },
+            )
+
+    def test_query_expansion_defaults_present(self):
+        config = RetrievalConfig(
+            bm25_top_k=50,
+            vector_top_k=50,
+            hybrid_method="rrf",
+            rrf_k=10,
+            bm25_weight=0.5,
+            vector_weight=0.5,
+            expansion_enabled=True,
+            expansion_max_additions=4,
+            expansion_min_similarity=0.25,
+        )
+        assert config.query_expansion_enabled is True
+        assert config.query_expansion_max_terms == 6
+        assert "auth" in config.query_expansion_synonyms
+
+    def test_query_expansion_synonyms_invalid_shape_fails(self):
+        with pytest.raises(ValueError, match="query_expansion.synonyms"):
+            RetrievalConfig(
+                bm25_top_k=50,
+                vector_top_k=50,
+                hybrid_method="rrf",
+                rrf_k=10,
+                bm25_weight=0.5,
+                vector_weight=0.5,
+                expansion_enabled=True,
+                expansion_max_additions=4,
+                expansion_min_similarity=0.25,
+                query_expansion_synonyms={"auth": "authentication"},
+            )
 
 
 class TestCandidateGranularity:
@@ -255,6 +329,110 @@ class TestGraphStitch:
         # No DuckDB → unchanged
         assert result == candidates
 
+    def test_graph_stitch_cache_relations_are_sorted_deterministically(self):
+        """Cache-backed relation fetch should have deterministic tie ordering."""
+        from homllm.retrieval.graph_stitch import GraphStitchExpander, GraphStitchConfig
+
+        expander = GraphStitchExpander(
+            duckdb_path=None,
+            config=GraphStitchConfig(graph_cache_enabled=True),
+        )
+        expander._graph_topology = SimpleNamespace(
+            adjacency={
+                "seed": [
+                    ("z_entity", "CALLS", 1.0),
+                    ("a_entity", "CALLS", 1.0),
+                    ("m_entity", "USES", 0.9),
+                ]
+            }
+        )
+
+        rows = expander._get_relations_from("seed")
+        assert [r["dst_entity_id"] for r in rows] == ["a_entity", "z_entity", "m_entity"]
+
+    def test_graph_stitch_bfs_seed_and_tie_order_deterministic(self):
+        """BFS should be deterministic for set seed input and confidence ties."""
+        from homllm.retrieval.graph_stitch import GraphStitchExpander, GraphStitchConfig
+
+        expander = GraphStitchExpander(
+            duckdb_path=None,
+            config=GraphStitchConfig(max_depth=2, beam_high=8, beam_low=8),
+        )
+
+        relation_map = {
+            "seed_a": [
+                {"dst_entity_id": "n2", "relation_type": "CALLS", "confidence": 0.8},
+                {"dst_entity_id": "n1", "relation_type": "CALLS", "confidence": 0.8},
+            ],
+            "seed_b": [
+                {"dst_entity_id": "n4", "relation_type": "USES", "confidence": 0.5},
+                {"dst_entity_id": "n3", "relation_type": "USES", "confidence": 0.5},
+            ],
+            "n1": [],
+            "n2": [],
+            "n3": [],
+            "n4": [],
+        }
+        expander._get_relations_from = lambda entity_id: relation_map.get(entity_id, [])  # type: ignore[method-assign]
+
+        first, *_ = expander._bfs_expand({"seed_b", "seed_a"}, defaultdict(lambda: {"high": 0, "low": 0, "total_before": 0, "after": 0}))
+        second, *_ = expander._bfs_expand({"seed_a", "seed_b"}, defaultdict(lambda: {"high": 0, "low": 0, "total_before": 0, "after": 0}))
+
+        first_key = [(e.src_entity_id, e.dst_entity_id, e.relation_type, e.hop) for e in first]
+        second_key = [(e.src_entity_id, e.dst_entity_id, e.relation_type, e.hop) for e in second]
+        assert first_key == second_key
+        assert first_key == [
+            ("seed_a", "n1", "CALLS", 1),
+            ("seed_a", "n2", "CALLS", 1),
+            ("seed_b", "n3", "USES", 1),
+            ("seed_b", "n4", "USES", 1),
+        ]
+
+    def test_graph_stitch_expand_sorts_related_edges_deterministically(self):
+        """expand() should normalize edge ordering even if BFS returns shuffled edges."""
+        from homllm.retrieval.graph_stitch import GraphStitchExpander, GraphStitchConfig, RelationEdge
+
+        expander = GraphStitchExpander(
+            duckdb_path=None,
+            config=GraphStitchConfig(enabled=True, max_additions=8, graph_cache_enabled=False),
+        )
+        expander._duckdb = object()  # bypass availability gate
+
+        edge_a = RelationEdge("seed", "entity_b", "CALLS", 1, 0.7)
+        edge_b = RelationEdge("seed", "entity_a", "CALLS", 1, 0.7)
+        state = {"flip": False}
+
+        def fake_bfs(seed_ids, hop_stats):
+            state["flip"] = not state["flip"]
+            edges = [edge_a, edge_b] if state["flip"] else [edge_b, edge_a]
+            return edges, 2, 2, 2
+
+        expander._bfs_expand = fake_bfs  # type: ignore[method-assign]
+        expander._get_entity_info = lambda entity_id: {  # type: ignore[method-assign]
+            "entity_type": "function",
+            "name": entity_id,
+            "file_path": "pkg/test.py",
+            "span_start": 1,
+            "span_end": 2,
+            "confidence_score": 1.0,
+            "granularity_level": "fine",
+        }
+        expander._get_entity_content = lambda entity_id, entity_info: f"def {entity_id}(): pass"  # type: ignore[method-assign]
+
+        seed = Candidate(
+            doc_id="seed_doc",
+            file="pkg/test.py",
+            symbol_id="seed",
+            content="def seed(): pass",
+        )
+
+        out1 = expander.expand([seed], "test query")
+        out2 = expander.expand([seed], "test query")
+
+        added1 = [c.symbol_id for c in out1[1:]]
+        added2 = [c.symbol_id for c in out2[1:]]
+        assert added1 == added2 == ["entity_a", "entity_b"]
+
 
 class TestRetrievalGapHelpers:
     """Tests for budgeting, dedup, and granularity mixing helpers."""
@@ -310,7 +488,22 @@ class TestRetrievalGapHelpers:
             Candidate(doc_id="m1", file="a.py", symbol_id=None, content="m", hybrid_score=7.0, granularity_level="medium"),
             Candidate(doc_id="c1", file="a.py", symbol_id=None, content="c", hybrid_score=6.0, granularity_level="coarse"),
         ]
-        mixed = apply_granularity_mix(candidates, Intent.EXPLAIN)
+        config = RetrievalConfig(
+            bm25_top_k=50,
+            vector_top_k=50,
+            hybrid_method="rrf",
+            rrf_k=10,
+            bm25_weight=0.5,
+            vector_weight=0.5,
+            expansion_enabled=True,
+            expansion_max_additions=4,
+            expansion_min_similarity=0.25,
+        )
+        mixed = apply_granularity_mix(
+            candidates,
+            Intent.EXPLAIN,
+            config.granularity_mixing_profiles,
+        )
         levels = {candidate.granularity_level for candidate in mixed[:4]}
         assert "fine" in levels
         assert "medium" in levels

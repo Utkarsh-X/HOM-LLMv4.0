@@ -784,9 +784,22 @@ def main():
             graph_stitch_ms=retrieval_result.metadata.get("graph_stitch_ms"),
             expansion_ms=retrieval_result.metadata.get("expansion_ms"),
             precision_ms=retrieval_result.metadata.get("precision_ms"),
+            precision_recovery_added=retrieval_result.metadata.get("precision_recovery_added"),
+            precision_recovery_cap=retrieval_result.metadata.get("precision_recovery_cap"),
+            precision_recovery_conf_mean=retrieval_result.metadata.get("precision_recovery_conf_mean"),
             total_ms=retrieval_result.metadata.get("total_ms"),
             plan_b_active=retrieval_result.metadata.get("plan_b_active"),
             is_legacy_index=retrieval_result.metadata.get("is_legacy_index"),
+            search_mode=retrieval_result.metadata.get("search_mode"),
+            vector_calibration_mode=retrieval_result.metadata.get("vector_calibration_mode"),
+            static_ceiling_mode=retrieval_result.metadata.get("static_ceiling_mode"),
+            effective_bm25_top_k=retrieval_result.metadata.get("effective_bm25_top_k"),
+            effective_vector_top_k=retrieval_result.metadata.get("effective_vector_top_k"),
+            effective_post_merge_candidates=retrieval_result.metadata.get("effective_post_merge_candidates"),
+            effective_output_top_k=retrieval_result.metadata.get("effective_output_top_k"),
+            query_expansion_enabled=retrieval_result.metadata.get("query_expansion_enabled"),
+            query_expansion_term_count=retrieval_result.metadata.get("query_expansion_term_count"),
+            query_expansion_terms=",".join(retrieval_result.metadata.get("query_expansion_terms", [])),
         )
 
         if not retrieval_result.candidates:

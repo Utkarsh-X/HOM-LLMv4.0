@@ -49,6 +49,18 @@ class BM25Retriever:
                 logger.warning(f"Failed to initialize DuckDB for content: {e}")
                 self._duckdb = None
 
+    def supports_thread_safe_search(self) -> bool:
+        """
+        Whether this retriever can safely share adapter instances across threads.
+
+        Conservative default is False unless explicitly proven thread-safe.
+        """
+        return False
+
+    def clone_for_search(self) -> "BM25Retriever":
+        """Create an isolated retriever instance for branch-local threaded search."""
+        return BM25Retriever(self.index_path, duckdb_path=self.duckdb_path)
+
     def search(self, query: str, top_k: int) -> list[Candidate]:
         """
         Search using BM25.
@@ -63,6 +75,15 @@ class BM25Retriever:
         try:
             # Search Tantivy index
             results = self._tantivy.search(query, top_k)
+            candidate_data_by_id: dict[str, Optional[dict]] = {}
+            if self._duckdb and results:
+                try:
+                    candidate_data_by_id = self._duckdb.get_document_candidate_data_batch(
+                        [doc_id for doc_id, _ in results]
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to batch load BM25 metadata: {e}")
+                    candidate_data_by_id = {}
 
             # Convert to candidates
             candidates = []
@@ -73,11 +94,7 @@ class BM25Retriever:
                 granularity_level = None
 
                 if self._duckdb:
-                    try:
-                        candidate_data = self._duckdb.get_document_candidate_data(doc_id)
-                    except Exception as e:
-                        logger.warning(f"Failed to load content for {doc_id}: {e}")
-                        candidate_data = None
+                    candidate_data = candidate_data_by_id.get(doc_id)
                     if candidate_data:
                         file_path = candidate_data.get("file", "")
                         symbol_id = candidate_data.get("symbol_id")

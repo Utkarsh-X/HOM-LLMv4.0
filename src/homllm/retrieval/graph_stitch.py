@@ -77,21 +77,24 @@ class GraphTopology:
 
     def __init__(self):
         self._loaded = False
+        self._loaded_path: Optional[Path] = None
         self.adjacency: dict[str, list[tuple[str, str, float]]] = defaultdict(list)
 
     @classmethod
     def get_instance(cls, duckdb_path: Optional[Path]) -> Optional["GraphTopology"]:
         if duckdb_path is None:
             return None
+        resolved_path = duckdb_path.resolve()
         if cls._instance is None:
             cls._instance = GraphTopology()
-        if not cls._instance._loaded:
-            cls._instance._load(duckdb_path)
+        if (not cls._instance._loaded) or (cls._instance._loaded_path != resolved_path):
+            cls._instance._load(resolved_path)
         return cls._instance
 
     def _load(self, duckdb_path: Path) -> None:
         start = time.perf_counter()
         adapter = DuckDBAdapter(duckdb_path)
+        self.adjacency = defaultdict(list)
         try:
             adapter.connect()
             try:
@@ -99,6 +102,7 @@ class GraphTopology:
                     """
                     SELECT src_entity_id, dst_entity_id, relation_type, confidence_score
                     FROM relations
+                    ORDER BY src_entity_id ASC, relation_type ASC, dst_entity_id ASC
                     """
                 ).fetchall()
                 for src, dst, rel_type, conf in rows:
@@ -109,12 +113,14 @@ class GraphTopology:
                     """
                     SELECT src_entity_id, dst_entity_id, relation_type
                     FROM relations
+                    ORDER BY src_entity_id ASC, relation_type ASC, dst_entity_id ASC
                     """
                 ).fetchall()
                 for src, dst, rel_type in rows:
                     rel = str(rel_type).upper()
                     self.adjacency[str(src)].append((str(dst), rel, 1.0))
             self._loaded = True
+            self._loaded_path = duckdb_path
             nodes = len(self.adjacency)
             edges = sum(len(v) for v in self.adjacency.values())
             elapsed_ms = (time.perf_counter() - start) * 1000
@@ -246,6 +252,10 @@ class GraphStitchExpander:
             key=lambda e: (
                 priority_order.get(e.relation_type, 999),
                 e.hop,
+                -float(e.confidence),
+                e.relation_type,
+                e.dst_entity_id,
+                e.src_entity_id,
             )
         )
         
@@ -352,9 +362,9 @@ class GraphStitchExpander:
         queue: deque[tuple[str, int]] = deque()
         neighbors_before = 0
         neighbors_after = 0
-        
+
         # Initialize queue with seed IDs at hop 0
-        for seed in seed_ids:
+        for seed in sorted(seed_ids):
             queue.append((seed, 0))
         
         while queue:
@@ -367,7 +377,7 @@ class GraphStitchExpander:
             relations = self._get_relations_from(entity_id)
             if not relations:
                 continue
-            
+
             high: list[dict] = []
             low: list[dict] = []
             for rel in relations:
@@ -377,8 +387,20 @@ class GraphStitchExpander:
                 else:
                     low.append(rel)
             
-            high.sort(key=lambda r: r.get("confidence", 0.0), reverse=True)
-            low.sort(key=lambda r: r.get("confidence", 0.0), reverse=True)
+            high.sort(
+                key=lambda r: (
+                    -float(r.get("confidence", 0.0)),
+                    str(r.get("relation_type", "")),
+                    str(r.get("dst_entity_id", "")),
+                )
+            )
+            low.sort(
+                key=lambda r: (
+                    -float(r.get("confidence", 0.0)),
+                    str(r.get("relation_type", "")),
+                    str(r.get("dst_entity_id", "")),
+                )
+            )
             
             high_before = len(high)
             low_before = len(low)
@@ -419,10 +441,17 @@ class GraphStitchExpander:
     
     def _get_relations_from(self, entity_id: str) -> list[dict]:
         """Get relations where entity is the source."""
+        def _sort_key(row: dict) -> tuple[float, str, str]:
+            return (
+                -float(row.get("confidence", 0.0)),
+                str(row.get("relation_type", "")),
+                str(row.get("dst_entity_id", "")),
+            )
+
         if self.config.graph_cache_enabled and self._graph_topology:
             self._cache_hits += 1
             items = self._graph_topology.adjacency.get(entity_id, [])
-            return [
+            rows = [
                 {
                     "dst_entity_id": dst,
                     "relation_type": rel_type,
@@ -430,6 +459,8 @@ class GraphStitchExpander:
                 }
                 for dst, rel_type, conf in items
             ]
+            rows.sort(key=_sort_key)
+            return rows
         if not self._duckdb or not self._duckdb.conn:
             return []
         
@@ -440,11 +471,12 @@ class GraphStitchExpander:
                 SELECT dst_entity_id, relation_type
                 FROM relations
                 WHERE src_entity_id = ?
+                ORDER BY relation_type ASC, dst_entity_id ASC
                 """,
                 [entity_id],
             ).fetchall()
             
-            return [
+            rows = [
                 {
                     "dst_entity_id": row[0],
                     "relation_type": str(row[1]).upper(),
@@ -452,6 +484,8 @@ class GraphStitchExpander:
                 }
                 for row in result
             ]
+            rows.sort(key=_sort_key)
+            return rows
         except Exception as e:
             logger.debug(f"Failed to get relations for {entity_id}: {e}")
             return []

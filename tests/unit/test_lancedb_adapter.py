@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
 
 from homllm.common.types import Document, Vector
+from homllm.retrieval.interfaces import RetrievalConfig
 
 
 @dataclass
@@ -72,3 +74,42 @@ def test_connect_opens_existing_table_handle():
     reader.connect()
 
     assert reader._table is not None  # Existing table should be opened.
+
+
+def test_distance_to_similarity_modes_are_bounded_and_monotonic():
+    """Calibration policies must be deterministic, monotonic, and bounded."""
+    from homllm.indexer.storage.lancedb_adapter import LanceDBAdapter
+
+    distances = [0.0, 0.1, 0.5, 1.0, 3.0, 10.0]
+    for mode in ("legacy", "calibrated_v1"):
+        sims = [
+            LanceDBAdapter._distance_to_similarity(d, calibration_mode=mode)
+            for d in distances
+        ]
+        assert all(0.0 <= s <= 1.0 for s in sims)
+        assert math.isclose(sims[0], 1.0, rel_tol=0.0, abs_tol=1e-12)
+        for left, right in zip(sims, sims[1:]):
+            assert left >= right
+
+
+def test_distance_to_similarity_rejects_unknown_mode():
+    from homllm.indexer.storage.lancedb_adapter import LanceDBAdapter
+
+    with pytest.raises(ValueError, match="Unknown vector calibration mode"):
+        LanceDBAdapter._distance_to_similarity(0.25, calibration_mode="unknown_mode")
+
+
+def test_retrieval_config_rejects_unknown_vector_calibration_mode():
+    with pytest.raises(ValueError, match="retrieval.vector.calibration_mode"):
+        RetrievalConfig(
+            bm25_top_k=10,
+            vector_top_k=10,
+            hybrid_method="rrf",
+            rrf_k=10,
+            bm25_weight=0.5,
+            vector_weight=0.5,
+            expansion_enabled=True,
+            expansion_max_additions=4,
+            expansion_min_similarity=0.25,
+            vector_calibration_mode="invalid_mode",
+        )

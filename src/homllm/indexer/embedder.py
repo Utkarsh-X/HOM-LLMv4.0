@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 
 # Canonical model name - MUST match exactly, no fallbacks allowed
 EMBEDDING_MODEL_NAME = "Qwen/Qwen3-Embedding-0.6B"
+QUERY_EMBED_INSTRUCTION = "Represent this code search query for retrieval:"
 
 try:
     from transformers import AutoModel, AutoTokenizer
@@ -48,6 +49,7 @@ class QwenEmbedder(Embedder):
         self._device = "cuda" if torch.cuda.is_available() else "cpu"
         self._requested_max_input_tokens = max_input_tokens
         self._effective_max_input_tokens = max_input_tokens
+        self._query_input_log_count = 0
 
         if AutoModel is not None and AutoTokenizer is not None:
             self._load_model()
@@ -180,9 +182,28 @@ class QwenEmbedder(Embedder):
         Properties:
         - Instruction-aware for query side
         """
-        # Use instruction prefix for query embedding
-        instruction = "Represent this code search query for retrieval:"
-        return self._embed_text(query, instruction_prefix=instruction)
+        if QUERY_EMBED_INSTRUCTION in query:
+            raise ValueError(
+                "embed_query expects raw query text without instruction prefix"
+            )
+
+        input_text = f"{QUERY_EMBED_INSTRUCTION}\n{query}"
+        prefix_count = input_text.count(QUERY_EMBED_INSTRUCTION)
+        if prefix_count != 1:
+            raise ValueError(
+                f"Query embed prefix contract violated: expected 1, got {prefix_count}"
+            )
+
+        if self._query_input_log_count < 5:
+            self._query_input_log_count += 1
+            logger.info(
+                "[EMBED_QUERY_INPUT] sample=%d prefix_count=%d input=%r",
+                self._query_input_log_count,
+                prefix_count,
+                input_text,
+            )
+
+        return self._embed_text(query, instruction_prefix=QUERY_EMBED_INSTRUCTION)
 
     @property
     def dimension(self) -> int:

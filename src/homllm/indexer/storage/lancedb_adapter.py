@@ -179,7 +179,29 @@ class LanceDBAdapter:
         table_names = getattr(tables_response, "tables", tables_response)
         return table_name in table_names
 
-    def search(self, query_vector: Vector, top_k: int) -> list[tuple[str, float, str, dict]]:
+    @staticmethod
+    def _distance_to_similarity(distance: float, calibration_mode: str = "legacy") -> float:
+        """Map LanceDB distance to bounded similarity for retrieval fusion."""
+        d = max(0.0, float(distance))
+        mode = str(calibration_mode).strip().lower()
+        if mode == "legacy":
+            similarity = 1.0 / (1.0 + d)
+        elif mode == "calibrated_v1":
+            # Stronger near-neighbor emphasis while preserving monotonicity.
+            similarity = 1.0 / (1.0 + (d * d))
+        else:
+            raise ValueError(
+                f"Unknown vector calibration mode: {calibration_mode}. "
+                "Expected one of: legacy, calibrated_v1"
+            )
+        return max(0.0, min(1.0, float(similarity)))
+
+    def search(
+        self,
+        query_vector: Vector,
+        top_k: int,
+        calibration_mode: str = "legacy",
+    ) -> list[tuple[str, float, str, dict]]:
         """
         Vector similarity search.
         
@@ -212,9 +234,12 @@ class LanceDBAdapter:
                         metadata = {}
                 elif isinstance(metadata_raw, dict):
                     metadata = metadata_raw
-                # LanceDB returns distance, convert to similarity (1 - normalized distance)
+                # LanceDB returns distance; convert via explicit calibration policy.
                 distance = row.get("_distance", float("inf"))
-                similarity = 1.0 / (1.0 + distance)  # Simple conversion
+                similarity = self._distance_to_similarity(
+                    distance,
+                    calibration_mode=calibration_mode,
+                )
                 output.append((doc_id, float(similarity), str(content), metadata))
 
             # Sort by similarity descending

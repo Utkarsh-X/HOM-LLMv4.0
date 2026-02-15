@@ -10,6 +10,7 @@ Extended for Plan B: Retrieval Layer Activation with:
 import logging
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
 
@@ -81,9 +82,11 @@ class RetrievalPipeline:
             expander: Structural expander (default: StructuralExpanderImpl)
         """
         self.config = config
+        self._bm25_index_path = bm25_index_path
+        self._vector_db_path = vector_db_path
         self.duckdb_path = duckdb_path
         self.embedder = embedder or QwenEmbedder()
-        self.preparer = preparer or SimpleQueryPreparer()
+        self.preparer = preparer or SimpleQueryPreparer(config=config)
         # Pass embedder to merger for MMR
         self.merger = merger or RRFHybridMerger(embedder=self.embedder)
         self.expander = expander or StructuralExpanderImpl(self.embedder, duckdb_path=duckdb_path)
@@ -95,6 +98,7 @@ class RetrievalPipeline:
             vector_db_path,
             self.embedder,
             duckdb_path=duckdb_path,
+            calibration_mode=config.vector_calibration_mode,
         )
         
         # Initialize precision recovery
@@ -172,34 +176,56 @@ class RetrievalPipeline:
             prep_start = time.perf_counter()
             prepared = self.preparer.prepare(query, intent)
             prep_ms = (time.perf_counter() - prep_start) * 1000
+            if prepared.lexical_expansion_terms:
+                logger.info(
+                    "[QUERY_EXPANSION] query_id=%s added_terms=%s cap=%s",
+                    query_id,
+                    ",".join(prepared.lexical_expansion_terms),
+                    self.config.query_expansion_max_terms,
+                )
 
-            # 2. Parallel search: BM25 and Vector
+            (
+                effective_bm25_top_k,
+                effective_vector_top_k,
+                effective_post_merge_candidates,
+                effective_output_top_k,
+                static_ceiling_mode,
+            ) = self._resolve_static_ceiling_limits(top_k)
+
+            # 2. BM25 + Vector search (parallel when enabled)
             bm25_results = []
             vector_results = []
+            search_mode = "sequential"
+            lexical_query = " ".join(prepared.lexical_terms)
 
-            # BM25 search
-            try:
-                bm25_start = time.perf_counter()
-                bm25_results = self.bm25_retriever.search(
-                    " ".join(prepared.lexical_terms), self.config.bm25_top_k
+            if self.config.parallel_search_enabled:
+                bm25_runner, vector_runner, search_mode = self._resolve_parallel_search_runners()
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    bm25_future = executor.submit(
+                        self._run_bm25_search,
+                        bm25_runner,
+                        lexical_query,
+                        effective_bm25_top_k,
+                    )
+                    vector_future = executor.submit(
+                        self._run_vector_search,
+                        vector_runner,
+                        prepared.dense_query,
+                        effective_vector_top_k,
+                    )
+                    bm25_results, bm25_ms = bm25_future.result()
+                    vector_results, vector_ms = vector_future.result()
+            else:
+                bm25_results, bm25_ms = self._run_bm25_search(
+                    self.bm25_retriever,
+                    lexical_query,
+                    effective_bm25_top_k,
                 )
-                bm25_ms = (time.perf_counter() - bm25_start) * 1000
-            except Exception as e:
-                logger.error(f"BM25 search failed: {e}")
-                bm25_ms = None
-                # Continue with vector-only results (RET-004)
-
-            # Vector search
-            try:
-                vector_start = time.perf_counter()
-                vector_results = self.vector_retriever.search(
-                    prepared.dense_query, self.config.vector_top_k
+                vector_results, vector_ms = self._run_vector_search(
+                    self.vector_retriever,
+                    prepared.dense_query,
+                    effective_vector_top_k,
                 )
-                vector_ms = (time.perf_counter() - vector_start) * 1000
-            except Exception as e:
-                logger.error(f"Vector search failed: {e}")
-                vector_ms = None
-                # Continue with BM25-only results (RET-004)
 
             # If both failed, return empty result
             if not bm25_results and not vector_results:
@@ -222,8 +248,8 @@ class RetrievalPipeline:
             merge_ms = (time.perf_counter() - merge_start) * 1000
 
             # Post-merge cap (applied before MMR/graph/expansion)
-            if self.config.post_merge_candidates and len(merged) > self.config.post_merge_candidates:
-                merged = merged[: self.config.post_merge_candidates]
+            if effective_post_merge_candidates and len(merged) > effective_post_merge_candidates:
+                merged = merged[:effective_post_merge_candidates]
             
             # Hierarchical deduplication before MMR
             if plan_b_active and self.config.hierarchical_dedup_enabled:
@@ -249,7 +275,11 @@ class RetrievalPipeline:
 
             # Intent-driven granularity mixing
             if plan_b_active and self.config.granularity_mixing_enabled:
-                merged = apply_granularity_mix(merged, intent)
+                merged = apply_granularity_mix(
+                    merged,
+                    intent,
+                    self.config.granularity_mixing_profiles,
+                )
 
             # 4. Structural expansion
             if self.config.expansion_enabled:
@@ -273,9 +303,21 @@ class RetrievalPipeline:
             # 5. Precision recovery (missing entity detection)
             pr_start = time.perf_counter()
             merged = self.precision_recovery.recover(
-                merged, query, self.config, max_additions=3
+                merged,
+                query,
+                self.config,
+                max_additions=self.config.precision_recovery_max_additions,
             )
             precision_ms = (time.perf_counter() - pr_start) * 1000
+            precision_metrics = getattr(self.precision_recovery, "last_metrics", {})
+            if precision_metrics.get("precision_recovery_added", 0):
+                logger.info(
+                    "[PRECISION_RECOVERY_QUERY] query_id=%s added=%s cap=%s conf_mean=%s",
+                    query_id,
+                    precision_metrics.get("precision_recovery_added"),
+                    precision_metrics.get("precision_recovery_cap"),
+                    precision_metrics.get("precision_recovery_conf_mean"),
+                )
 
             # 6. Budget-aware selection + top-k
             budget_used = None
@@ -290,7 +332,7 @@ class RetrievalPipeline:
                 budget_used = budget_tracker.used
                 budget_effective = budget_tracker.effective_budget
 
-            final_candidates = merged[:top_k]
+            final_candidates = merged[:effective_output_top_k]
             total_ms = (time.perf_counter() - t0) * 1000
 
             logger.info(
@@ -317,6 +359,16 @@ class RetrievalPipeline:
                     "final_count": len(final_candidates),
                     "plan_b_active": plan_b_active,
                     "is_legacy_index": is_legacy,
+                    "search_mode": search_mode,
+                    "vector_calibration_mode": self.config.vector_calibration_mode,
+                    "static_ceiling_mode": static_ceiling_mode,
+                    "effective_bm25_top_k": effective_bm25_top_k,
+                    "effective_vector_top_k": effective_vector_top_k,
+                    "effective_post_merge_candidates": effective_post_merge_candidates,
+                    "effective_output_top_k": effective_output_top_k,
+                    "query_expansion_enabled": self.config.query_expansion_enabled,
+                    "query_expansion_terms": list(prepared.lexical_expansion_terms),
+                    "query_expansion_term_count": len(prepared.lexical_expansion_terms),
                     "prep_ms": round(prep_ms, 2),
                     "bm25_ms": round(bm25_ms, 2) if bm25_ms is not None else None,
                     "vector_ms": round(vector_ms, 2) if vector_ms is not None else None,
@@ -326,6 +378,12 @@ class RetrievalPipeline:
                     "graph_stitch_ms": round(graph_stitch_ms, 2),
                     "expansion_ms": round(expansion_ms, 2),
                     "precision_ms": round(precision_ms, 2),
+                    "precision_recovery_added": precision_metrics.get("precision_recovery_added"),
+                    "precision_recovery_cap": precision_metrics.get("precision_recovery_cap"),
+                    "precision_recovery_identifiers": precision_metrics.get("precision_recovery_identifiers"),
+                    "precision_recovery_conf_min": precision_metrics.get("precision_recovery_conf_min"),
+                    "precision_recovery_conf_max": precision_metrics.get("precision_recovery_conf_max"),
+                    "precision_recovery_conf_mean": precision_metrics.get("precision_recovery_conf_mean"),
                     "total_ms": round(total_ms, 2),
                     "mmr_candidates": getattr(self.merger, "last_metrics", {}).get("mmr_candidates"),
                     "mmr_emb_ms": getattr(self.merger, "last_metrics", {}).get("mmr_emb_ms"),
@@ -343,6 +401,95 @@ class RetrievalPipeline:
                 query_id=query_id,
                 metadata={"error": str(e)},
             )
+
+    def _validate_parallel_adapter_safety(self) -> bool:
+        """Return True only when both retrievers explicitly declare thread-safe search."""
+        bm25_safe = bool(
+            hasattr(self.bm25_retriever, "supports_thread_safe_search")
+            and self.bm25_retriever.supports_thread_safe_search()
+        )
+        vector_safe = bool(
+            hasattr(self.vector_retriever, "supports_thread_safe_search")
+            and self.vector_retriever.supports_thread_safe_search()
+        )
+        logger.info(
+            "[PARALLEL_SEARCH] bm25_thread_safe=%s vector_thread_safe=%s",
+            bm25_safe,
+            vector_safe,
+        )
+        return bm25_safe and vector_safe
+
+    def _build_branch_local_search_runners(self):
+        """Build isolated retriever instances for parallel branch execution."""
+        bm25_runner = (
+            self.bm25_retriever.clone_for_search()
+            if hasattr(self.bm25_retriever, "clone_for_search")
+            else BM25Retriever(self._bm25_index_path, duckdb_path=self.duckdb_path)
+        )
+        vector_runner = (
+            self.vector_retriever.clone_for_search()
+            if hasattr(self.vector_retriever, "clone_for_search")
+            else VectorRetriever(
+                self._vector_db_path,
+                self.embedder,
+                duckdb_path=self.duckdb_path,
+                calibration_mode=self.config.vector_calibration_mode,
+            )
+        )
+        return bm25_runner, vector_runner
+
+    def _resolve_parallel_search_runners(self):
+        """
+        Resolve retrievers for parallel search.
+
+        If shared retrievers are not explicitly thread-safe, use branch-local clones.
+        """
+        if self._validate_parallel_adapter_safety():
+            return self.bm25_retriever, self.vector_retriever, "parallel_shared"
+        bm25_runner, vector_runner = self._build_branch_local_search_runners()
+        return bm25_runner, vector_runner, "parallel_branch_local"
+
+    def _run_bm25_search(self, retriever, query: str, top_k: int):
+        """Run BM25 search with per-branch timing and failure isolation."""
+        try:
+            start = time.perf_counter()
+            results = retriever.search(query, top_k)
+            return results, (time.perf_counter() - start) * 1000
+        except Exception as e:
+            logger.error(f"BM25 search failed: {e}")
+            return [], None
+
+    def _run_vector_search(self, retriever, query: str, top_k: int):
+        """Run vector search with per-branch timing and failure isolation."""
+        try:
+            start = time.perf_counter()
+            results = retriever.search(query, top_k)
+            return results, (time.perf_counter() - start) * 1000
+        except Exception as e:
+            logger.error(f"Vector search failed: {e}")
+            return [], None
+
+    def _resolve_static_ceiling_limits(
+        self,
+        top_k: int,
+    ) -> tuple[int, int, int, int, str]:
+        """
+        Resolve deterministic static retrieval ceilings for Phase-A experimentation.
+        """
+        bm25_top_k = self.config.bm25_top_k
+        vector_top_k = self.config.vector_top_k
+        post_merge = self.config.post_merge_candidates
+        output_top_k = top_k
+
+        if not self.config.static_ceiling_experiment_enabled:
+            return bm25_top_k, vector_top_k, post_merge, output_top_k, "baseline"
+
+        bm25_top_k = max(1, bm25_top_k * self.config.static_ceiling_branch_multiplier)
+        vector_top_k = max(1, vector_top_k * self.config.static_ceiling_branch_multiplier)
+        if post_merge > 0:
+            post_merge = max(1, post_merge * self.config.static_ceiling_post_merge_multiplier)
+        output_top_k = max(1, top_k * self.config.static_ceiling_output_multiplier)
+        return bm25_top_k, vector_top_k, post_merge, output_top_k, "static_ceiling_v1"
     
     def _detect_legacy_index(self) -> bool:
         """

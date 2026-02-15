@@ -21,6 +21,7 @@ class VectorRetriever:
         db_path: Path,
         embedder: QwenEmbedder,
         duckdb_path: Optional[Path] = None,
+        calibration_mode: str = "legacy",
     ):
         """
         Initialize vector retriever.
@@ -32,6 +33,11 @@ class VectorRetriever:
         self.db_path = db_path
         self.embedder = embedder
         self.duckdb_path = duckdb_path
+        self.calibration_mode = str(calibration_mode).strip().lower()
+        if self.calibration_mode not in {"legacy", "calibrated_v1"}:
+            raise ValueError(
+                "vector calibration_mode must be one of: legacy, calibrated_v1"
+            )
         self._lancedb: Optional[LanceDBAdapter] = None
         self._duckdb: Optional[DuckDBAdapter] = None
         self._init_index()
@@ -52,6 +58,23 @@ class VectorRetriever:
                 logger.warning(f"Failed to initialize DuckDB for vector metadata: {e}")
                 self._duckdb = None
 
+    def supports_thread_safe_search(self) -> bool:
+        """
+        Whether this retriever can safely share adapter instances across threads.
+
+        Conservative default is False unless explicitly proven thread-safe.
+        """
+        return False
+
+    def clone_for_search(self) -> "VectorRetriever":
+        """Create an isolated retriever instance for branch-local threaded search."""
+        return VectorRetriever(
+            self.db_path,
+            self.embedder,
+            duckdb_path=self.duckdb_path,
+            calibration_mode=self.calibration_mode,
+        )
+
     def search(self, query: str, top_k: int) -> list[Candidate]:
         """
         Search using vector similarity.
@@ -68,7 +91,20 @@ class VectorRetriever:
             query_vector = self.embedder.embed_query(query)
 
             # Search vector index
-            results = self._lancedb.search(query_vector, top_k)
+            results = self._lancedb.search(
+                query_vector,
+                top_k,
+                calibration_mode=self.calibration_mode,
+            )
+            candidate_data_by_id: dict[str, Optional[dict]] = {}
+            if self._duckdb and results:
+                try:
+                    candidate_data_by_id = self._duckdb.get_document_candidate_data_batch(
+                        [doc_id for doc_id, _, _, _ in results]
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to batch load vector metadata: {e}")
+                    candidate_data_by_id = {}
 
             # Convert to candidates
             candidates = []
@@ -83,7 +119,7 @@ class VectorRetriever:
                 doc_type = None
 
                 if self._duckdb:
-                    candidate_data = self._duckdb.get_document_candidate_data(doc_id)
+                    candidate_data = candidate_data_by_id.get(doc_id)
                     if candidate_data:
                         file_path = candidate_data.get("file", file_path)
                         symbol_id = candidate_data.get("symbol_id", symbol_id)

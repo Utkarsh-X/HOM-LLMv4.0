@@ -243,6 +243,7 @@ class TestConfig:
         assert config.fine_enabled is True
         assert config.medium_enabled is True
         assert config.coarse_enabled is True
+        assert config.chunk_max_lines == 100
 
     def test_indexer_config_post_init(self):
         """Test IndexerConfig post_init creates nested configs."""
@@ -262,6 +263,7 @@ class TestConfig:
         # post_init should create nested configs
         assert config.entity_confidence is not None
         assert config.hierarchical_chunking is not None
+        assert config.hierarchical_chunking.chunk_max_lines == config.chunk_max_lines
         assert config.entity_centric_indexing_enabled is True
         assert config.type_alias_extraction_enabled is False
 

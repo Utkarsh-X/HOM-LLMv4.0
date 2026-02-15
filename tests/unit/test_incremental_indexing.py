@@ -173,3 +173,58 @@ def test_get_document_candidate_data_prefers_chunk_then_symbol():
     assert symbol_data is not None
     assert symbol_data["doc_type"] == "symbol"
     assert symbol_data["symbol_id"] == "sym:data"
+
+
+def test_get_document_candidate_data_batch_parity_and_dedup():
+    tmp_dir = _workspace_tmp_dir()
+    db_path = tmp_dir / f"{uuid4().hex}_candidate_data_batch.duckdb"
+    adapter = DuckDBAdapter(db_path)
+    adapter.connect()
+    adapter.reset_index_data()
+
+    file_info = _file("f10", "pkg/batch.py", "hash_batch")
+    adapter.insert_file(file_info)
+
+    parent = SymbolInfo(
+        id="sym:parent",
+        name="parent",
+        kind=SymbolKind.FUNCTION,
+        file="pkg/batch.py",
+        start_line=1,
+        end_line=2,
+    )
+    child = SymbolInfo(
+        id="sym:child",
+        name="child",
+        kind=SymbolKind.FUNCTION,
+        file="pkg/batch.py",
+        start_line=3,
+        end_line=6,
+        parent_id="sym:parent",
+    )
+    adapter.insert_symbol(parent, file_info.file_id, "def parent():\n    pass")
+    adapter.insert_symbol(child, file_info.file_id, "def child():\n    return 1")
+    adapter.insert_chunk(
+        ChunkInfo(
+            chunk_id="chunk:batch",
+            file_path="pkg/batch.py",
+            content="def child():\n    return 1",
+            granularity_level="fine",
+            span_start=3,
+            span_end=6,
+            entity_ids=("sym:child",),
+        )
+    )
+
+    requested = [
+        "chunk:batch",
+        "f10:sym:child",
+        "missing:doc",
+        "chunk:batch",  # duplicate request should be deduped internally
+    ]
+    batch = adapter.get_document_candidate_data_batch(requested)
+
+    assert set(batch.keys()) == {"chunk:batch", "f10:sym:child", "missing:doc"}
+    assert batch["missing:doc"] is None
+    assert batch["chunk:batch"] == adapter.get_document_candidate_data("chunk:batch")
+    assert batch["f10:sym:child"] == adapter.get_document_candidate_data("f10:sym:child")

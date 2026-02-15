@@ -42,6 +42,10 @@ class HierarchicalChunkingConfig:
     fine_enabled: bool = True       # Symbol-level
     medium_enabled: bool = True     # File sections
     coarse_enabled: bool = True     # File-level
+    chunk_max_lines: int = 100
+
+    def __post_init__(self):
+        self.chunk_max_lines = max(1, int(self.chunk_max_lines))
 
 
 @dataclass
@@ -63,10 +67,13 @@ class IndexerConfig:
     hierarchical_chunking: HierarchicalChunkingConfig = None
 
     def __post_init__(self):
+        self.chunk_max_lines = max(1, int(self.chunk_max_lines))
         if self.entity_confidence is None:
             self.entity_confidence = EntityConfidenceConfig()
         if self.hierarchical_chunking is None:
             self.hierarchical_chunking = HierarchicalChunkingConfig()
+        else:
+            self.hierarchical_chunking.chunk_max_lines = self.chunk_max_lines
 
 
 @dataclass
@@ -124,6 +131,7 @@ class Config(BaseModel):
             fine_enabled=chunking_cfg.get("fine_enabled", True),
             medium_enabled=chunking_cfg.get("medium_enabled", True),
             coarse_enabled=chunking_cfg.get("coarse_enabled", True),
+            chunk_max_lines=chunking_cfg.get("chunk_max_lines", idx_cfg.get("chunk_max_lines", 100)),
         )
         
         return IndexerConfig(
@@ -148,6 +156,8 @@ class Config(BaseModel):
         ret_cfg = self.retrieval
         hybrid_cfg = ret_cfg.get("hybrid", {})
         expansion_cfg = ret_cfg.get("expansion", {})
+        static_ceiling_cfg = ret_cfg.get("static_ceiling_experiment", {})
+        precision_recovery_cfg = ret_cfg.get("precision_recovery", {})
         
         # Plan B config sections
         diversity_mmr_cfg = ret_cfg.get("diversity_mmr", {})
@@ -156,18 +166,55 @@ class Config(BaseModel):
         budget_cfg = ret_cfg.get("budget", {})
         granularity_mix_cfg = ret_cfg.get("granularity_mixing", {})
         dedup_cfg = ret_cfg.get("hierarchical_dedup", {})
+        query_expansion_cfg = ret_cfg.get("query_expansion", {})
+
+        # RET-IMP-08: Single budget authority.
+        # Retrieval must consume context budget values from one source only.
+        dual_authority_keys = [k for k in ("context_budget", "reserve") if k in budget_cfg]
+        if dual_authority_keys:
+            raise ValueError(
+                "Dual budget authority detected: retrieval.budget."
+                + ",".join(sorted(dual_authority_keys))
+                + " is not allowed. Use context.max_tokens and "
+                "context.generation_reserve_tokens as the single authority."
+            )
+
+        ctx_cfg = self.context if isinstance(self.context, dict) else {}
+        context_max_tokens = int(ctx_cfg.get("max_tokens", 4000))
+        context_default_reserve = max(int(context_max_tokens * 0.2), 400)
+        context_generation_reserve = int(
+            ctx_cfg.get("generation_reserve_tokens", context_default_reserve)
+        )
 
         return RetrievalConfig(
             # Core retrieval settings
             bm25_top_k=ret_cfg.get("bm25", {}).get("top_k", 50),
             vector_top_k=ret_cfg.get("vector", {}).get("top_k", 50),
+            vector_calibration_mode=ret_cfg.get("vector", {}).get("calibration_mode", "legacy"),
             hybrid_method=hybrid_cfg.get("method", "rrf"),
             rrf_k=hybrid_cfg.get("rrf_k", 10),
             bm25_weight=hybrid_cfg.get("bm25_weight", 0.5),
             vector_weight=hybrid_cfg.get("vector_weight", 0.5),
+            parallel_search_enabled=ret_cfg.get("parallel_search", {}).get("enabled", True),
             expansion_enabled=expansion_cfg.get("enabled", True),
             expansion_max_additions=expansion_cfg.get("max_additions", 4),
             expansion_min_similarity=expansion_cfg.get("min_similarity", 0.25),
+            static_ceiling_experiment_enabled=static_ceiling_cfg.get("enabled", False),
+            static_ceiling_branch_multiplier=static_ceiling_cfg.get("branch_multiplier", 1),
+            static_ceiling_post_merge_multiplier=static_ceiling_cfg.get("post_merge_multiplier", 1),
+            static_ceiling_output_multiplier=static_ceiling_cfg.get("output_multiplier", 1),
+            precision_recovery_enabled=precision_recovery_cfg.get("enabled", True),
+            precision_recovery_max_additions=precision_recovery_cfg.get("max_additions", 3),
+            precision_recovery_max_ratio=precision_recovery_cfg.get("max_ratio", 0.2),
+            precision_recovery_scan_candidates=precision_recovery_cfg.get("scan_candidates", 8),
+            precision_recovery_identifier_limit=precision_recovery_cfg.get("identifier_limit", 16),
+            precision_recovery_bm25_top_k=precision_recovery_cfg.get("bm25_top_k", 5),
+            precision_recovery_vector_top_k=precision_recovery_cfg.get("vector_top_k", 3),
+            precision_recovery_min_confidence=precision_recovery_cfg.get("min_confidence", 0.8),
+            query_expansion_enabled=query_expansion_cfg.get("enabled", True),
+            query_expansion_max_terms=query_expansion_cfg.get("max_terms", 6),
+            query_expansion_min_token_length=query_expansion_cfg.get("min_token_length", 3),
+            query_expansion_synonyms=query_expansion_cfg.get("synonyms", {}),
             
             # Plan B: Retrieval Layer Activation
             plan_b_enabled=ret_cfg.get("plan_b_enabled", True),
@@ -194,10 +241,11 @@ class Config(BaseModel):
             graph_stitch_beam_high=graph_stitch_cfg.get("graph_stitch_beam_high", 8),
             graph_stitch_beam_low=graph_stitch_cfg.get("graph_stitch_beam_low", 3),
             post_merge_candidates=ret_cfg.get("post_merge_candidates", 0),
-            context_budget=budget_cfg.get("context_budget", 4000),
-            budget_reserve=budget_cfg.get("reserve", 800),
+            context_budget=context_max_tokens,
+            budget_reserve=context_generation_reserve,
             budget_aware_selection=budget_cfg.get("enabled", True),
             granularity_mixing_enabled=granularity_mix_cfg.get("enabled", True),
+            granularity_mixing_profiles=self._parse_granularity_mixing_profiles(granularity_mix_cfg),
             hierarchical_dedup_enabled=dedup_cfg.get("enabled", True),
         )
     
@@ -210,6 +258,30 @@ class Config(BaseModel):
             if intent in cfg:
                 table[intent] = cfg[intent]
         return table  # Empty dict triggers defaults in RetrievalConfig.__post_init__
+
+    def _parse_granularity_mixing_profiles(self, cfg: dict) -> dict:
+        """Parse granularity mixing profiles from config."""
+        if not isinstance(cfg, dict):
+            return {}
+        profiles = cfg.get("profiles")
+        if isinstance(profiles, dict):
+            return profiles
+
+        # Backward-compatible shape: intent keys directly under granularity_mixing.
+        table = {}
+        for intent in [
+            "EXPLAIN",
+            "IMPLEMENT",
+            "REFACTOR",
+            "DEBUG",
+            "SEARCH",
+            "UNKNOWN",
+            "EXPLANATORY",
+            "IMPLEMENTATION",
+        ]:
+            if intent in cfg:
+                table[intent] = cfg[intent]
+        return table
 
     def get_ranking_config(self) -> "RankConfig":
         """Extract RankConfig from root config."""

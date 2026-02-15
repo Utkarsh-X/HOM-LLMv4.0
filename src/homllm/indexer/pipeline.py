@@ -97,6 +97,10 @@ class IndexerPipeline:
         if config.entity_centric_indexing_enabled:
             self.entity_extractor = EntityExtractor(config)
             self.hierarchical_chunker = HierarchicalChunker(config.hierarchical_chunking)
+            logger.info(
+                "Hierarchical chunking chunk_max_lines=%d",
+                config.hierarchical_chunking.chunk_max_lines,
+            )
         else:
             self.entity_extractor = None
             self.hierarchical_chunker = None

@@ -324,75 +324,147 @@ class DuckDBAdapter:
 
         return doc_ids
 
+    @staticmethod
+    def _resolve_symbol_id_from_doc_id(doc_id: str) -> str:
+        """Resolve symbol ID using the legacy retrieval mapping contract."""
+        return doc_id.split(":", 1)[1] if ":" in doc_id else doc_id
+
+    def get_document_candidate_data_batch(
+        self,
+        doc_ids: list[str],
+    ) -> dict[str, Optional[dict[str, Any]]]:
+        """
+        Resolve retrieval-facing metadata in batch for document IDs.
+
+        This method deduplicates request IDs for efficient SQL lookup while
+        preserving per-doc semantics of ``get_document_candidate_data``.
+        """
+        if self.conn is None:
+            self.connect()
+        if not doc_ids:
+            return {}
+
+        # Deduplicate requested IDs while preserving first-seen order.
+        unique_doc_ids = list(dict.fromkeys(doc_ids))
+        by_doc_id: dict[str, Optional[dict[str, Any]]] = {
+            doc_id: None for doc_id in unique_doc_ids
+        }
+
+        placeholders = ", ".join(["?"] * len(unique_doc_ids))
+        chunk_rows = self.conn.execute(
+            f"""
+            SELECT chunk_id, file_path, content, granularity_level, entity_ids, span_start, span_end
+            FROM chunks
+            WHERE chunk_id IN ({placeholders})
+            """,
+            unique_doc_ids,
+        ).fetchall()
+
+        chunk_payload: dict[str, dict[str, Any]] = {}
+        first_entity_ids: list[str] = []
+        for row in chunk_rows:
+            chunk_id, file_path, content, granularity_level, entity_ids_raw, span_start, span_end = row
+            entity_ids = json.loads(entity_ids_raw) if entity_ids_raw else []
+            symbol_id = entity_ids[0] if entity_ids else None
+            if symbol_id:
+                first_entity_ids.append(symbol_id)
+            chunk_payload[str(chunk_id)] = {
+                "doc_id": str(chunk_id),
+                "file": file_path,
+                "symbol_id": symbol_id,
+                "content": content,
+                "granularity_level": granularity_level,
+                "entity_ids": entity_ids,
+                "span_start": span_start,
+                "span_end": span_end,
+                "parent_symbol_id": None,
+                "doc_type": "chunk",
+            }
+
+        parent_by_symbol_id: dict[str, Any] = {}
+        if first_entity_ids:
+            unique_symbol_ids = list(dict.fromkeys(first_entity_ids))
+            symbol_placeholders = ", ".join(["?"] * len(unique_symbol_ids))
+            parent_rows = self.conn.execute(
+                f"""
+                SELECT symbol_id, parent_id
+                FROM symbols
+                WHERE symbol_id IN ({symbol_placeholders})
+                """,
+                unique_symbol_ids,
+            ).fetchall()
+            parent_by_symbol_id = {str(symbol_id): parent_id for symbol_id, parent_id in parent_rows}
+
+        for chunk_id, payload in chunk_payload.items():
+            symbol_id = payload.get("symbol_id")
+            if symbol_id:
+                payload["parent_symbol_id"] = parent_by_symbol_id.get(symbol_id)
+            by_doc_id[chunk_id] = payload
+
+        unresolved_doc_ids = [doc_id for doc_id in unique_doc_ids if by_doc_id[doc_id] is None]
+        if not unresolved_doc_ids:
+            return by_doc_id
+
+        symbol_id_by_doc_id = {
+            doc_id: self._resolve_symbol_id_from_doc_id(doc_id)
+            for doc_id in unresolved_doc_ids
+        }
+        unique_resolved_symbol_ids = list(dict.fromkeys(symbol_id_by_doc_id.values()))
+        if not unique_resolved_symbol_ids:
+            return by_doc_id
+
+        symbol_placeholders = ", ".join(["?"] * len(unique_resolved_symbol_ids))
+        symbol_rows = self.conn.execute(
+            f"""
+            SELECT s.symbol_id, f.path, s.content, e.granularity_level, s.start_line, s.end_line, s.parent_id
+            FROM symbols s
+            LEFT JOIN files f ON f.file_id = s.file_id
+            LEFT JOIN entities e ON e.entity_id = s.symbol_id
+            WHERE s.symbol_id IN ({symbol_placeholders})
+            """,
+            unique_resolved_symbol_ids,
+        ).fetchall()
+        symbol_payload = {
+            str(symbol_id): {
+                "file": file_path or "",
+                "symbol_id": str(symbol_id),
+                "content": content or "",
+                "granularity_level": granularity_level,
+                "entity_ids": [str(symbol_id)],
+                "span_start": span_start,
+                "span_end": span_end,
+                "parent_symbol_id": parent_symbol_id,
+                "doc_type": "symbol",
+            }
+            for symbol_id, file_path, content, granularity_level, span_start, span_end, parent_symbol_id in symbol_rows
+        }
+
+        for doc_id, symbol_id in symbol_id_by_doc_id.items():
+            payload = symbol_payload.get(symbol_id)
+            if payload is None:
+                continue
+            by_doc_id[doc_id] = {
+                "doc_id": doc_id,
+                "file": payload["file"],
+                "symbol_id": payload["symbol_id"],
+                "content": payload["content"],
+                "granularity_level": payload["granularity_level"],
+                "entity_ids": payload["entity_ids"],
+                "span_start": payload["span_start"],
+                "span_end": payload["span_end"],
+                "parent_symbol_id": payload["parent_symbol_id"],
+                "doc_type": payload["doc_type"],
+            }
+
+        return by_doc_id
+
     def get_document_candidate_data(self, doc_id: str) -> Optional[dict[str, Any]]:
         """
         Resolve retrieval-facing metadata for a stored document.
 
         Supports both chunk-based IDs (preferred) and legacy symbol IDs.
         """
-        if self.conn is None:
-            self.connect()
-
-        chunk_row = self.conn.execute(
-            """
-            SELECT file_path, content, granularity_level, entity_ids, span_start, span_end
-            FROM chunks
-            WHERE chunk_id = ?
-            """,
-            [doc_id],
-        ).fetchone()
-        if chunk_row:
-            entity_ids = json.loads(chunk_row[3]) if chunk_row[3] else []
-            symbol_id = entity_ids[0] if entity_ids else None
-            parent_symbol_id = None
-            if symbol_id:
-                try:
-                    parent_symbol_id = self.conn.execute(
-                        "SELECT parent_id FROM symbols WHERE symbol_id = ?",
-                        [symbol_id],
-                    ).fetchone()
-                    parent_symbol_id = parent_symbol_id[0] if parent_symbol_id else None
-                except Exception:
-                    parent_symbol_id = None
-            return {
-                "doc_id": doc_id,
-                "file": chunk_row[0],
-                "symbol_id": symbol_id,
-                "content": chunk_row[1],
-                "granularity_level": chunk_row[2],
-                "entity_ids": entity_ids,
-                "span_start": chunk_row[4],
-                "span_end": chunk_row[5],
-                "parent_symbol_id": parent_symbol_id,
-                "doc_type": "chunk",
-            }
-
-        symbol_id = doc_id.split(":", 1)[1] if ":" in doc_id else doc_id
-        symbol_row = self.conn.execute(
-            """
-            SELECT f.path, s.content, e.granularity_level, s.start_line, s.end_line, s.parent_id
-            FROM symbols s
-            LEFT JOIN files f ON f.file_id = s.file_id
-            LEFT JOIN entities e ON e.entity_id = s.symbol_id
-            WHERE s.symbol_id = ?
-            """,
-            [symbol_id],
-        ).fetchone()
-        if symbol_row:
-            return {
-                "doc_id": doc_id,
-                "file": symbol_row[0] or "",
-                "symbol_id": symbol_id,
-                "content": symbol_row[1] or "",
-                "granularity_level": symbol_row[2],
-                "entity_ids": [symbol_id],
-                "span_start": symbol_row[3],
-                "span_end": symbol_row[4],
-                "parent_symbol_id": symbol_row[5],
-                "doc_type": "symbol",
-            }
-
-        return None
+        return self.get_document_candidate_data_batch([doc_id]).get(doc_id)
 
     def delete_file_data(self, file_path: str) -> None:
         """Delete all index rows associated with a file path."""

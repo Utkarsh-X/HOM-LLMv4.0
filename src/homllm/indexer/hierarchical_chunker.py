@@ -54,6 +54,7 @@ class HierarchicalChunker:
             config: Chunking configuration with level toggles
         """
         self.config = config
+        self.chunk_max_lines = max(1, int(config.chunk_max_lines))
     
     def create_chunks(
         self,
@@ -122,51 +123,60 @@ class HierarchicalChunker:
         - Symbol body normalized to match injected nesting depth
         """
         chunks = []
+        chunk_idx = 0
         symbol_by_id = {s.id: s for s in context.symbols}
 
-        for idx, symbol in enumerate(context.symbols):
+        for symbol in context.symbols:
             # Skip very small symbols (less than 2 lines)
             if symbol.end_line - symbol.start_line < 2:
                 continue
 
-            # Extract symbol content
-            start_idx = max(0, symbol.start_line - 1)
-            end_idx = min(len(context.lines), symbol.end_line)
-            raw_content = "\n".join(context.lines[start_idx:end_idx])
-            
             # Build scope-aware fine chunk to avoid orphaned method/function bodies.
             scope_chain = self._build_scope_chain(symbol, symbol_by_id)
-            chunk_parts = [f"# File: {context.file_path}", ""]
+            chunk_prefix = [f"# File: {context.file_path}", ""]
             
             for depth, parent in enumerate(scope_chain):
                 scope_line = self._get_scope_signature(parent)
-                chunk_parts.append(self._indent_content(scope_line, depth))
-            
-            normalized_content = self._normalize_symbol_content(raw_content)
-            chunk_parts.append(self._indent_content(normalized_content, len(scope_chain)))
-            chunk_content = "\n".join(chunk_parts)
-            
-            # Find linked entity IDs
-            linked_entities = self._find_linked_entities(
+                chunk_prefix.append(self._indent_content(scope_line, depth))
+            chunk_prefix = self._fit_fine_prefix(chunk_prefix)
+
+            max_body_lines = max(1, self.chunk_max_lines - len(chunk_prefix))
+            for segment_start, segment_end in self._iter_line_windows(
                 symbol.start_line,
                 symbol.end_line,
-                context.entities,
-            )
-            
-            chunk = ChunkInfo(
-                chunk_id=self._compute_chunk_id(
-                    context.file_path,
-                    GranularityLevel.FINE.value,
-                    idx,
-                ),
-                file_path=context.file_path,
-                content=chunk_content,
-                granularity_level=GranularityLevel.FINE.value,
-                span_start=symbol.start_line,
-                span_end=symbol.end_line,
-                entity_ids=tuple(linked_entities),
-            )
-            chunks.append(chunk)
+                max_lines=max_body_lines,
+            ):
+                start_idx = max(0, segment_start - 1)
+                end_idx = min(len(context.lines), segment_end)
+                raw_segment = "\n".join(context.lines[start_idx:end_idx])
+                normalized_content = self._normalize_symbol_content(raw_segment)
+
+                chunk_parts = list(chunk_prefix)
+                chunk_parts.append(
+                    self._indent_content(normalized_content, len(scope_chain))
+                )
+                chunk_content = "\n".join(chunk_parts)
+
+                linked_entities = self._find_linked_entities(
+                    segment_start,
+                    segment_end,
+                    context.entities,
+                )
+                chunk = ChunkInfo(
+                    chunk_id=self._compute_chunk_id(
+                        context.file_path,
+                        GranularityLevel.FINE.value,
+                        chunk_idx,
+                    ),
+                    file_path=context.file_path,
+                    content=chunk_content,
+                    granularity_level=GranularityLevel.FINE.value,
+                    span_start=segment_start,
+                    span_end=segment_end,
+                    entity_ids=tuple(linked_entities),
+                )
+                chunks.append(chunk)
+                chunk_idx += 1
 
         return chunks
     
@@ -259,33 +269,33 @@ class HierarchicalChunker:
             if class_symbol.kind.value != "class":
                 continue
             
-            # Extract the entire class
-            start_idx = max(0, class_symbol.start_line - 1)
-            end_idx = min(len(context.lines), class_symbol.end_line)
-            chunk_content = "\n".join(context.lines[start_idx:end_idx])
-            
-            # Find linked entities
-            linked_entities = self._find_linked_entities(
+            for segment_start, segment_end in self._iter_line_windows(
                 class_symbol.start_line,
                 class_symbol.end_line,
-                context.entities,
-            )
-            
-            chunk = ChunkInfo(
-                chunk_id=self._compute_chunk_id(
-                    context.file_path,
-                    GranularityLevel.MEDIUM.value,
-                    chunk_idx,
-                ),
-                file_path=context.file_path,
-                content=chunk_content,
-                granularity_level=GranularityLevel.MEDIUM.value,
-                span_start=class_symbol.start_line,
-                span_end=class_symbol.end_line,
-                entity_ids=tuple(linked_entities),
-            )
-            chunks.append(chunk)
-            chunk_idx += 1
+            ):
+                start_idx = max(0, segment_start - 1)
+                end_idx = min(len(context.lines), segment_end)
+                chunk_content = "\n".join(context.lines[start_idx:end_idx])
+                linked_entities = self._find_linked_entities(
+                    segment_start,
+                    segment_end,
+                    context.entities,
+                )
+                chunk = ChunkInfo(
+                    chunk_id=self._compute_chunk_id(
+                        context.file_path,
+                        GranularityLevel.MEDIUM.value,
+                        chunk_idx,
+                    ),
+                    file_path=context.file_path,
+                    content=chunk_content,
+                    granularity_level=GranularityLevel.MEDIUM.value,
+                    span_start=segment_start,
+                    span_end=segment_end,
+                    entity_ids=tuple(linked_entities),
+                )
+                chunks.append(chunk)
+                chunk_idx += 1
         
         # Group standalone symbols by proximity
         if standalone_symbols:
@@ -298,29 +308,33 @@ class HierarchicalChunker:
                 start_line = min(s.start_line for s in section)
                 end_line = max(s.end_line for s in section)
                 
-                start_idx = max(0, start_line - 1)
-                end_idx = min(len(context.lines), end_line)
-                chunk_content = "\n".join(context.lines[start_idx:end_idx])
-                
-                linked_entities = self._find_linked_entities(
-                    start_line, end_line, context.entities
-                )
-                
-                chunk = ChunkInfo(
-                    chunk_id=self._compute_chunk_id(
-                        context.file_path,
-                        GranularityLevel.MEDIUM.value,
-                        chunk_idx,
-                    ),
-                    file_path=context.file_path,
-                    content=chunk_content,
-                    granularity_level=GranularityLevel.MEDIUM.value,
-                    span_start=start_line,
-                    span_end=end_line,
-                    entity_ids=tuple(linked_entities),
-                )
-                chunks.append(chunk)
-                chunk_idx += 1
+                for segment_start, segment_end in self._iter_line_windows(
+                    start_line,
+                    end_line,
+                ):
+                    start_idx = max(0, segment_start - 1)
+                    end_idx = min(len(context.lines), segment_end)
+                    chunk_content = "\n".join(context.lines[start_idx:end_idx])
+
+                    linked_entities = self._find_linked_entities(
+                        segment_start, segment_end, context.entities
+                    )
+
+                    chunk = ChunkInfo(
+                        chunk_id=self._compute_chunk_id(
+                            context.file_path,
+                            GranularityLevel.MEDIUM.value,
+                            chunk_idx,
+                        ),
+                        file_path=context.file_path,
+                        content=chunk_content,
+                        granularity_level=GranularityLevel.MEDIUM.value,
+                        span_start=segment_start,
+                        span_end=segment_end,
+                        entity_ids=tuple(linked_entities),
+                    )
+                    chunks.append(chunk)
+                    chunk_idx += 1
         
         return chunks
     
@@ -352,26 +366,32 @@ class HierarchicalChunker:
         if not summary_parts:
             return []
         
-        chunk_content = "\n".join(summary_parts)
-        
-        # All entities are linked to coarse chunk
+        summary_lines = "\n".join(summary_parts).split("\n")
+
+        # All entities are linked to coarse chunks.
         all_entity_ids = [e.entity_id for e in context.entities]
-        
-        chunk = ChunkInfo(
-            chunk_id=self._compute_chunk_id(
-                context.file_path,
-                GranularityLevel.COARSE.value,
-                0,
-            ),
-            file_path=context.file_path,
-            content=chunk_content,
-            granularity_level=GranularityLevel.COARSE.value,
-            span_start=1,
-            span_end=len(context.lines),
-            entity_ids=tuple(all_entity_ids),
-        )
-        
-        return [chunk]
+        chunks: list[ChunkInfo] = []
+        for idx, offset in enumerate(range(0, len(summary_lines), self.chunk_max_lines)):
+            segment_lines = summary_lines[offset : offset + self.chunk_max_lines]
+            chunk_content = "\n".join(segment_lines).rstrip()
+            if not chunk_content:
+                continue
+            chunk = ChunkInfo(
+                chunk_id=self._compute_chunk_id(
+                    context.file_path,
+                    GranularityLevel.COARSE.value,
+                    idx,
+                ),
+                file_path=context.file_path,
+                content=chunk_content,
+                granularity_level=GranularityLevel.COARSE.value,
+                span_start=1,
+                span_end=len(context.lines),
+                entity_ids=tuple(all_entity_ids),
+            )
+            chunks.append(chunk)
+
+        return chunks
     
     def _extract_module_docstring(self, context: FileContext) -> Optional[str]:
         """
@@ -451,3 +471,40 @@ class HierarchicalChunker:
             groups.append(current_group)
         
         return groups
+
+    def _iter_line_windows(
+        self,
+        start_line: int,
+        end_line: int,
+        max_lines: Optional[int] = None,
+    ):
+        """Yield deterministic contiguous line windows capped by max_lines."""
+        window = max(1, int(max_lines if max_lines is not None else self.chunk_max_lines))
+        cursor = max(1, int(start_line))
+        final = max(cursor, int(end_line))
+        while cursor <= final:
+            segment_end = min(final, cursor + window - 1)
+            yield cursor, segment_end
+            cursor = segment_end + 1
+
+    def _fit_fine_prefix(self, prefix_lines: list[str]) -> list[str]:
+        """Trim fine-chunk prefix so at least one body line fits inside chunk_max_lines."""
+        expanded_prefix: list[str] = []
+        for line in prefix_lines:
+            expanded_prefix.extend(str(line).split("\n"))
+
+        max_prefix_lines = max(0, self.chunk_max_lines - 1)
+        if len(expanded_prefix) <= max_prefix_lines:
+            return expanded_prefix
+        if max_prefix_lines == 0:
+            return []
+
+        header = expanded_prefix[0] if expanded_prefix else ""
+        scopes = [line for line in expanded_prefix[1:] if line]
+        scope_budget = max(0, max_prefix_lines - 1)
+        kept_scopes = scopes[-scope_budget:] if scope_budget > 0 else []
+        fitted = [header]
+        fitted.extend(kept_scopes)
+        if len(fitted) > max_prefix_lines:
+            fitted = fitted[-max_prefix_lines:]
+        return fitted
