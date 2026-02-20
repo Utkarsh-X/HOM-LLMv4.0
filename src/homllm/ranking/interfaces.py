@@ -41,6 +41,8 @@ class RankMetadata:
     candidate_count: int
     set_optimization: dict | None = None
     signal_profile: dict | None = None
+    ranking_concentration: dict | None = None
+    ranking_geometry: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -74,6 +76,9 @@ class RankConfig:
     w_bm25: float
     w_dense: float
     w_name: float
+    # Stage 2 geometry controls (fixed, bounded, deterministic)
+    rerank_alpha: float = 0.32
+    struct_gamma: float = 0.05
     # Structural bonus weights (all from config, no hardcoded values)
     struct_entrypoint_bonus: float = 0.1
     struct_decorator_bonus: float = 0.05
@@ -110,6 +115,7 @@ class RankConfig:
     set_opt_w_coverage: float = 0.8
     set_opt_w_redundancy: float = 0.5
     set_opt_w_dispersion: float = 0.4
+    concentration_top_k: int = 10
 
 
 class Reranker(Protocol):

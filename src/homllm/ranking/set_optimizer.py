@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass, field
 import logging
+import math
 from typing import Optional
 
 from homllm.retrieval.interfaces import Candidate
@@ -36,6 +38,12 @@ class SetOptimizationMetrics:
     blocks_selected: int
     marginal_gain_sequence: list[float]
     weight_vector_used: dict[str, float]
+    redundancy_penalty_mean: float = 0.0
+    dispersion_bonus_mean: float = 0.0
+    objective_term_contributions: dict[str, float] = field(default_factory=dict)
+    topK_file_entropy_post_selection: float | None = None
+    topK_unique_file_count_post_selection: int | None = None
+    topK_max_file_block_ratio_post_selection: float | None = None
     marginal_gain_breakdown: list[dict[str, float]] = field(default_factory=list)
     base_weight_vector: dict[str, float] | None = None
     effective_weight_vector: dict[str, float] | None = None
@@ -50,10 +58,12 @@ class SetOptimizer:
         token_budget: int,
         weights: SetObjectiveWeights,
         callgraph: Optional[dict] = None,
+        concentration_top_k: int = 10,
     ) -> None:
         self.token_budget = token_budget
         self.weights = weights
         self.callgraph = callgraph or {}
+        self.concentration_top_k = max(int(concentration_top_k), 1)
 
     def select(
         self,
@@ -83,6 +93,8 @@ class SetOptimizer:
         budget_left = self.token_budget
         marginal_gains: list[float] = []
         marginal_gain_breakdown: list[dict[str, float]] = []
+        accepted_redundancy_penalties: list[float] = []
+        accepted_dispersion_bonuses: list[float] = []
 
         p50_tokens = self._p50_candidate_tokens(candidates)
         max_candidates = max(
@@ -100,6 +112,7 @@ class SetOptimizer:
         while remaining:
             best_gain = 0.0
             best_idx = None
+            best_metrics = None
 
             current_metrics = self._compute_metrics(
                 selected,
@@ -133,8 +146,12 @@ class SetOptimizer:
                         * tentative_metrics["structural_coherence"]
                     )
                     coverage_contribution = self.weights.coverage * tentative_metrics["coverage"]
-                    redundancy_penalty = self.weights.redundancy * tentative_metrics["redundancy"]
-                    dispersion_penalty = self.weights.dispersion * tentative_metrics["dispersion"]
+                    redundancy_penalty = (
+                        self.weights.redundancy * tentative_metrics["redundancy_penalty"]
+                    )
+                    dispersion_bonus = (
+                        self.weights.dispersion * tentative_metrics["dispersion_bonus"]
+                    )
                     marginal_gain_breakdown.append(
                         {
                             "gain": gain,
@@ -142,12 +159,12 @@ class SetOptimizer:
                             "coverage": coverage_contribution,
                             "structural": structural_contribution,
                             "redundancy_penalty": redundancy_penalty,
-                            "dispersion_penalty": dispersion_penalty,
+                            "dispersion_bonus": dispersion_bonus,
                         }
                     )
                     logger.debug(
                         "[SET_OPT_GAIN] current_obj=%.6f tentative_obj=%.6f gain=%.6f "
-                        "relevance=%.6f structural=%.6f coverage=%.6f redundancy_penalty=%.6f dispersion_penalty=%.6f",
+                        "relevance=%.6f structural=%.6f coverage=%.6f redundancy_penalty=%.6f dispersion_bonus=%.6f",
                         current_obj,
                         tentative_obj,
                         gain,
@@ -155,18 +172,26 @@ class SetOptimizer:
                         structural_contribution,
                         coverage_contribution,
                         redundancy_penalty,
-                        dispersion_penalty,
+                        dispersion_bonus,
                     )
 
                 if gain > best_gain:
                     best_gain = gain
                     best_idx = idx
+                    best_metrics = tentative_metrics
 
             if best_idx is None or best_gain <= 0:
                 break
 
             chosen = remaining.pop(best_idx)
             selected.append(chosen)
+            if best_metrics:
+                accepted_redundancy_penalties.append(
+                    self.weights.redundancy * best_metrics["redundancy_penalty"]
+                )
+                accepted_dispersion_bonuses.append(
+                    self.weights.dispersion * best_metrics["dispersion_bonus"]
+                )
             budget_left -= self._estimate_tokens(chosen)
             if len(marginal_gains) < 10:
                 marginal_gains.append(best_gain)
@@ -195,13 +220,47 @@ class SetOptimizer:
         final_obj = self._objective(final_metrics, self.weights)
         distinct_files = len({c.file for c in selected if c.file}) if selected else 0
         weight_vector = self._weights_dict()
+        concentration_post = self._topk_file_concentration_metrics(
+            selected,
+            self.concentration_top_k,
+        )
+        objective_term_contributions = {
+            "relevance": self.weights.relevance * final_metrics["relevance"],
+            "redundancy_penalty": self.weights.redundancy
+            * final_metrics["redundancy_penalty"],
+            "dispersion_bonus": self.weights.dispersion
+            * final_metrics["dispersion_bonus"],
+            "total_objective": final_obj,
+        }
         metrics = SetOptimizationMetrics(
             objective=final_obj,
             relevance=final_metrics["relevance"],
             structural_coherence=final_metrics["structural_coherence"],
             coverage=final_metrics["coverage"],
-            redundancy=final_metrics["redundancy"],
-            dispersion=final_metrics["dispersion"],
+            redundancy=final_metrics["redundancy_penalty"],
+            dispersion=final_metrics["dispersion_bonus"],
+            redundancy_penalty_mean=(
+                sum(accepted_redundancy_penalties)
+                / len(accepted_redundancy_penalties)
+                if accepted_redundancy_penalties
+                else 0.0
+            ),
+            dispersion_bonus_mean=(
+                sum(accepted_dispersion_bonuses)
+                / len(accepted_dispersion_bonuses)
+                if accepted_dispersion_bonuses
+                else 0.0
+            ),
+            objective_term_contributions=objective_term_contributions,
+            topK_file_entropy_post_selection=concentration_post[
+                "topK_file_entropy"
+            ],
+            topK_unique_file_count_post_selection=concentration_post[
+                "topK_unique_file_count"
+            ],
+            topK_max_file_block_ratio_post_selection=concentration_post[
+                "max_file_block_ratio"
+            ],
             tokens_used=final_metrics["tokens_used"],
             blocks_selected=len(selected),
             marginal_gain_sequence=marginal_gains,
@@ -216,10 +275,8 @@ class SetOptimizer:
     def _objective(self, metrics: dict[str, float], weights: SetObjectiveWeights) -> float:
         return (
             weights.relevance * metrics["relevance"]
-            + weights.structural_coherence * metrics["structural_coherence"]
-            + weights.coverage * metrics["coverage"]
-            - weights.redundancy * metrics["redundancy"]
-            - weights.dispersion * metrics["dispersion"]
+            - weights.redundancy * metrics["redundancy_penalty"]
+            + weights.dispersion * metrics["dispersion_bonus"]
         )
 
     def _compute_metrics(
@@ -235,6 +292,8 @@ class SetOptimizer:
                 "relevance": 0.0,
                 "structural_coherence": 0.0,
                 "coverage": 0.0,
+                "redundancy_penalty": 0.0,
+                "dispersion_bonus": 0.0,
                 "redundancy": 0.0,
                 "dispersion": 0.0,
                 "tokens_used": 0.0,
@@ -243,16 +302,19 @@ class SetOptimizer:
         relevance = self._relevance(selected, relevance_map, max_candidates)
         structural_coherence = self._structural_coherence(selected)
         coverage = self._coverage(selected, concept_set, concept_hits)
-        redundancy = self._redundancy(selected)
-        dispersion = self._dispersion(selected)
+        redundancy_penalty = self._redundancy(selected)
+        dispersion_bonus = self._dispersion_bonus(selected)
         tokens_used = sum(self._estimate_tokens(c) for c in selected)
 
         return {
             "relevance": self._clamp01(relevance),
             "structural_coherence": self._clamp01(structural_coherence),
             "coverage": self._clamp01(coverage),
-            "redundancy": self._clamp01(redundancy),
-            "dispersion": self._clamp01(dispersion),
+            "redundancy_penalty": self._clamp01(redundancy_penalty),
+            "dispersion_bonus": self._clamp01(dispersion_bonus),
+            # Compatibility aliases for existing telemetry consumers.
+            "redundancy": self._clamp01(redundancy_penalty),
+            "dispersion": self._clamp01(dispersion_bonus),
             "tokens_used": float(tokens_used),
         }
 
@@ -304,24 +366,33 @@ class SetOptimizer:
         span_overlap = self._avg_span_overlap(selected)
         return min(1.0, 0.6 * span_overlap + 0.4 * symbol_dup)
 
-    def _dispersion(self, selected: list[Candidate]) -> float:
+    def _dispersion_bonus(self, selected: list[Candidate]) -> float:
         """
-        Concentration penalty (0..1): higher means more single-file dominance.
+        Soft dispersion bonus in [0, 1].
 
-        Used as a penalty term in the objective:
-        -dispersion_weight * concentration_penalty
-
-        Definition:
-        penalty = 1 - (distinct_files / selected_count)
+        Monotonic in both:
+        - unique file coverage ratio
+        - normalized file entropy
         """
         if not selected:
             return 0.0
         selected_count = len(selected)
-        distinct_files = len({c.file for c in selected if c.file})
-        if selected_count <= 1 or distinct_files <= 0:
+        file_keys = [
+            str(c.file) if c.file else f"__unknown__:{c.doc_id}"
+            for c in selected
+        ]
+        counts = Counter(file_keys)
+        distinct_files = len(counts)
+        if selected_count <= 0:
             return 0.0
-        ratio = distinct_files / selected_count
-        return self._clamp01(1.0 - ratio)
+        unique_ratio = distinct_files / float(selected_count)
+        if distinct_files <= 1:
+            entropy = 0.0
+        else:
+            probs = [cnt / float(selected_count) for cnt in counts.values()]
+            raw_entropy = -sum(p * math.log(p) for p in probs if p > 0.0)
+            entropy = raw_entropy / math.log(float(distinct_files))
+        return self._clamp01(0.5 * unique_ratio + 0.5 * entropy)
 
     def _avg_span_overlap(self, selected: list[Candidate]) -> float:
         overlaps = []
@@ -386,6 +457,40 @@ class SetOptimizer:
             "coverage": self.weights.coverage,
             "redundancy": self.weights.redundancy,
             "dispersion": self.weights.dispersion,
+        }
+
+    def _topk_file_concentration_metrics(
+        self,
+        selected: list[Candidate],
+        top_k: int,
+    ) -> dict[str, float | int]:
+        if not selected:
+            return {
+                "top_k": 0,
+                "topK_unique_file_count": 0,
+                "topK_file_entropy": 0.0,
+                "max_file_block_ratio": 0.0,
+            }
+        k = min(max(int(top_k), 1), len(selected))
+        subset = selected[:k]
+        file_keys = [
+            str(c.file) if c.file else f"__unknown__:{c.doc_id}"
+            for c in subset
+        ]
+        counts = Counter(file_keys)
+        unique_files = len(counts)
+        max_ratio = max(counts.values()) / float(k) if counts else 0.0
+        if unique_files <= 1:
+            entropy = 0.0
+        else:
+            probs = [cnt / float(k) for cnt in counts.values()]
+            raw_entropy = -sum(p * math.log(p) for p in probs if p > 0.0)
+            entropy = raw_entropy / math.log(float(unique_files))
+        return {
+            "top_k": k,
+            "topK_unique_file_count": unique_files,
+            "topK_file_entropy": self._clamp01(entropy),
+            "max_file_block_ratio": self._clamp01(max_ratio),
         }
 
     def _clamp01(self, value: float) -> float:

@@ -1,22 +1,17 @@
 """Ranking pipeline orchestrator."""
 
+from collections import Counter
 import logging
+import math
 import time
 from typing import Optional
 
 from homllm.ranking.dedup_structural import StructuralDeduplicator
-from homllm.ranking.confidence import (
-    compute_bm25_vector_disagreement,
-    compute_score_entropy,
-    compute_score_margin,
-)
-from homllm.ranking.adaptive_weights import compute_adaptive_weights
 from homllm.ranking.features import FeatureEnricher
 from homllm.ranking.fusion import ScoreFusion
 from homllm.ranking.graph_propagation import NeighborBoosting
 from homllm.ranking.interfaces import (
     DebugTrace,
-    FeatureVector,
     RankConfig,
     RankMetadata,
     RankingInput,
@@ -112,54 +107,27 @@ class RankingPipeline:
 
             # 4. Reranker (optional)
             rerank_scores: dict[str, float] = {}
+            reranked_doc_ids: set[str] = set()
             reranker_used = False
             reranker_unavailable = False
-            fire_reranker = True
+            reranker_contract_diag: dict[str, float | str] = {
+                "rerank_input_token_length": 0.0,
+                "truncation_rate": 0.0,
+                "instruction_variant": "none",
+                "raw_logit_mean": 0.0,
+                "raw_logit_std": 0.0,
+                "sigmoid_mean": 0.0,
+                "sigmoid_std": 0.0,
+            }
 
             if self.config.reranker_enabled and self.reranker:
-                if self.config.reranker_gating_enabled:
-                    ranked_for_conf = sorted(
-                        candidates,
-                        key=lambda c: base_scores.get(c.doc_id, 0.0),
-                        reverse=True,
-                    )
-                    top_k = self.config.reranker_gating_top_k
-                    scores_for_conf = [
-                        base_scores.get(c.doc_id, 0.0)
-                        for c in ranked_for_conf[:top_k]
-                    ]
-                    margin = compute_score_margin(scores_for_conf)
-                    entropy = compute_score_entropy(scores_for_conf)
-                    disagreement = compute_bm25_vector_disagreement(
-                        ranked_for_conf, top_k=top_k
-                    )
-                    fire_reranker = (
-                        len(scores_for_conf)
-                        >= self.config.reranker_gating_min_candidates
-                        and (
-                            margin < self.config.reranker_margin_threshold
-                            or entropy > self.config.reranker_entropy_threshold
-                            or disagreement
-                            > self.config.reranker_disagreement_threshold
-                        )
-                    )
-                    logger.debug(
-                        "Reranker gating margin=%.3f entropy=%.3f disagreement=%.3f fire=%s",
-                        margin,
-                        entropy,
-                        disagreement,
-                        fire_reranker,
-                    )
-
-            if self.config.reranker_enabled and self.reranker and fire_reranker:
                 if self.reranker.healthcheck():
                     try:
                         # Get top M candidates for reranking
                         top_m = min(self.config.reranker_top_m, len(candidates))
                         top_candidates = sorted(
                             candidates,
-                            key=lambda c: base_scores.get(c.doc_id, 0.0),
-                            reverse=True,
+                            key=lambda c: (-base_scores.get(c.doc_id, 0.0), c.doc_id),
                         )[:top_m]
 
                         # Extract documents
@@ -173,12 +141,17 @@ class RankingPipeline:
                         scores = self.reranker.batch_score(
                             input_data.query, documents
                         )
+                        if hasattr(self.reranker, "get_last_batch_diagnostics"):
+                            diag = self.reranker.get_last_batch_diagnostics()
+                            if isinstance(diag, dict):
+                                reranker_contract_diag.update(diag)
                         rerank_duration_ms = (time.perf_counter() - rerank_start) * 1000
                         print(f"[RERANK_PHASE] candidates_reranked={len(documents)} duration_ms={rerank_duration_ms:.1f}", flush=True)
 
                         # Map scores back to candidates
                         for candidate, score in zip(top_candidates, scores):
                             rerank_scores[candidate.doc_id] = score
+                            reranked_doc_ids.add(candidate.doc_id)
 
                         reranker_used = True
 
@@ -190,30 +163,21 @@ class RankingPipeline:
                     logger.warning("Reranker enabled but healthcheck failed.")
             else:
                 reranker_unavailable = not self.config.reranker_enabled
-                if self.config.reranker_enabled and not fire_reranker:
-                    logger.info("Reranker gated off for this query.")
 
             profile = None
             if self.config.phase2_enabled:
                 profile = compute_signal_profile(candidates, base_scores, distance_map)
 
-            if self.config.phase2_enabled and self.config.adaptive_weights_enabled and profile:
-                weight_profile = compute_adaptive_weights(
-                    self.config.w_base,
-                    self.config.w_struct,
-                    self.config.w_rerank,
-                    profile,
-                    reranker_used,
-                )
-                w_base = weight_profile.w_base
-                w_struct = weight_profile.w_struct
-                w_rerank = weight_profile.w_rerank
-            else:
-                w_base = self.config.w_base
-                w_struct = self.config.w_struct
-                w_rerank = self.config.w_rerank if reranker_used else 0.0
+            alpha = max(0.0, min(float(self.config.rerank_alpha), 0.35))
+            gamma = max(0.0, float(self.config.struct_gamma))
+            rerank_subset = [rerank_scores[doc_id] for doc_id in reranked_doc_ids]
+            rerank_mean = 0.0
+            rerank_std = 0.0
+            if rerank_subset:
+                rerank_mean = sum(rerank_subset) / float(len(rerank_subset))
+                rerank_std = math.sqrt(self._variance(rerank_subset))
 
-            # 5. Final fusion
+            # 5. Stage 2 geometry: bounded, zero-centered rerank refinement.
             scored_candidates: list[tuple[Candidate, float, DebugTrace]] = []
 
             for candidate in candidates:
@@ -223,14 +187,19 @@ class RankingPipeline:
 
                 base_score = base_scores.get(candidate.doc_id, 0.0)
                 rerank_score = rerank_scores.get(candidate.doc_id, 0.0)
+                rerank_delta = (
+                    rerank_score - rerank_mean
+                    if candidate.doc_id in reranked_doc_ids
+                    else 0.0
+                )
                 struct_bonus = self.fusion.compute_struct_bonus(
                     candidate_features, self.config
                 )
 
                 final_score = (
-                    w_base * base_score
-                    + w_rerank * rerank_score
-                    + w_struct * struct_bonus
+                    base_score
+                    + alpha * rerank_delta
+                    + gamma * struct_bonus
                 )
 
                 # Create debug trace
@@ -256,7 +225,7 @@ class RankingPipeline:
                     or profile.unique_files > 3
                 )
             ):
-                scored_candidates.sort(key=lambda x: x[1], reverse=True)
+                scored_candidates.sort(key=lambda x: (-x[1], x[0].doc_id))
                 seed_k = min(self.config.two_pass_seed_k, len(scored_candidates))
                 seed_map: dict[str, float] = {}
                 for candidate, score, _ in scored_candidates[:seed_k]:
@@ -293,9 +262,13 @@ class RankingPipeline:
                     struct_bonus = min(struct_bonus, self.config.struct_bonus_cap)
 
                     final_score = (
-                        w_base * trace.base_score
-                        + w_rerank * trace.rerank_score
-                        + w_struct * struct_bonus
+                        trace.base_score
+                        + (
+                            alpha * (trace.rerank_score - rerank_mean)
+                            if candidate.doc_id in reranked_doc_ids
+                            else 0.0
+                        )
+                        + gamma * struct_bonus
                     )
                     trace = DebugTrace(
                         candidate_id=trace.candidate_id,
@@ -310,12 +283,26 @@ class RankingPipeline:
 
                 scored_candidates = rescored
 
-            # 6. Sort by final score
-            scored_candidates.sort(key=lambda x: x[1], reverse=True)
+            geometry_metrics = self._compute_geometry_metrics(
+                scored_candidates=scored_candidates,
+                reranked_doc_ids=reranked_doc_ids,
+                rerank_mean=rerank_mean,
+                rerank_std=rerank_std,
+                alpha=alpha,
+            )
+            geometry_metrics.update(reranker_contract_diag)
+
+            # 6. Sort by final score with deterministic tie-break.
+            scored_candidates.sort(key=lambda x: (-x[1], x[0].doc_id))
 
             # 7. Deduplication
             ranked_candidates = [c for c, _, _ in scored_candidates]
             ranked_candidates = self.deduplicator.deduplicate(ranked_candidates)
+            concentration_pre = self._compute_file_concentration_metrics(
+                ranked_candidates,
+                self.config.concentration_top_k,
+            )
+            concentration_post = dict(concentration_pre)
 
             # Rebuild traces in ranked order
             trace_map = {c.doc_id: t for c, _, t in scored_candidates}
@@ -344,6 +331,7 @@ class RankingPipeline:
                     token_budget=self.config.set_opt_token_budget,
                     weights=weights,
                     callgraph=self.callgraph,
+                    concentration_top_k=self.config.concentration_top_k,
                 )
                 selected, set_opt_metrics = optimizer.select(
                     ranked_candidates,
@@ -351,6 +339,10 @@ class RankingPipeline:
                     query_concepts=query_concepts,
                 )
                 ranked_candidates = selected
+                concentration_post = self._compute_file_concentration_metrics(
+                    ranked_candidates,
+                    self.config.concentration_top_k,
+                )
                 debug_traces = tuple(
                     trace_map[c.doc_id]
                     for c in ranked_candidates
@@ -375,6 +367,10 @@ class RankingPipeline:
                         relevance_map=relevance_map,
                     )
                     ranked_candidates = selected
+                    concentration_post = self._compute_file_concentration_metrics(
+                        ranked_candidates,
+                        self.config.concentration_top_k,
+                    )
                     debug_traces = tuple(
                         trace_map[c.doc_id]
                         for c in ranked_candidates
@@ -390,6 +386,15 @@ class RankingPipeline:
                 candidate_count=len(ranked_candidates),
                 set_optimization=set_opt_metrics.__dict__ if set_opt_metrics else None,
                 signal_profile=profile.__dict__ if profile else None,
+                ranking_concentration={
+                    "top_k": concentration_pre["top_k"],
+                    "topK_unique_file_count": concentration_pre["topK_unique_file_count"],
+                    "topK_file_entropy": concentration_pre["topK_file_entropy"],
+                    "max_file_block_ratio": concentration_pre["max_file_block_ratio"],
+                    "pre_selection": concentration_pre,
+                    "post_selection": concentration_post,
+                },
+                ranking_geometry=geometry_metrics,
             )
 
             return RankingOutput(
@@ -411,3 +416,126 @@ class RankingPipeline:
                     candidate_count=0,
                 ),
             )
+
+    @staticmethod
+    def _variance(values: list[float]) -> float:
+        if not values:
+            return 0.0
+        mean = sum(values) / float(len(values))
+        return sum((v - mean) ** 2 for v in values) / float(len(values))
+
+    @classmethod
+    def _compute_geometry_metrics(
+        cls,
+        scored_candidates,
+        reranked_doc_ids: set[str],
+        rerank_mean: float,
+        rerank_std: float,
+        alpha: float,
+    ) -> dict[str, float]:
+        if not scored_candidates:
+            return {
+                "alpha_value": float(alpha),
+                "rerank_mean": float(rerank_mean),
+                "rerank_std": float(rerank_std),
+                "rerank_delta_min": 0.0,
+                "rerank_delta_max": 0.0,
+                "base_variance": 0.0,
+                "rerank_variance": 0.0,
+                "rerank_delta_variance": 0.0,
+                "final_score_variance": 0.0,
+                "mean_abs_alpha_rerank_delta": 0.0,
+                "rerank_delta_variance_contribution_percent": 0.0,
+                "rerank_contribution_percent": 0.0,
+            }
+
+        base_values: list[float] = []
+        rerank_values_subset: list[float] = []
+        rerank_delta_subset: list[float] = []
+        alpha_delta_all: list[float] = []
+        final_values: list[float] = []
+
+        for candidate, final_score, trace in scored_candidates:
+            base_values.append(float(trace.base_score))
+            final_values.append(float(final_score))
+            if candidate.doc_id in reranked_doc_ids:
+                rerank_values_subset.append(float(trace.rerank_score))
+                rerank_delta = float(trace.rerank_score) - float(rerank_mean)
+                rerank_delta_subset.append(rerank_delta)
+                alpha_delta_all.append(float(alpha) * rerank_delta)
+            else:
+                alpha_delta_all.append(0.0)
+
+        base_variance = cls._variance(base_values)
+        rerank_variance = cls._variance(rerank_values_subset)
+        rerank_delta_variance = cls._variance(rerank_delta_subset)
+        final_variance = cls._variance(final_values)
+        alpha_delta_variance = cls._variance(alpha_delta_all)
+        rerank_delta_min = min(rerank_delta_subset) if rerank_delta_subset else 0.0
+        rerank_delta_max = max(rerank_delta_subset) if rerank_delta_subset else 0.0
+        mean_abs_alpha_rerank_delta = (
+            sum(abs(v) for v in alpha_delta_all) / float(len(alpha_delta_all))
+            if alpha_delta_all
+            else 0.0
+        )
+        rerank_contribution_percent = (
+            (alpha_delta_variance / final_variance) * 100.0
+            if final_variance > 0.0
+            else 0.0
+        )
+
+        return {
+            "alpha_value": float(alpha),
+            "rerank_mean": float(rerank_mean),
+            "rerank_std": float(rerank_std),
+            "rerank_delta_min": float(rerank_delta_min),
+            "rerank_delta_max": float(rerank_delta_max),
+            "base_variance": float(base_variance),
+            "rerank_variance": float(rerank_variance),
+            "rerank_delta_variance": float(rerank_delta_variance),
+            "final_score_variance": float(final_variance),
+            "mean_abs_alpha_rerank_delta": float(mean_abs_alpha_rerank_delta),
+            "rerank_delta_variance_contribution_percent": float(rerank_contribution_percent),
+            "rerank_contribution_percent": float(rerank_contribution_percent),
+        }
+
+    @staticmethod
+    def _compute_file_concentration_metrics(
+        candidates,
+        top_k: int,
+    ) -> dict[str, float | int]:
+        if not candidates:
+            return {
+                "top_k": 0,
+                "topK_unique_file_count": 0,
+                "topK_file_entropy": 0.0,
+                "max_file_block_ratio": 0.0,
+            }
+
+        k = min(max(int(top_k), 1), len(candidates))
+        top = list(candidates[:k])
+        files = [str(c.file) for c in top if getattr(c, "file", None)]
+        if not files:
+            return {
+                "top_k": k,
+                "topK_unique_file_count": 0,
+                "topK_file_entropy": 0.0,
+                "max_file_block_ratio": 0.0,
+            }
+
+        counts = Counter(files)
+        unique_files = len(counts)
+        max_file_block_ratio = max(counts.values()) / float(k)
+        if unique_files <= 1:
+            entropy = 0.0
+        else:
+            probs = [cnt / float(k) for cnt in counts.values()]
+            raw_entropy = -sum(p * math.log(p) for p in probs if p > 0.0)
+            entropy = raw_entropy / math.log(float(unique_files))
+
+        return {
+            "top_k": k,
+            "topK_unique_file_count": unique_files,
+            "topK_file_entropy": entropy,
+            "max_file_block_ratio": max_file_block_ratio,
+        }
