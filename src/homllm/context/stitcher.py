@@ -11,6 +11,7 @@ class ContextStitcher(Stitcher):
         blocks: list[AllocatedBlock],
         query: str,
         ordering: str = "structural_first",
+        preserve_order: bool = False,
     ) -> str:
         """
         Stitch blocks into final context text.
@@ -30,7 +31,9 @@ class ContextStitcher(Stitcher):
         context_parts = [f"# Query: {query}\n"]
 
         # 2-5. Order blocks
-        if ordering == "structural_first":
+        if preserve_order:
+            sorted_blocks = list(blocks)
+        elif ordering == "structural_first":
             # Sort by structural priority, then by file/line
             sorted_blocks = sorted(
                 blocks,

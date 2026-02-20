@@ -4,7 +4,7 @@ from homllm.context.interfaces import ContextBlock
 
 
 class ContextDeduplicator:
-    """Deduplicates context blocks by content similarity."""
+    """Deduplicates context blocks by structural/content similarity."""
 
     def deduplicate(
         self, blocks: list[ContextBlock], similarity_threshold: float = 0.9
@@ -17,7 +17,7 @@ class ContextDeduplicator:
             similarity_threshold: Threshold for considering blocks duplicates
         
         Returns:
-            Deduplicated list, keeping first occurrence
+            Deduplicated list preserving first-seen order
         """
         if not blocks:
             return []
@@ -45,7 +45,7 @@ class ContextDeduplicator:
                 deduplicated.append(block)
                 continue
 
-            # Keep the larger span to preserve coverage
+            # Keep both if spans/symbols clearly differ enough to preserve coverage.
             existing = deduplicated[overlapped_index]
             # If both blocks refer to distinct symbols, keep both to preserve granularity.
             if block.symbol_id and existing.symbol_id and block.symbol_id != existing.symbol_id:
@@ -58,10 +58,7 @@ class ContextDeduplicator:
             if smaller > 0 and larger / smaller >= 5:
                 seen_content[content_key] = block
                 deduplicated.append(block)
-                continue
-            if self._span_length(block) > self._span_length(existing):
-                deduplicated[overlapped_index] = block
-                seen_content[content_key] = block
+            # Else: duplicate overlap, drop later block to preserve ranking order.
 
         return deduplicated
 

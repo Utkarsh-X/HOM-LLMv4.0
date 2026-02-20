@@ -177,6 +177,7 @@ retrieval:
         coarse: { min: 1, max: 2 }
 
 ranking:
+  concentration_top_k: 10
   graph_proximity:
     max_depth: 4
     anchor_k: 5
@@ -213,6 +214,9 @@ ranking:
       threshold_disagreement: 0.5
       top_k: 50
       min_candidates: 3
+  geometry:
+    rerank_alpha: 0.32
+    struct_gamma: 0.05
   weights:
     w_base: 0.4
     w_rerank: 0.55
@@ -232,6 +236,7 @@ context:
   budget_mode: adaptive
   summarization_enabled: false
   ordering: "structural_first"
+  ranking_surface_lock_enabled: true
   structural_priority_multiplier: 1.5
   scoring_weights:
     w_semantic: 0.4

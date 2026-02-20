@@ -847,6 +847,8 @@ def main():
             reranker_unavailable=ranking_output.metadata.reranker_unavailable,
             set_optimization=ranking_output.metadata.set_optimization,
             signal_profile=ranking_output.metadata.signal_profile,
+            ranking_concentration=ranking_output.metadata.ranking_concentration,
+            ranking_geometry=ranking_output.metadata.ranking_geometry,
         )
 
         # Diagnostic-only candidate dump (no behavior changes).
@@ -880,6 +882,15 @@ def main():
             token_budget=context_artifact.token_budget,
             generation_reserve=context_config.generation_reserve_tokens,
             tokens_remaining=context_config.max_tokens - context_artifact.used_tokens,
+            ranking_surface_lock_enabled=context_artifact.provenance.get(
+                "ranking_surface_lock_enabled"
+            ),
+            ranking_order_preserved=context_artifact.provenance.get(
+                "ranking_order_preserved"
+            ),
+            context_reorder_count=context_artifact.provenance.get(
+                "context_reorder_count"
+            ),
             stage_counts=context_artifact.provenance.get("stage_counts"),
             drop_trace=(
                 context_artifact.provenance.get("context_drop_trace")

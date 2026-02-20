@@ -297,6 +297,7 @@ class Config(BaseModel):
         two_pass_cfg = rank_cfg.get("two_pass", {})
         mmr_cfg = rank_cfg.get("mmr_selection", {})
         set_opt_cfg = rank_cfg.get("set_optimization", {})
+        geometry_cfg = rank_cfg.get("geometry", {})
 
         struct_weights = weights_cfg.get("struct", {})
         return RankConfig(
@@ -309,6 +310,8 @@ class Config(BaseModel):
             w_bm25=weights_cfg.get("w_bm25", 0.4),
             w_dense=weights_cfg.get("w_dense", 0.4),
             w_name=weights_cfg.get("w_name", 0.2),
+            rerank_alpha=geometry_cfg.get("rerank_alpha", 0.32),
+            struct_gamma=geometry_cfg.get("struct_gamma", 0.05),
             struct_entrypoint_bonus=struct_weights.get("entrypoint_bonus", 0.1),
             struct_decorator_bonus=struct_weights.get("decorator_bonus", 0.05),
             struct_callgraph_bonus=struct_weights.get("callgraph_bonus", 0.05),
@@ -344,6 +347,7 @@ class Config(BaseModel):
             set_opt_w_coverage=set_opt_cfg.get("w_coverage", 0.8),
             set_opt_w_redundancy=set_opt_cfg.get("w_redundancy", 0.5),
             set_opt_w_dispersion=set_opt_cfg.get("w_dispersion", 0.4),
+            concentration_top_k=rank_cfg.get("concentration_top_k", 10),
         )
 
     def get_context_config(self) -> "ContextConfig":
@@ -387,6 +391,9 @@ class Config(BaseModel):
             coherence_same_file_bonus=ctx_cfg.get("coherence_same_file_bonus", 0.8),
             coherence_different_file_bonus=ctx_cfg.get(
                 "coherence_different_file_bonus", 0.5
+            ),
+            ranking_surface_lock_enabled=ctx_cfg.get(
+                "ranking_surface_lock_enabled", True
             ),
         )
 

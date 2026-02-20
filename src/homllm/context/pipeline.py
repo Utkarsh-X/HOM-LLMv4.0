@@ -12,10 +12,11 @@ from homllm.context.interfaces import (
     BudgetConfig,
     ContextArtifact,
     ContextConfig,
+    ScoredBlock,
 )
 from homllm.context.scorer import ContextBlockScorer
 from homllm.context.stitcher import ContextStitcher
-from homllm.ranking.interfaces import RankingOutput
+from homllm.ranking.interfaces import DebugTrace, RankingOutput
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +86,9 @@ class ContextPipeline:
         try:
             # 1. Assemble blocks from ranked candidates
             blocks = self.assembler.assemble(list(ranking_output.ranked_candidates))
+            ranking_surface_lock_enabled = bool(
+                getattr(self.config, "ranking_surface_lock_enabled", True)
+            )
 
             if not blocks:
                 # Zero candidates - return empty context
@@ -94,7 +98,13 @@ class ContextPipeline:
                     blocks=tuple(),
                     token_budget=self.config.max_tokens,
                     used_tokens=0,
-                    provenance={"query": query, "query_text": query},
+                    provenance={
+                        "query": query,
+                        "query_text": query,
+                        "ranking_surface_lock_enabled": ranking_surface_lock_enabled,
+                        "ranking_order_preserved": True,
+                        "context_reorder_count": 0,
+                    },
                     explain_trace=tuple(["No candidates found"]),
                 )
 
@@ -130,10 +140,16 @@ class ContextPipeline:
                 semantic_scores=semantic_scores,
             )
 
-            # 2. Score blocks
-            scored_blocks = self.scorer.score(
-                blocks, query, [], debug_trace_map
-            )
+            # 2. Build context scored blocks.
+            # Under authority lock, this is ranking-trace passthrough (no context rescoring).
+            if ranking_surface_lock_enabled:
+                scored_blocks = self._build_rank_locked_scored_blocks(
+                    blocks, debug_trace_map
+                )
+            else:
+                scored_blocks = self.scorer.score(
+                    blocks, query, [], debug_trace_map
+                )
 
             # Context integration profile: set-level geometry from scored blocks (ranking order).
             # Used only to modulate budget allocation while preserving order.
@@ -162,7 +178,7 @@ class ContextPipeline:
                     "semantic_score": sb.semantic_score,
                     "name_score": sb.name_score,
                 }
-                for sb in sorted(scored_blocks, key=lambda x: x.final_score, reverse=True)[:10]
+                for sb in scored_blocks[:10]
             ]
 
             # 3. Deduplicate
@@ -172,8 +188,9 @@ class ContextPipeline:
             stage_counts["dedup_blocks"] = len(unique_blocks)
             stage_file_histograms["dedup"] = _file_hist(unique_blocks)
             # Rebuild scored blocks with unique blocks only
+            unique_ids = {b.block_id for b in unique_blocks}
             unique_scored = [
-                sb for sb in scored_blocks if sb.block in unique_blocks
+                sb for sb in scored_blocks if sb.block.block_id in unique_ids
             ]
 
             # 4. Budget allocation
@@ -207,9 +224,22 @@ class ContextPipeline:
             stage_counts["allocated_blocks"] = len(allocated_blocks)
             stage_file_histograms["allocated"] = _file_hist([ab.block for ab in allocated_blocks])
 
+            ranking_ids = [block.block_id for block in blocks]
+            allocated_ids = [ab.block.block_id for ab in allocated_blocks]
+            context_reorder_count = self._count_reorders(ranking_ids, allocated_ids)
+            ranking_order_preserved = context_reorder_count == 0
+            if ranking_surface_lock_enabled and not ranking_order_preserved:
+                raise RuntimeError(
+                    "RANKING_AUTHORITY_LOCK_VIOLATION:"
+                    f"context_reorder_count={context_reorder_count}"
+                )
+
             # 5. Stitch final context
             context_text = self.stitcher.stitch(
-                allocated_blocks, query, self.config.ordering
+                allocated_blocks,
+                query,
+                self.config.ordering,
+                preserve_order=ranking_surface_lock_enabled,
             )
 
             # 6. Compute used tokens
@@ -217,15 +247,14 @@ class ContextPipeline:
 
             # 7. Build provenance
             scored_map = {sb.block.block_id: sb for sb in scored_blocks}
-            unique_ids = {b.block_id for b in unique_blocks}
-            allocated_ids = {ab.block.block_id for ab in allocated_blocks}
+            allocated_id_set = set(allocated_ids)
             drop_trace = []
             for block in blocks:
                 scored = scored_map.get(block.block_id)
                 reason = "kept"
                 if block.block_id not in unique_ids:
                     reason = "dedup"
-                elif block.block_id not in allocated_ids:
+                elif block.block_id not in allocated_id_set:
                     reason = "budget"
                 drop_trace.append(
                     {
@@ -248,6 +277,9 @@ class ContextPipeline:
             provenance = {
                 "query": query,
                 "query_text": query,
+                "ranking_surface_lock_enabled": ranking_surface_lock_enabled,
+                "ranking_order_preserved": ranking_order_preserved,
+                "context_reorder_count": context_reorder_count,
                 "stage_counts": stage_counts,
                 "stage_file_histograms": stage_file_histograms,
                 "scored_order_top10": scored_order_top10,
@@ -287,7 +319,7 @@ class ContextPipeline:
                     f"Context budget: {effective_context_budget}/{self.config.max_tokens} tokens (reserve={self.config.generation_reserve_tokens})",
                     f"Used {used_tokens} context tokens, {tokens_remaining_for_generation} remaining for generation",
                     f"Stages: ranked={stage_counts['ranked_candidates']} assembled={stage_counts['assembled_blocks']} scored={stage_counts['scored_blocks']} dedup={stage_counts['dedup_blocks']} allocated={stage_counts['allocated_blocks']}",
-                    f"Ordering: {self.config.ordering}",
+                    f"Ranking surface lock={ranking_surface_lock_enabled} preserved={ranking_order_preserved} reorders={context_reorder_count}",
                 ]
             )
 
@@ -302,6 +334,8 @@ class ContextPipeline:
             )
 
         except Exception as e:
+            if "RANKING_AUTHORITY_LOCK_VIOLATION" in str(e):
+                raise
             logger.error(f"Context assembly failed: {e}")
             # Return empty context on error
             return ContextArtifact(
@@ -313,3 +347,51 @@ class ContextPipeline:
                 provenance={"query": query, "query_text": query},
                 explain_trace=tuple([f"Error: {str(e)}"]),
             )
+
+    def _build_rank_locked_scored_blocks(
+        self,
+        blocks,
+        debug_trace_map: dict[str, DebugTrace],
+    ) -> list[ScoredBlock]:
+        scored: list[ScoredBlock] = []
+        for block in blocks:
+            trace = debug_trace_map.get(block.block_id)
+            semantic_score = float(trace.rerank_score) if trace else 0.0
+            name_score = (
+                float(trace.features.name_match_score)
+                if trace and trace.features
+                else 0.0
+            )
+            structural_priority = float(trace.struct_bonus) if trace else 0.0
+            final_score = float(trace.final_score) if trace else 0.0
+            scored.append(
+                ScoredBlock(
+                    block=block,
+                    semantic_score=semantic_score,
+                    name_score=name_score,
+                    structural_priority=structural_priority,
+                    novelty_score=0.0,
+                    coherence_score=0.0,
+                    final_score=final_score,
+                )
+            )
+        return scored
+
+    @staticmethod
+    def _count_reorders(source_ids: list[str], target_ids: list[str]) -> int:
+        if len(source_ids) <= 1 or len(target_ids) <= 1:
+            return 0
+        first_index: dict[str, int] = {}
+        for idx, doc_id in enumerate(source_ids):
+            if doc_id not in first_index:
+                first_index[doc_id] = idx
+        mapped = [first_index[doc_id] for doc_id in target_ids if doc_id in first_index]
+        if len(mapped) <= 1:
+            return 0
+        reorder_count = 0
+        previous = mapped[0]
+        for current in mapped[1:]:
+            if current < previous:
+                reorder_count += 1
+            previous = current
+        return reorder_count

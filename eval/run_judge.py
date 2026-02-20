@@ -48,6 +48,21 @@ METRIC_ORDER = [
     "overall_quality",
 ]
 
+SUPPORTED_PROVIDERS = {"openai", "gemini", "cerebras_sdk", "cerebras"}
+
+
+def normalize_provider_name(name: Optional[str]) -> str:
+    value = (name or "").strip().lower()
+    if value == "cerebras":
+        return "cerebras_sdk"
+    return value or "openai"
+
+
+def safe_filename_token(value: str) -> str:
+    token = re.sub(r"[^A-Za-z0-9._-]+", "_", (value or "").strip())
+    token = token.strip("._-")
+    return token or "unknown"
+
 
 # ------------------------------- IO HELPERS -------------------------------
 def read_json(path: Path) -> Dict:
@@ -180,26 +195,105 @@ class RateLimiter:
 class JudgeConfig:
     model: str
     api_key: str
-    provider: str = "openai"  # "openai" or "gemini"
+    provider: str = "openai"  # "openai" | "gemini" | "cerebras_sdk"
     base_url: Optional[str] = None
     requests_per_minute: int = 60  # Default: 60 RPM (1 per second)
+    temperature: float = 0.0
+    top_p: Optional[float] = None
+    max_completion_tokens: Optional[int] = None
+    stream: bool = False
+    reasoning_effort: Optional[str] = None
+    # Optional raw request-body fields forwarded to the OpenAI-compatible API.
+    # Example:
+    #   "extra_body": {"disable_reasoning": false, "clear_thinking": false}
+    extra_body: Optional[Dict[str, Any]] = None
 
 
-def load_judge_config(path: Path) -> JudgeConfig:
-    cfg = read_json(path)
+def _select_provider_cfg(raw_cfg: Dict[str, Any], provider_override: Optional[str]) -> Dict[str, Any]:
+    # New schema:
+    # {
+    #   "default_provider": "openai",
+    #   "providers": {"openai": {...}, "gemini": {...}, "cerebras_sdk": {...}}
+    # }
+    provider_blocks = raw_cfg.get("providers")
+    if isinstance(provider_blocks, dict):
+        chosen = normalize_provider_name(provider_override or raw_cfg.get("default_provider", "openai"))
+        if chosen not in SUPPORTED_PROVIDERS:
+            allowed = ", ".join(sorted(SUPPORTED_PROVIDERS))
+            raise ValueError(f"judge_config provider must be one of: {allowed}")
+
+        # Accept alias key "cerebras" in provider blocks.
+        section = provider_blocks.get(chosen)
+        if section is None and chosen == "cerebras_sdk":
+            section = provider_blocks.get("cerebras")
+        if section is None:
+            available = ", ".join(sorted(provider_blocks.keys()))
+            raise ValueError(
+                f"judge_config missing providers.{chosen} section. Available sections: {available}"
+            )
+        if not isinstance(section, dict):
+            raise ValueError(f"judge_config providers.{chosen} must be an object.")
+
+        merged = dict(section)
+        merged["provider"] = chosen
+        return merged
+
+    # Legacy flat schema fallback.
+    merged = dict(raw_cfg)
+    if provider_override:
+        merged["provider"] = provider_override
+    return merged
+
+
+def load_judge_config(path: Path, provider_override: Optional[str] = None) -> JudgeConfig:
+    raw_cfg = read_json(path)
+    cfg = _select_provider_cfg(raw_cfg, provider_override)
+
     model = cfg.get("model")
     api_key = cfg.get("api_key")
-    provider = cfg.get("provider", "openai")
+    provider = normalize_provider_name(cfg.get("provider", "openai"))
+    if provider not in SUPPORTED_PROVIDERS:
+        allowed = ", ".join(sorted(SUPPORTED_PROVIDERS))
+        raise ValueError(f"judge_config field 'provider' must be one of: {allowed}")
+    provider = normalize_provider_name(provider)
     base_url = cfg.get("base_url")
     requests_per_minute = cfg.get("requests_per_minute", 60)
+    temperature = cfg.get("temperature", 0.0)
+    top_p = cfg.get("top_p")
+    max_completion_tokens = cfg.get("max_completion_tokens")
+    stream = cfg.get("stream", False)
+    reasoning_effort = cfg.get("reasoning_effort")
+    extra_body = cfg.get("extra_body")
+    if extra_body is not None and not isinstance(extra_body, dict):
+        raise ValueError("judge_config.json field 'extra_body' must be an object if provided.")
+    if temperature is None:
+        temperature = 0.0
+    if not isinstance(temperature, (int, float)):
+        raise ValueError("judge_config.json field 'temperature' must be numeric if provided.")
+    if top_p is not None and not isinstance(top_p, (int, float)):
+        raise ValueError("judge_config.json field 'top_p' must be numeric if provided.")
+    if max_completion_tokens is not None and not isinstance(max_completion_tokens, int):
+        raise ValueError("judge_config.json field 'max_completion_tokens' must be an integer if provided.")
+    if not isinstance(stream, bool):
+        raise ValueError("judge_config.json field 'stream' must be boolean if provided.")
+    if reasoning_effort is not None and not isinstance(reasoning_effort, str):
+        raise ValueError("judge_config.json field 'reasoning_effort' must be a string if provided.")
     if not model or not api_key:
-        raise ValueError("judge_config.json must include 'model' and 'api_key'")
+        raise ValueError(
+            f"judge_config provider section '{provider}' must include 'model' and 'api_key'"
+        )
     return JudgeConfig(
         model=model, 
         api_key=api_key, 
         provider=provider, 
         base_url=base_url,
         requests_per_minute=requests_per_minute,
+        temperature=float(temperature),
+        top_p=float(top_p) if top_p is not None else None,
+        max_completion_tokens=max_completion_tokens,
+        stream=stream,
+        reasoning_effort=reasoning_effort,
+        extra_body=extra_body,
     )
 
 
@@ -266,6 +360,31 @@ def ensure_gemini_client(cfg: JudgeConfig):
             "google-genai package is required for Gemini judge. Install via `pip install google-genai`."
         ) from exc
     return genai.Client(api_key=cfg.api_key)
+
+
+def ensure_cerebras_client(cfg: JudgeConfig):
+    try:
+        from cerebras.cloud.sdk import Cerebras
+    except Exception as exc:
+        raise RuntimeError(
+            "cerebras-cloud-sdk package is required for cerebras_sdk judge provider. "
+            "Install via `pip install cerebras-cloud-sdk`."
+        ) from exc
+
+    client_kwargs: Dict[str, Any] = {"api_key": cfg.api_key}
+    if cfg.base_url:
+        client_kwargs["base_url"] = cfg.base_url
+    try:
+        return Cerebras(**client_kwargs)
+    except TypeError:
+        # Some SDK versions may not expose base_url; retry with required args only.
+        if "base_url" in client_kwargs:
+            sys.stderr.write(
+                "[WARN] Cerebras SDK constructor does not accept base_url; retrying without it.\n"
+            )
+            client_kwargs.pop("base_url", None)
+            return Cerebras(**client_kwargs)
+        raise
 
 
 def _extract_balanced_json_object(text: str) -> Optional[str]:
@@ -348,24 +467,38 @@ def _parse_judge_json(content: str) -> Dict:
     ) from last_error
 
 
-def call_judge_openai(client, cfg: JudgeConfig, messages: List[Dict[str, str]]) -> Dict:
-    completion = client.chat.completions.create(
-        model=cfg.model,
-        messages=messages,
-        temperature=0,
-        max_tokens=1500,
-        response_format={"type": "json_object"},
-    )
+def call_judge_openai(client, cfg: JudgeConfig, messages: List[Dict[str, str]]) -> Tuple[Dict, str]:
+    kwargs: Dict[str, Any] = {
+        "model": cfg.model,
+        "messages": messages,
+        "temperature": float(cfg.temperature),
+        "max_tokens": 1500,
+        "response_format": {"type": "json_object"},
+    }
+    if cfg.extra_body:
+        # OpenAI-compatible servers (and some OpenAI SDK versions) support `extra_body`.
+        kwargs["extra_body"] = cfg.extra_body
+
+    try:
+        completion = client.chat.completions.create(**kwargs)
+    except TypeError as exc:
+        # Fallback for OpenAI SDK versions that don't accept extra_body.
+        if "extra_body" in kwargs:
+            sys.stderr.write(
+                "[WARN] OpenAI client does not accept extra_body; retrying without it.\n"
+            )
+            kwargs.pop("extra_body", None)
+            completion = client.chat.completions.create(**kwargs)
+        else:
+            raise
     content = completion.choices[0].message.content
     if not content:
         raise RuntimeError("Judge model returned empty content.")
-    try:
-        return json.loads(content)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"Failed to parse judge output as JSON: {content}") from exc
+    used_model = getattr(completion, "model", None) or cfg.model
+    return _parse_judge_json(content), str(used_model)
 
 
-def call_judge_gemini(client, cfg: JudgeConfig, messages: List[Dict[str, str]]) -> Dict:
+def call_judge_gemini(client, cfg: JudgeConfig, messages: List[Dict[str, str]]) -> Tuple[Dict, str]:
     system_msg = next((m["content"] for m in messages if m["role"] == "system"), "")
     user_msg = next((m["content"] for m in messages if m["role"] == "user"), "")
     prompt = f"{system_msg}\n\n{user_msg}" if system_msg else user_msg
@@ -374,7 +507,7 @@ def call_judge_gemini(client, cfg: JudgeConfig, messages: List[Dict[str, str]]) 
         model=cfg.model,
         contents=prompt,
         config={
-            "temperature": 0,
+            "temperature": float(cfg.temperature),
             "max_output_tokens": 4000,
             "response_mime_type": "application/json",
         },
@@ -383,9 +516,14 @@ def call_judge_gemini(client, cfg: JudgeConfig, messages: List[Dict[str, str]]) 
     content = response.text if response.text else ""
     if not content:
         raise RuntimeError("Gemini judge returned empty content.")
+    used_model = (
+        getattr(response, "model", None)
+        or getattr(response, "model_version", None)
+        or cfg.model
+    )
 
     try:
-        return _parse_judge_json(content)
+        return _parse_judge_json(content), str(used_model)
     except Exception:
         # One strict retry with explicit format constraints.
         retry_prompt = (
@@ -397,7 +535,7 @@ def call_judge_gemini(client, cfg: JudgeConfig, messages: List[Dict[str, str]]) 
             model=cfg.model,
             contents=retry_prompt,
             config={
-                "temperature": 0,
+                "temperature": float(cfg.temperature),
                 "max_output_tokens": 4000,
                 "response_mime_type": "application/json",
             },
@@ -405,14 +543,71 @@ def call_judge_gemini(client, cfg: JudgeConfig, messages: List[Dict[str, str]]) 
         retry_text = retry.text if retry.text else ""
         if not retry_text:
             raise RuntimeError("Gemini judge returned empty content on retry.")
-        return _parse_judge_json(retry_text)
+        retry_used_model = (
+            getattr(retry, "model", None)
+            or getattr(retry, "model_version", None)
+            or cfg.model
+        )
+        return _parse_judge_json(retry_text), str(retry_used_model)
 
 
-def call_judge(client, cfg: JudgeConfig, messages: List[Dict[str, str]]) -> Dict:
-    if cfg.provider == "gemini":
-        return call_judge_gemini(client, cfg, messages)
+def call_judge_cerebras(client, cfg: JudgeConfig, messages: List[Dict[str, str]]) -> Tuple[Dict, str]:
+    kwargs: Dict[str, Any] = {
+        "model": cfg.model,
+        "messages": messages,
+        "temperature": float(cfg.temperature),
+    }
+    if cfg.top_p is not None:
+        kwargs["top_p"] = float(cfg.top_p)
+    if cfg.max_completion_tokens is not None:
+        kwargs["max_completion_tokens"] = int(cfg.max_completion_tokens)
+    if cfg.reasoning_effort:
+        kwargs["reasoning_effort"] = cfg.reasoning_effort
+
+    content: Optional[str] = None
+    used_model: Optional[str] = None
+    if cfg.stream:
+        kwargs["stream"] = True
+        stream = client.chat.completions.create(**kwargs)
+        chunks: List[str] = []
+        for chunk in stream:
+            if not used_model:
+                used_model = getattr(chunk, "model", None)
+            try:
+                delta = chunk.choices[0].delta.content
+                if delta:
+                    chunks.append(delta)
+            except Exception:
+                # Keep streaming robust against provider-specific chunk schema variance.
+                continue
+        content = "".join(chunks).strip()
     else:
-        return call_judge_openai(client, cfg, messages)
+        kwargs["stream"] = False
+        completion = client.chat.completions.create(**kwargs)
+        used_model = getattr(completion, "model", None)
+        content = completion.choices[0].message.content if completion.choices else None
+
+    if not content:
+        raise RuntimeError("Cerebras judge returned empty content.")
+    return _parse_judge_json(content), str(used_model or cfg.model)
+
+
+def call_judge(client, cfg: JudgeConfig, messages: List[Dict[str, str]]) -> Tuple[Dict, str]:
+    provider = normalize_provider_name(cfg.provider)
+    if provider == "gemini":
+        return call_judge_gemini(client, cfg, messages)
+    if provider == "cerebras_sdk":
+        return call_judge_cerebras(client, cfg, messages)
+    return call_judge_openai(client, cfg, messages)
+
+
+def ensure_client(cfg: JudgeConfig):
+    provider = normalize_provider_name(cfg.provider)
+    if provider == "gemini":
+        return ensure_gemini_client(cfg)
+    if provider == "cerebras_sdk":
+        return ensure_cerebras_client(cfg)
+    return ensure_openai_client(cfg)
 
 
 # ------------------------------- SCORE PROCESSING -------------------------------
@@ -695,6 +890,13 @@ def main() -> None:
     parser.add_argument("--responses", type=Path, required=True, help="Path to responses JSONL from run_experiment")
     parser.add_argument("--baseline", type=Path, required=True, help="Path to cursor_baseline.json")
     parser.add_argument("--judge-config", type=Path, required=True, help="Path to judge_config.json")
+    parser.add_argument(
+        "--provider",
+        type=str,
+        choices=sorted(SUPPORTED_PROVIDERS),
+        default=None,
+        help="Optional provider override. If omitted, judge-config provider is used.",
+    )
     parser.add_argument("--output", type=Path, help="Optional output path for judge_results.jsonl")
     parser.add_argument(
         "--append-output",
@@ -714,14 +916,16 @@ def main() -> None:
     baseline_payload = read_json(args.baseline)
     baseline_map = {item["query_id"]: item for item in baseline_payload.get("queries", [])}
 
-    cfg = load_judge_config(args.judge_config)
+    cfg = load_judge_config(args.judge_config, provider_override=args.provider)
+    cfg.provider = normalize_provider_name(cfg.provider)
 
-    if cfg.provider == "gemini":
-        client = ensure_gemini_client(cfg)
+    client = ensure_client(cfg)
+
+    if args.output:
+        output_path = args.output
     else:
-        client = ensure_openai_client(cfg)
-
-    output_path = args.output or args.responses.parent / "judge_results.jsonl"
+        default_name = f"judge_results__{safe_filename_token(cfg.model)}.jsonl"
+        output_path = args.responses.parent / default_name
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Initialize rate limiter
@@ -737,6 +941,17 @@ def main() -> None:
     records: List[Dict] = []
     model_name = "unknown"
 
+    print(f"Judge provider: {cfg.provider}")
+    print(f"Judge model (config): {cfg.model}")
+    request_params = [f"temperature={cfg.temperature}"]
+    if cfg.top_p is not None:
+        request_params.append(f"top_p={cfg.top_p}")
+    if cfg.max_completion_tokens is not None:
+        request_params.append(f"max_completion_tokens={cfg.max_completion_tokens}")
+    if cfg.reasoning_effort:
+        request_params.append(f"reasoning_effort={cfg.reasoning_effort}")
+    request_params.append(f"stream={cfg.stream}")
+    print(f"Judge request params: {', '.join(request_params)}")
     print(f"\nJudging {len(responses)} queries...")
 
     for idx, resp in enumerate(responses, 1):
@@ -764,7 +979,7 @@ def main() -> None:
                 if wait_time > 1.0:
                     print(f"(waited {wait_time:.1f}s) ", end="", flush=True)
             
-            judged = call_judge(client, cfg, messages)
+            judged, judge_model_used = call_judge(client, cfg, messages)
             # IMPORTANT: Compute verdict from scores, not LLM's verdict field.
             # The LLM sometimes hallucinates the verdict, saying "improved" when
             # the scores clearly show the candidate performed worse.
@@ -787,7 +1002,9 @@ def main() -> None:
             "candidate_model": resp.get("model_name"),
             "candidate_provider": resp.get("provider"),
             "baseline_system": baseline_payload.get("metadata", {}).get("system", "Cursor"),
-            "judge_model": cfg.model,
+            "judge_provider": cfg.provider,
+            "judge_model": judge_model_used,
+            "judge_model_config": cfg.model,
             "scores": scores,
             "verdict": verdict,  # Use computed verdict, not LLM's
             "llm_verdict": llm_verdict,  # Store LLM's original verdict for audit

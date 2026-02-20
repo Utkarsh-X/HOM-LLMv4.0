@@ -89,6 +89,7 @@ class ContextConfig:
     # Coherence bonuses (all from config)
     coherence_same_file_bonus: float = 0.8
     coherence_different_file_bonus: float = 0.5
+    ranking_surface_lock_enabled: bool = True
 
 
 class BlockScorer(Protocol):
@@ -144,6 +145,7 @@ class Stitcher(Protocol):
         blocks: list[AllocatedBlock],
         query: str,
         ordering: str,
+        preserve_order: bool = False,
     ) -> str:
         """
         Stitch blocks into final context text.
