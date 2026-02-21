@@ -108,9 +108,8 @@ class GeminiProvider(ProviderConnector):
                     # Let SDK try environment variable
                     self._client = genai.Client()
                 
-                self._available = self.healthcheck()
-                if self._available:
-                    logger.info("Gemini provider initialized (new GenAI SDK)")
+                self._available = True
+                logger.info("Gemini provider initialized (new GenAI SDK)")
             except Exception as e:
                 logger.debug(f"Gemini provider unavailable: {e}")
 

@@ -271,6 +271,7 @@ class ContextPipeline:
                         "coherence_score": scored.coherence_score if scored else None,
                         "final_score": scored.final_score if scored else None,
                         "drop_reason": reason,
+                        "block_content": block.content if reason == "kept" else None,
                     }
                 )
 

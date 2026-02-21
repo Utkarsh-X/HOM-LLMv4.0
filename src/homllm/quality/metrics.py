@@ -211,27 +211,30 @@ def score_separation(
 def reranker_influence(
     final_scores: Sequence[float],
     rerank_scores: Sequence[float],
-    w_rerank: float,
+    rerank_alpha: float,
 ) -> float:
     """
-    Reranker variance share of final scores.
+    Reranker variance share of final scores using Stage-2 delta geometry.
 
-    Var(α × rerank_scores) / Var(final_scores)
+    Measures: Var(α × rerank_delta) / Var(final_score)
+    where rerank_delta = rerank_score - mean(rerank_scores)
+
+    This matches the ranking pipeline geometry:
+        final_score = base_score + α × (rerank_score − mean_rerank) + γ × struct_bonus
 
     Args:
-        final_scores: Final combined scores for all candidates.
-        rerank_scores: Raw reranker scores for all candidates.
-        w_rerank: Fusion weight applied to reranker scores in the ranking pipeline.
+        final_scores: Final combined scores for all candidates on the full ranked surface.
+        rerank_scores: Raw reranker scores for all candidates (0.0 for non-reranked).
+        rerank_alpha: Alpha coefficient from RankConfig.rerank_alpha (NOT w_rerank).
 
     Returns:
-        Float in [0.0, 1.0+]. 0.0 if final score variance is zero.
+        Float in [0.0, 1.0]. 0.0 if final score variance is zero or no rerank scores.
     """
     if not final_scores or not rerank_scores:
         return 0.0
 
     n = len(final_scores)
     if n != len(rerank_scores):
-        # Mismatched lengths — defensive
         return 0.0
 
     # Variance of final scores
@@ -241,12 +244,24 @@ def reranker_influence(
     if var_final < 1e-15:
         return 0.0
 
-    # Variance of weighted rerank scores
-    weighted_rerank = [w_rerank * s for s in rerank_scores]
-    mu_rerank = sum(weighted_rerank) / n
-    var_rerank = sum((s - mu_rerank) ** 2 for s in weighted_rerank) / n
+    # Compute rerank delta: rerank_score - mean(rerank_scores)
+    # Only non-zero rerank scores contribute to the mean (matching pipeline logic).
+    rerank_nonzero = [s for s in rerank_scores if s != 0.0]
+    rerank_mean = (sum(rerank_nonzero) / len(rerank_nonzero)) if rerank_nonzero else 0.0
 
-    return min(1.0, var_rerank / var_final)
+    # Alpha-weighted rerank deltas (0.0 for candidates not reranked)
+    alpha_deltas = []
+    for rs in rerank_scores:
+        if rs != 0.0:
+            alpha_deltas.append(rerank_alpha * (rs - rerank_mean))
+        else:
+            alpha_deltas.append(0.0)
+
+    # Variance of alpha-weighted deltas
+    mu_alpha_delta = sum(alpha_deltas) / n
+    var_alpha_delta = sum((d - mu_alpha_delta) ** 2 for d in alpha_deltas) / n
+
+    return min(1.0, var_alpha_delta / var_final)
 
 
 # ============================================================================

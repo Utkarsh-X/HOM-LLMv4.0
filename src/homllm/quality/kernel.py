@@ -98,13 +98,18 @@ class ContextQualityKernel:
         rank_config: "RankConfig",
     ) -> RankingMetrics:
         """
-        Compute ranking-stage metrics.
+        Compute ranking-stage metrics on the full ranked surface.
 
-        Called AFTER ranking completes, BEFORE context assembly.
+        M5 and M6 are computed from RankingOutput.debug_traces.
+
+        IMPORTANT: RankingOutput.debug_traces may be post-selection (after
+        dedup/SetOpt/MMR). When ranking_geometry telemetry is available in
+        metadata, M6 is read from it instead — ranking_geometry is always
+        computed on the full pre-selection surface inside the ranking pipeline.
 
         Args:
             ranking_output: Output from ranking pipeline.
-            rank_config: Ranking configuration (for w_rerank).
+            rank_config: Ranking configuration (for rerank_alpha).
 
         Returns:
             RankingMetrics with M5 and M6.
@@ -116,11 +121,20 @@ class ContextQualityKernel:
         rerank_scores = [t.rerank_score for t in traces]
 
         m5 = score_separation(final_scores)
-        m6 = reranker_influence(
-            final_scores=final_scores,
-            rerank_scores=rerank_scores,
-            w_rerank=rank_config.w_rerank,
-        )
+
+        # M6: Prefer ranking_geometry telemetry (computed on full ranked surface)
+        # over recomputation from potentially post-selection debug_traces.
+        geometry = metadata.ranking_geometry
+        if geometry and "rerank_contribution_percent" in geometry:
+            m6 = float(geometry["rerank_contribution_percent"]) / 100.0
+        else:
+            # Fallback: recompute from traces (may be post-selection scope)
+            alpha = getattr(rank_config, "rerank_alpha", 0.32)
+            m6 = reranker_influence(
+                final_scores=final_scores,
+                rerank_scores=rerank_scores,
+                rerank_alpha=alpha,
+            )
 
         return RankingMetrics(
             score_separation=round(m5, 6),
@@ -147,15 +161,25 @@ class ContextQualityKernel:
 
         Args:
             ranking_output: Output from ranking pipeline (for M5, M6, M1 scores).
-            rank_config: Ranking configuration (for w_rerank).
+            rank_config: Ranking configuration (for rerank_alpha).
             context_artifact: Final context artifact (for M1, M2, M3, M4, M7).
             run_id: Unique identifier for this pipeline run.
 
         Returns:
             Frozen MetricRecord with all 7 metrics.
+
+        Raises:
+            AssertionError: If candidate_count < block_count (scope violation).
         """
         # Stage 1: Ranking metrics
         ranking = self.compute_ranking_metrics(ranking_output, rank_config)
+
+        # Scope guard: ranked surface must be >= selected blocks
+        block_count = len(context_artifact.blocks)
+        assert ranking.candidate_count >= block_count, (
+            f"Scope violation: candidate_count ({ranking.candidate_count}) "
+            f"< block_count ({block_count}). M5/M6 require the full ranked surface."
+        )
 
         # Build lookup: candidate_id → rerank_score
         trace_lookup: dict[str, float] = {

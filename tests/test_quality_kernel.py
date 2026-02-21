@@ -193,31 +193,48 @@ class TestScoreSeparation:
 
 
 class TestRerankerInfluence:
-    def test_reranker_dominates(self):
-        # final = rerank (no base contribution)
-        final = [1.0, 2.0, 3.0]
-        rerank = [1.0, 2.0, 3.0]
-        w_rerank = 1.0
-        result = reranker_influence(final, rerank, w_rerank)
+    def test_delta_geometry_dominates(self):
+        # Scenario: final_score = base + alpha * (rerank - mean_rerank)
+        # If base is constant, all variance comes from rerank delta.
+        # base = 1.0 for all, alpha = 1.0
+        # rerank = [0.5, 1.0, 1.5], mean = 1.0, deltas = [-0.5, 0.0, 0.5]
+        # alpha_deltas = [-0.5, 0.0, 0.5]
+        # final = [1.0 + (-0.5), 1.0 + 0.0, 1.0 + 0.5] = [0.5, 1.0, 1.5]
+        final = [0.5, 1.0, 1.5]
+        rerank = [0.5, 1.0, 1.5]
+        result = reranker_influence(final, rerank, rerank_alpha=1.0)
         assert abs(result - 1.0) < 1e-9
 
-    def test_no_variance(self):
+    def test_no_final_variance(self):
         final = [5.0, 5.0, 5.0]
         rerank = [1.0, 2.0, 3.0]
-        result = reranker_influence(final, rerank, 1.0)
+        result = reranker_influence(final, rerank, rerank_alpha=0.32)
         assert result == 0.0  # var(final) = 0
 
     def test_partial_influence(self):
-        final = [1.0, 3.0, 5.0]
-        rerank = [0.5, 1.0, 1.5]
-        result = reranker_influence(final, rerank, 0.5)
+        # base contributes variance too, so rerank < 100%
+        # base = [0.5, 1.0, 1.5], alpha=0.32, rerank = [0.8, 1.0, 1.2]
+        # rerank_mean = 1.0, deltas = [-0.2, 0.0, 0.2]
+        # alpha_deltas = [-0.064, 0.0, 0.064]
+        # final = [0.5 + (-0.064), 1.0 + 0.0, 1.5 + 0.064] = [0.436, 1.0, 1.564]
+        final = [0.436, 1.0, 1.564]
+        rerank = [0.8, 1.0, 1.2]
+        result = reranker_influence(final, rerank, rerank_alpha=0.32)
         assert 0.0 < result < 1.0
 
     def test_empty(self):
-        assert reranker_influence([], [], 1.0) == 0.0
+        assert reranker_influence([], [], rerank_alpha=0.32) == 0.0
 
     def test_mismatched_lengths(self):
-        assert reranker_influence([1.0, 2.0], [1.0], 1.0) == 0.0
+        assert reranker_influence([1.0, 2.0], [1.0], rerank_alpha=0.32) == 0.0
+
+    def test_non_reranked_zero_scores(self):
+        # 5 candidates, only 3 reranked (non-zero), 2 not (0.0)
+        # Non-reranked get alpha_delta = 0.0
+        final = [0.5, 0.6, 0.7, 0.8, 0.9]
+        rerank = [0.4, 0.6, 0.8, 0.0, 0.0]  # last two not reranked
+        result = reranker_influence(final, rerank, rerank_alpha=0.32)
+        assert 0.0 <= result <= 1.0
 
 
 # ===========================================================================
@@ -476,6 +493,7 @@ class MockRankConfig:
     w_bm25: float = 0.3
     w_dense: float = 0.7
     w_name: float = 0.1
+    rerank_alpha: float = 0.32
 
 
 class TestKernelIntegration:
@@ -618,3 +636,191 @@ class TestKernelIntegration:
         assert result.reranker_influence >= 0.0
         assert result.candidate_count == 10
         assert result.reranker_available is True
+
+    def test_scope_assertion_fires(self):
+        """Verify assertion fires when candidate_count < block_count."""
+        from homllm.quality.kernel import ContextQualityKernel
+
+        blocks = tuple(
+            MockContextBlock(block_id=f"b_{i}", file=f"f{i}.py", content=f"code {i}")
+            for i in range(10)
+        )
+        traces = tuple(
+            MockDebugTrace(candidate_id=f"b_{i}", base_score=0.5, rerank_score=0.6, final_score=0.55)
+            for i in range(5)  # Fewer candidates than blocks
+        )
+        context = MockContextArtifact(
+            query_id="q", context_text="", blocks=blocks,
+            token_budget=1000, used_tokens=500, provenance={"query": "test"},
+        )
+        ranking = MockRankingOutput(
+            debug_traces=traces,
+            metadata=MockRankMetadata(candidate_count=5),
+        )
+        kernel = ContextQualityKernel()
+        with pytest.raises(AssertionError, match="Scope violation"):
+            kernel.evaluate(ranking_output=ranking, rank_config=MockRankConfig(),
+                           context_artifact=context, run_id="r1")
+
+
+# ===========================================================================
+# Integration Guard: M6 vs ranking_geometry telemetry
+# ===========================================================================
+
+
+class TestM6GeometryAlignment:
+    """
+    Integration guard: ensures M6 computed by the kernel matches the
+    ranking pipeline's own geometry telemetry within 0.05 deviation.
+
+    This test simulates the exact Stage-2 geometry:
+        final_score = base_score + alpha * (rerank_score - rerank_mean) + gamma * struct_bonus
+
+    and verifies that the kernel's M6 aligns with the pipeline's
+    rerank_contribution_percent / 100.
+    """
+
+    def test_m6_matches_pipeline_telemetry(self):
+        """Build a scenario matching real pipeline geometry and verify alignment."""
+        import math
+        from homllm.quality.kernel import ContextQualityKernel
+
+        alpha = 0.32
+        gamma = 0.05
+
+        # 10 candidates: 7 reranked, 3 not
+        base_scores = [0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75]
+        rerank_raw =  [0.80, 0.70, 0.60, 0.50, 0.40, 0.30, 0.20, 0.00, 0.00, 0.00]
+        struct_bonus = [0.10, 0.05, 0.00, 0.15, 0.00, 0.10, 0.05, 0.00, 0.10, 0.00]
+
+        # Compute rerank mean (only non-zero = reranked candidates)
+        reranked_scores = [s for s in rerank_raw if s != 0.0]
+        rerank_mean = sum(reranked_scores) / len(reranked_scores)
+
+        # Compute final scores exactly as pipeline does
+        final_scores = []
+        alpha_deltas = []
+        for base, rr, sb in zip(base_scores, rerank_raw, struct_bonus):
+            if rr != 0.0:
+                delta = rr - rerank_mean
+                alpha_delta = alpha * delta
+            else:
+                alpha_delta = 0.0
+            final = base + alpha_delta + gamma * sb
+            final_scores.append(final)
+            alpha_deltas.append(alpha_delta)
+
+        # Compute pipeline's own telemetry: Var(alpha_deltas) / Var(final_scores)
+        n = len(final_scores)
+        mu_final = sum(final_scores) / n
+        var_final = sum((f - mu_final) ** 2 for f in final_scores) / n
+        mu_ad = sum(alpha_deltas) / n
+        var_ad = sum((d - mu_ad) ** 2 for d in alpha_deltas) / n
+        pipeline_contribution_pct = (var_ad / var_final * 100.0) if var_final > 0 else 0.0
+
+        # Build mock objects with ranking_geometry telemetry
+        traces = tuple(
+            MockDebugTrace(
+                candidate_id=f"c_{i}",
+                base_score=base_scores[i],
+                rerank_score=rerank_raw[i],
+                struct_bonus=struct_bonus[i],
+                final_score=final_scores[i],
+            )
+            for i in range(n)
+        )
+
+        geometry_telemetry = {
+            "alpha_value": alpha,
+            "rerank_mean": rerank_mean,
+            "rerank_contribution_percent": pipeline_contribution_pct,
+            "final_score_variance": var_final,
+        }
+
+        ranking = MockRankingOutput(
+            debug_traces=traces,
+            metadata=MockRankMetadata(
+                candidate_count=n,
+                ranking_geometry=geometry_telemetry,
+            ),
+        )
+
+        config = MockRankConfig(rerank_alpha=alpha)
+
+        blocks = tuple(
+            MockContextBlock(block_id=f"c_{i}", file=f"f{i}.py", content=f"code {i}")
+            for i in range(6)  # 6 selected out of 10
+        )
+        context = MockContextArtifact(
+            query_id="guard_q", context_text="", blocks=blocks,
+            token_budget=4000, used_tokens=3000, provenance={"query": "test guard"},
+        )
+
+        kernel = ContextQualityKernel()
+        record = kernel.evaluate(
+            ranking_output=ranking, rank_config=config,
+            context_artifact=context, run_id="guard_run",
+        )
+
+        # M6 should match pipeline telemetry within 0.05
+        expected_m6 = pipeline_contribution_pct / 100.0
+        deviation = abs(record.reranker_influence - expected_m6)
+        assert deviation < 0.05, (
+            f"M6 geometry drift: kernel={record.reranker_influence:.4f}, "
+            f"pipeline={expected_m6:.4f}, deviation={deviation:.4f} >= 0.05"
+        )
+
+    def test_m6_fallback_without_geometry(self):
+        """When ranking_geometry is None, M6 is recomputed from traces using delta formula."""
+        import math
+        from homllm.quality.kernel import ContextQualityKernel
+        from homllm.quality.metrics import reranker_influence
+
+        alpha = 0.32
+        base_scores = [0.3, 0.4, 0.5, 0.6, 0.7]
+        rerank_raw = [0.8, 0.6, 0.4, 0.0, 0.0]
+        reranked = [s for s in rerank_raw if s != 0.0]
+        rmean = sum(reranked) / len(reranked)
+
+        final_scores = [
+            b + (alpha * (r - rmean) if r != 0.0 else 0.0)
+            for b, r in zip(base_scores, rerank_raw)
+        ]
+
+        traces = tuple(
+            MockDebugTrace(
+                candidate_id=f"c_{i}",
+                base_score=base_scores[i],
+                rerank_score=rerank_raw[i],
+                final_score=final_scores[i],
+            )
+            for i in range(5)
+        )
+
+        ranking = MockRankingOutput(
+            debug_traces=traces,
+            metadata=MockRankMetadata(
+                candidate_count=5,
+                ranking_geometry=None,  # No geometry telemetry
+            ),
+        )
+
+        blocks = tuple(
+            MockContextBlock(block_id=f"c_{i}", file=f"f{i}.py", content=f"code {i}")
+            for i in range(3)
+        )
+        context = MockContextArtifact(
+            query_id="fb_q", context_text="", blocks=blocks,
+            token_budget=2000, used_tokens=1000, provenance={"query": "test fallback"},
+        )
+
+        config = MockRankConfig(rerank_alpha=alpha)
+        kernel = ContextQualityKernel()
+        record = kernel.evaluate(
+            ranking_output=ranking, rank_config=config,
+            context_artifact=context, run_id="fb_run",
+        )
+
+        # Recompute expected M6 directly
+        expected = reranker_influence(final_scores, rerank_raw, rerank_alpha=alpha)
+        assert abs(record.reranker_influence - round(expected, 6)) < 1e-9
