@@ -144,6 +144,153 @@ class ContextBlockScorer(BlockScorer):
 
         return selected
 
+    # ── Tier 2: Coherence refinement (post-lock) ────────────────────────
+
+    def compute_coherence_refinement(
+        self,
+        scored_blocks: list[ScoredBlock],
+        callgraph: dict[str, list[str]],
+        config: "ContextConfig",
+    ) -> list[ScoredBlock]:
+        """Post-lock coherence refinement. Adjusts mid-range (position N+) only.
+
+        Computes four deterministic signals per-block:
+          1. Same-file adjacency bonus
+          2. Call-chain adjacency bonus
+          3. Redundancy synergy (Jaccard overlap → bonus instead of penalty)
+          4. Light dispersion penalty
+
+        Coherence contribution is capped at `config.coherence_max_contribution`
+        fraction of each block's base score. Top-N blocks are protected.
+        """
+        if not getattr(config, "coherence_enabled", False):
+            return scored_blocks
+
+        n = len(scored_blocks)
+        if n <= 1:
+            return scored_blocks
+
+        protect_n = getattr(config, "coherence_protect_top_n", 3)
+        max_contrib = getattr(config, "coherence_max_contribution", 0.15)
+        proximity_lines = getattr(config, "coherence_proximity_lines", 50)
+        synergy_thresh = getattr(config, "coherence_synergy_threshold", 0.3)
+        dispersion_thresh = getattr(config, "coherence_dispersion_threshold", 0.9)
+        cg_bonus = getattr(config, "coherence_callgraph_bonus", 0.1)
+        same_file_bonus = getattr(config, "coherence_same_file_bonus", 0.8)
+
+        # Precompute token sets for synergy scoring
+        token_sets: list[set[str]] = []
+        for sb in scored_blocks:
+            content = sb.block.content or ""
+            token_sets.append(set(content.lower().split()))
+
+        # Build reverse callgraph (callee → callers)
+        reverse_cg: dict[str, list[str]] = {}
+        for caller, callees in callgraph.items():
+            for callee in callees:
+                if callee not in reverse_cg:
+                    reverse_cg[callee] = []
+                reverse_cg[callee].append(caller)
+
+        # Precompute file dispersion ratio
+        unique_files = len({sb.block.file for sb in scored_blocks if sb.block.file})
+        dispersion_ratio = unique_files / n if n > 0 else 0.0
+
+        # Compute coherence score for each block
+        coherence_scores: list[float] = []
+        coherence_details: list[dict] = []
+
+        for i, sb in enumerate(scored_blocks):
+            same_file_adj = 0.0
+            call_chain_adj = 0.0
+            synergy_total = 0.0
+            dispersion_pen = 0.0
+
+            for j, other in enumerate(scored_blocks):
+                if i == j:
+                    continue
+
+                # 1. Same-file adjacency bonus
+                if sb.block.file and sb.block.file == other.block.file:
+                    line_dist = abs(sb.block.start_line - other.block.start_line)
+                    if line_dist <= proximity_lines:
+                        decay = 1.0 - (line_dist / proximity_lines)
+                        same_file_adj = max(same_file_adj, same_file_bonus * decay)
+
+                # 2. Call-chain adjacency bonus
+                sid = sb.block.symbol_id or ""
+                oid = other.block.symbol_id or ""
+                if sid and oid:
+                    # Direct: sb calls other, or other calls sb
+                    if oid in callgraph.get(sid, []) or sid in callgraph.get(oid, []):
+                        call_chain_adj = max(call_chain_adj, cg_bonus)
+
+                # 3. Redundancy synergy
+                if token_sets[i] and token_sets[j]:
+                    inter = len(token_sets[i] & token_sets[j])
+                    union = len(token_sets[i] | token_sets[j])
+                    jaccard = inter / union if union > 0 else 0.0
+                    if jaccard >= synergy_thresh:
+                        synergy_total = max(synergy_total, jaccard * 0.1)
+
+            # 4. Light dispersion penalty
+            if dispersion_ratio > dispersion_thresh:
+                dispersion_pen = -0.02 * (dispersion_ratio - dispersion_thresh) / (1.0 - dispersion_thresh + 1e-9)
+
+            raw_coherence = same_file_adj + call_chain_adj + synergy_total + dispersion_pen
+
+            # Cap at max_contribution fraction of base final_score
+            cap = abs(sb.final_score) * max_contrib
+            capped_coherence = max(-cap, min(cap, raw_coherence))
+
+            coherence_scores.append(capped_coherence)
+            coherence_details.append({
+                "same_file_bonus": round(same_file_adj, 4),
+                "call_chain_bonus": round(call_chain_adj, 4),
+                "synergy_bonus": round(synergy_total, 4),
+                "dispersion_penalty": round(dispersion_pen, 4),
+                "raw": round(raw_coherence, 4),
+                "capped": round(capped_coherence, 4),
+            })
+
+        # Build updated scored blocks: top-N protected, rest re-sorted by adjusted score
+        protected = []
+        refinable = []
+        for i, sb in enumerate(scored_blocks):
+            new_sb = ScoredBlock(
+                block=sb.block,
+                semantic_score=sb.semantic_score,
+                name_score=sb.name_score,
+                structural_priority=sb.structural_priority,
+                novelty_score=sb.novelty_score,
+                coherence_score=coherence_scores[i],
+                final_score=sb.final_score + coherence_scores[i],
+            )
+            if i < protect_n:
+                protected.append(new_sb)
+            else:
+                refinable.append(new_sb)
+
+        # Sort only the refinable portion by adjusted final_score (descending)
+        refinable.sort(key=lambda sb: sb.final_score, reverse=True)
+
+        result = protected + refinable
+
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "[COHERENCE_REFINEMENT] protect_top=%d, refined=%d, "
+                "max_coherence=%.4f, min_coherence=%.4f",
+                len(protected),
+                len(refinable),
+                max(coherence_scores) if coherence_scores else 0.0,
+                min(coherence_scores) if coherence_scores else 0.0,
+            )
+
+        # Store details for telemetry (pipeline reads this)
+        self._last_coherence_details = coherence_details
+
+        return result
+
     def _compute_name_score(self, block: ContextBlock, query: str) -> float:
         """Compute identifier overlap score."""
         if not block.symbol_name:

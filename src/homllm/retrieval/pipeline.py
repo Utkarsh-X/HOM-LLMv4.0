@@ -92,6 +92,13 @@ class RetrievalPipeline:
         self.expander = expander or StructuralExpanderImpl(self.embedder, duckdb_path=duckdb_path)
         self.artifacts_path = artifacts_path
 
+        # Cache callgraph at init — it's static per index, no need to reload per query
+        _cg_start = time.perf_counter()
+        self._callgraph_cache: dict = self._load_callgraph()
+        _cg_ms = (time.perf_counter() - _cg_start) * 1000
+        logger.info("[RETRIEVAL] callgraph cached at init: %d entries, %.1fms",
+                    len(self._callgraph_cache), _cg_ms)
+
         # Initialize retrievers
         self.bm25_retriever = BM25Retriever(bm25_index_path, duckdb_path=duckdb_path)
         self.vector_retriever = VectorRetriever(
@@ -291,8 +298,8 @@ class RetrievalPipeline:
                 else:
                     graph_stitch_ms = 0.0
                 
-                # Legacy expansion (callgraph-based)
-                callgraph = self._load_callgraph()
+                # Legacy expansion (callgraph-based, cached at init)
+                callgraph = self._callgraph_cache
                 exp_start = time.perf_counter()
                 merged = self.expander.expand(merged, query, callgraph, self.config)
                 expansion_ms = (time.perf_counter() - exp_start) * 1000

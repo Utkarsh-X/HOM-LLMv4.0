@@ -65,7 +65,12 @@ class RankingPipeline:
             config.dedup_file_entropy_threshold
         )
         self.reranker = reranker or (
-            QwenReranker(config.reranker_model) if config.reranker_enabled else None
+            QwenReranker(
+                model_name=config.reranker_model,
+                device=config.reranker_device,
+            )
+            if config.reranker_enabled
+            else None
         )
 
     def rank(self, input_data: RankingInput) -> RankingOutput:
@@ -211,6 +216,7 @@ class RankingPipeline:
                     final_score=final_score,
                     features=candidate_features,
                     provenance=candidate.provenance,
+                    rerank_evaluated=candidate.doc_id in reranked_doc_ids,
                 )
 
                 scored_candidates.append((candidate, final_score, trace))
@@ -278,6 +284,7 @@ class RankingPipeline:
                         final_score=final_score,
                         features=trace.features,
                         provenance=trace.provenance,
+                        rerank_evaluated=trace.rerank_evaluated,
                     )
                     rescored.append((candidate, final_score, trace))
 
@@ -291,6 +298,22 @@ class RankingPipeline:
                 alpha=alpha,
             )
             geometry_metrics.update(reranker_contract_diag)
+
+            # Rerank coverage telemetry
+            total_candidates = len(scored_candidates)
+            n_reranked = sum(1 for _, _, t in scored_candidates if t.rerank_evaluated)
+            n_unevaluated = total_candidates - n_reranked
+            geometry_metrics["percent_reranked"] = round(
+                100.0 * n_reranked / total_candidates, 1
+            ) if total_candidates > 0 else 0.0
+            geometry_metrics["percent_unevaluated"] = round(
+                100.0 * n_unevaluated / total_candidates, 1
+            ) if total_candidates > 0 else 0.0
+            logger.info(
+                "[RANKING] rerank_coverage: %d/%d evaluated (%.1f%%), %d unevaluated",
+                n_reranked, total_candidates,
+                geometry_metrics["percent_reranked"], n_unevaluated,
+            )
 
             # 6. Sort by final score with deterministic tie-break.
             scored_candidates.sort(key=lambda x: (-x[1], x[0].doc_id))

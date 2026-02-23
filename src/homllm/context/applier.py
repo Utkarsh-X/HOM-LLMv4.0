@@ -495,11 +495,16 @@ class ContextApplier:
             new_used_tokens = original.used_tokens
         new_used_tokens = max(0, min(new_used_tokens, original.token_budget))
         
-        # Rebuild context_text from blocks
-        new_context_text = "\n\n".join(
-            f"# {block.file}:{block.start_line}-{block.end_line}\n{block.content}"
-            for block in new_blocks
-        )
+        # Rebuild context_text using the same canonical format as ContextStitcher
+        # to ensure deterministic LLM input regardless of intelligence modifications.
+        context_parts = []
+        for block in new_blocks:
+            symbol_info = f" Symbol: {block.symbol_name}" if getattr(block, 'symbol_name', None) else ""
+            header = f"--- File: {block.file} (lines {block.start_line}-{block.end_line}){symbol_info} ---\n"
+            context_parts.append(header)
+            context_parts.append(block.content)
+            context_parts.append("\n")
+        new_context_text = "\n".join(context_parts)
         
         # Build new provenance
         new_provenance = dict(original.provenance)

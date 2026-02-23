@@ -1,9 +1,14 @@
 """
 Intelligence Controller
 
+DIAGNOSTIC-ONLY SYSTEM — produces actions for telemetry and auditing.
+Action engines generate plans, but the ContextApplier's COMPACT and ORDER
+actions are intentionally no-ops. Do not wire action execution without
+thorough stability testing — previous attempts caused context disturbance.
+
 The SINGLE orchestration component that coordinates:
 1. Diagnostic Engine (L1-L3)
-2. Action Engines (L1-L3)
+2. Action Engines (L1-L3) — actions are logged, not executed
 
 This controller is a CONDUCTOR, not a THINKER.
 It calls subsystems in order, collects outputs, and returns a merged plan.

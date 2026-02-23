@@ -136,7 +136,7 @@ class GeminiProvider(ProviderConnector):
             # Debug log the config being sent
             logger.info(f"[GEMINI_CONFIG] max_output_tokens={config_dict.get('max_output_tokens')}, temp={config_dict.get('temperature')}")
 
-            # Invoke API using new SDK pattern
+            # Invoke API using new SDK pattern — exactly 1 call
             response = self._client.models.generate_content(
                 model=request.model,
                 contents=request.prompt,

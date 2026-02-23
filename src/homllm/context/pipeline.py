@@ -40,6 +40,7 @@ class ContextPipeline:
         config: ContextConfig,
         embedder: Optional[object] = None,
         tokenizer: Optional[object] = None,
+        callgraph: Optional[dict] = None,
     ):
         """
         Initialize context pipeline.
@@ -48,15 +49,22 @@ class ContextPipeline:
             config: Context configuration
             embedder: Embedder for coherence scoring (optional)
             tokenizer: Tokenizer for exact token counting (optional)
+            callgraph: Call graph dict (symbol_id → [callee_ids]) for coherence
         """
         self.config = config
+        self.callgraph = callgraph or {}
+        # Extract tokenizer from embedder if not explicitly provided.
+        # This ensures TokenBudgetManager uses accurate token counts
+        # instead of the len//4 fallback.
+        if tokenizer is None and embedder is not None:
+            tokenizer = getattr(embedder, "tokenizer", None)
         self.tokenizer = tokenizer
 
         self.assembler = BlockAssembler()
         self.scorer = ContextBlockScorer(embedder, config)
         self.deduplicator = ContextDeduplicator()
         self.budget_manager = TokenBudgetManager()
-        self.stitcher = ContextStitcher()
+        self.stitcher = ContextStitcher(callgraph=self.callgraph)
 
     def assemble(
         self,
@@ -151,6 +159,23 @@ class ContextPipeline:
                     blocks, query, [], debug_trace_map
                 )
 
+            # 2b. Tier 2: Post-lock coherence refinement.
+            # Adjusts mid-range blocks only (top-N protected). Deterministic.
+            pre_coherence_ids = [sb.block.block_id for sb in scored_blocks]
+            scored_blocks = self.scorer.compute_coherence_refinement(
+                scored_blocks, self.callgraph, self.config
+            )
+            post_coherence_ids = [sb.block.block_id for sb in scored_blocks]
+            # Integrity: top-N must be unchanged
+            protect_n = getattr(self.config, "coherence_protect_top_n", 3)
+            if pre_coherence_ids[:protect_n] != post_coherence_ids[:protect_n]:
+                logger.error(
+                    "COHERENCE_TOP_N_VIOLATION: top-%d changed, reverting", protect_n
+                )
+                scored_blocks = self.scorer.compute_coherence_refinement(
+                    scored_blocks, {}, self.config  # Empty callgraph = no-op
+                )
+
             # Context integration profile: set-level geometry from scored blocks (ranking order).
             # Used only to modulate budget allocation while preserving order.
             integration_profile = compute_context_integration_profile(
@@ -228,11 +253,33 @@ class ContextPipeline:
             allocated_ids = [ab.block.block_id for ab in allocated_blocks]
             context_reorder_count = self._count_reorders(ranking_ids, allocated_ids)
             ranking_order_preserved = context_reorder_count == 0
+
+            coherence_active = getattr(self.config, "coherence_enabled", False)
             if ranking_surface_lock_enabled and not ranking_order_preserved:
-                raise RuntimeError(
-                    "RANKING_AUTHORITY_LOCK_VIOLATION:"
-                    f"context_reorder_count={context_reorder_count}"
-                )
+                if coherence_active:
+                    # Tier 2: Allow mid-range reorders from coherence refinement,
+                    # but verify top-N blocks maintain relative order.
+                    top_n = getattr(self.config, "coherence_protect_top_n", 3)
+                    top_ranking_ids = ranking_ids[:top_n]
+                    top_allocated_ids = [
+                        aid for aid in allocated_ids if aid in set(top_ranking_ids)
+                    ]
+                    top_reorders = self._count_reorders(top_ranking_ids, top_allocated_ids)
+                    if top_reorders > 0:
+                        raise RuntimeError(
+                            "RANKING_AUTHORITY_LOCK_VIOLATION (top-N):"
+                            f"top_{top_n}_reorder_count={top_reorders}"
+                        )
+                    # Log coherence-driven reorders (allowed)
+                    logger.info(
+                        "[CONTEXT] coherence mid-range reorders=%d (allowed, top-%d protected)",
+                        context_reorder_count, top_n,
+                    )
+                else:
+                    raise RuntimeError(
+                        "RANKING_AUTHORITY_LOCK_VIOLATION:"
+                        f"context_reorder_count={context_reorder_count}"
+                    )
 
             # 5. Stitch final context
             context_text = self.stitcher.stitch(
@@ -275,6 +322,31 @@ class ContextPipeline:
                     }
                 )
 
+            # Coherence refinement telemetry
+            coherence_details = getattr(self.scorer, "_last_coherence_details", None) or []
+            coherence_telemetry = {
+                "enabled": getattr(self.config, "coherence_enabled", False),
+                "blocks_refined": len(coherence_details),
+                "mid_range_reorders": sum(
+                    1 for a, b in zip(pre_coherence_ids[protect_n:], post_coherence_ids[protect_n:])
+                    if a != b
+                ) if len(pre_coherence_ids) > protect_n else 0,
+            }
+            if coherence_details:
+                coherence_telemetry["max_coherence"] = max(d["capped"] for d in coherence_details)
+                coherence_telemetry["mean_coherence"] = round(
+                    sum(d["capped"] for d in coherence_details) / len(coherence_details), 4
+                )
+                coherence_telemetry["same_file_hits"] = sum(
+                    1 for d in coherence_details if d["same_file_bonus"] > 0
+                )
+                coherence_telemetry["call_chain_hits"] = sum(
+                    1 for d in coherence_details if d["call_chain_bonus"] > 0
+                )
+
+            # Stitch telemetry
+            stitch_telemetry = getattr(self.stitcher, "_last_stitch_telemetry", None)
+
             provenance = {
                 "query": query,
                 "query_text": query,
@@ -285,6 +357,8 @@ class ContextPipeline:
                 "stage_file_histograms": stage_file_histograms,
                 "scored_order_top10": scored_order_top10,
                 "context_drop_trace": drop_trace,
+                "coherence_refinement": coherence_telemetry,
+                "stitching": stitch_telemetry,
                 "context_synthesis": {
                     "synthesis_score": synthesis_profile.synthesis_score,
                     "concept_density": synthesis_profile.concept_density,

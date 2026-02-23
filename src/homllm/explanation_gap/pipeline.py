@@ -3,12 +3,13 @@ Structural Explanation Gap Detection — Staged pipeline (spec §5).
 
 Stage 1: Mandatory escalation (rules + history). Most severe dominates; no downgrade.
 Stage 2: Semantic refinement (embedding) only when Stage 1 is SHALLOW_OK.
-Stage 3: Optional classifier upgrade only. Ambiguity → escalate.
+
+Stage 3 (classifier) was removed — unnecessary given existing ranking model classifiers.
 """
 
 from __future__ import annotations
 
-from homllm.explanation_gap.classifier_stub import classifier_upgrade_only
+
 from homllm.explanation_gap.constants import (
     COLD_START_CONFIDENCE,
     EMBEDDING_UPGRADE_THRESHOLD,
@@ -35,14 +36,12 @@ def run_explanation_gap(
     illustrative_centroid: tuple[float, ...] | None = None,
     explanatory_centroid: tuple[float, ...] | None = None,
     factual_centroid: tuple[float, ...] | None = None,
-    run_stage3: bool = True,
 ) -> ExplanationGapResult:
     """
     Run Structural Explanation Gap Detection (read-only diagnostic).
 
     Stage 1: Rule-based patterns + historical depth recurrence. Most severe trigger wins.
     Stage 2: Only if Stage 1 is SHALLOW_OK; embedding refinement may upgrade.
-    Stage 3: Optional classifier upgrade only (stub: no-op).
     No downgrade; ambiguity → escalate. Advisory only.
     """
     # Stage 1 — Mandatory escalation (rules + history)
@@ -82,16 +81,6 @@ def run_explanation_gap(
             )
         )
 
-    # Stage 3 — Optional upgrade only (stub)
-    if run_stage3:
-        stage3_label, stage3_trigger, stage3_signals = classifier_upgrade_only(
-            stage1_label, query
-        )
-        # Stub never upgrades; if real classifier did upgrade, use it
-        stage1_label = max_severity(stage1_label, stage3_label)
-        if stage1_label != stage3_label and stage3_label != "SHALLOW_OK":
-            deciding_trigger = stage3_trigger
-        per_signal.extend(stage3_signals)
 
     final_label: DepthLabelType = stage1_label
 
@@ -118,7 +107,6 @@ def run_explanation_gap_with_embedder(
     query: str,
     embedder: "EmbedderLike",
     history_stats: HistoryDepthStats | None = None,
-    run_stage3: bool = True,
 ) -> ExplanationGapResult:
     """
     Convenience: run pipeline with an embedder. Embeds query and seed phrases
@@ -135,7 +123,6 @@ def run_explanation_gap_with_embedder(
         illustrative_centroid=ill_centroid,
         explanatory_centroid=exp_centroid,
         factual_centroid=fact_centroid,
-        run_stage3=run_stage3,
     )
 
 

@@ -29,6 +29,7 @@ class DebugTrace:
     final_score: float
     features: FeatureVector | None
     provenance: tuple[str, ...]
+    rerank_evaluated: bool = False  # True if reranker actually scored this candidate
 
 
 @dataclass(frozen=True)
@@ -76,6 +77,7 @@ class RankConfig:
     w_bm25: float
     w_dense: float
     w_name: float
+    reranker_device: str = "auto"
     # Stage 2 geometry controls (fixed, bounded, deterministic)
     rerank_alpha: float = 0.32
     struct_gamma: float = 0.05

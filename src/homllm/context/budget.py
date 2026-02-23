@@ -60,6 +60,9 @@ class TokenBudgetManager:
         allocated_files: dict[str, int] = {}
         allocated_blocks: list[AllocatedBlock] = []
 
+        # Token estimation telemetry: track estimated vs actual when tokenizer available
+        token_estimation_errors: list[tuple[int, int]] = []  # (estimated, actual)
+
         for scored_block in sorted_blocks:
             if remaining_budget <= 0:
                 break
@@ -71,6 +74,9 @@ class TokenBudgetManager:
             if tokenizer:
                 try:
                     tokens = len(tokenizer.encode(content))
+                    # Track estimation error for telemetry
+                    estimated = self._estimate_tokens(content)
+                    token_estimation_errors.append((estimated, tokens))
                 except Exception as e:
                     logger.warning(f"Tokenization failed: {e}, using estimate")
                     tokens = self._estimate_tokens(content)
@@ -123,6 +129,22 @@ class TokenBudgetManager:
                     remaining_budget,
                     float(redundancy_ratio),
                 )
+
+        # Log token estimation telemetry
+        if token_estimation_errors:
+            total_estimated = sum(e for e, _ in token_estimation_errors)
+            total_actual = sum(a for _, a in token_estimation_errors)
+            errors = [e - a for e, a in token_estimation_errors]
+            mean_error = sum(errors) / len(errors) if errors else 0
+            max_error = max(abs(err) for err in errors) if errors else 0
+            logger.info(
+                "[BUDGET_TELEMETRY] tokenizer=active blocks=%s estimated_total=%s actual_total=%s "
+                "delta=%s mean_block_error=%.1f max_block_error=%s",
+                len(token_estimation_errors), total_estimated, total_actual,
+                total_estimated - total_actual, mean_error, max_error,
+            )
+        else:
+            logger.info("[BUDGET_TELEMETRY] tokenizer=fallback(len//4)")
 
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(

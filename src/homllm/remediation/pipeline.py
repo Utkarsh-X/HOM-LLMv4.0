@@ -1,6 +1,12 @@
 """
 Action & Remediation Pipeline (spec §4–§9).
 
+CURRENT STATUS: Only TOKEN_BUDGET_INCREASE action is wired to runtime.
+Structural (re-retrieval) and Prompt (prompt adjustment) actions exist in
+the action matrix but are NOT connected. These are reserved for future
+agentic system integration where an LLM-based agent with tool utilization
+will handle budget, retrieval, and prompt decisions automatically.
+
 Consumes Problem‑1 diagnostic (via RemediationInput). Selects actions by deterministic
 matrix; applies ordering and one-action-per-axis limit. Does not diagnose or mutate P1.
 """

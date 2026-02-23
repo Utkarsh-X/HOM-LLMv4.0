@@ -1,0 +1,32 @@
+{
+  "default_provider": "openai",
+  "providers": {
+    "gemini": {
+      "provider": "gemini",
+      "model": "gemini-2.5-flash",
+      "api_key": "PASTE_GEMINI_API_KEY_HERE",
+      "requests_per_minute": 4,
+      "temperature": 0.0
+    },
+    "openai": {
+      "provider": "openai",
+      "model": "gpt-4o-mini",
+      "api_key": "PASTE_OPENAI_OR_OPENAI_COMPATIBLE_API_KEY_HERE",
+      "base_url": null,
+      "requests_per_minute": 8,
+      "temperature": 0.0
+    },
+    "cerebras_sdk": {
+      "provider": "cerebras_sdk",
+      "model": "gpt-oss-120b",
+      "api_key": "PASTE_CEREBRAS_API_KEY_HERE",
+      "base_url": null,
+      "requests_per_minute": 8,
+      "temperature": 0.0,
+      "top_p": 1.0,
+      "max_completion_tokens": 32768,
+      "stream": false,
+      "reasoning_effort": "high"
+    }
+  }
+}

@@ -44,6 +44,11 @@ def _z(val: float, mean: float, std: float) -> float:
     return max(-Z_CLIP, min(Z_CLIP, z))
 
 
+def _percentile_from_z(z: float) -> float:
+    """Convert z-score to percentile using standard normal CDF approximation."""
+    return round(0.5 * (1 + math.erf(z / math.sqrt(2))), 4)
+
+
 def compute_cqi4_from_drop_trace(drop_trace: List[Dict]) -> Optional[Dict[str, Any]]:
     """Compute CQI_4 directly from a drop_trace list.
     
@@ -155,6 +160,17 @@ def _compute_cqi4_core(drop_trace: List[Dict]) -> Optional[Dict[str, Any]]:
                 "z5": round(z5, 3),
                 "z6": round(z6, 3),
             },
+            # Tier 2: Fine-grained axis exposure (observation only)
+            "axis_detail": {
+                "CI_raw": round(ci, 4),
+                "RCI_raw": round(rci, 4),
+                "M3_percentile": _percentile_from_z(z3),
+                "M4_percentile": _percentile_from_z(z4),
+                "M5_percentile": _percentile_from_z(z5),
+                "M6_percentile": _percentile_from_z(z6),
+            },
+            "coherence_delta": None,  # Populated by pipeline after Tier 2 coherence
+            "contributions": contributions,
             "top_contributor": sorted_contribs[0][0],
             "bottom_contributor": sorted_contribs[-1][0],
         }

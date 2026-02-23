@@ -33,6 +33,7 @@ class QwenEmbedder(Embedder):
         model_name: str = EMBEDDING_MODEL_NAME,
         dimension: int = 1024,
         max_input_tokens: int = 8192,
+        device: str = "auto",
     ):
         """
         Initialize embedder.
@@ -46,7 +47,8 @@ class QwenEmbedder(Embedder):
         self._dimension = dimension
         self._model: Optional[torch.nn.Module] = None
         self._tokenizer: Optional[object] = None
-        self._device = "cuda" if torch.cuda.is_available() else "cpu"
+        self._device = self._resolve_device(device)
+        self._requested_device = device
         self._requested_max_input_tokens = max_input_tokens
         self._effective_max_input_tokens = max_input_tokens
         self._query_input_log_count = 0
@@ -54,60 +56,94 @@ class QwenEmbedder(Embedder):
         if AutoModel is not None and AutoTokenizer is not None:
             self._load_model()
 
+    @property
+    def tokenizer(self):
+        """Expose the underlying tokenizer for accurate token counting by downstream consumers."""
+        return self._tokenizer
+
+    @staticmethod
+    def _resolve_device(device: str) -> str:
+        requested = (device or "auto").strip().lower()
+        if requested not in {"auto", "cuda", "cpu"}:
+            logger.warning("Unknown embedding device '%s', using auto", device)
+            requested = "auto"
+        if requested == "auto":
+            return "cuda" if torch.cuda.is_available() else "cpu"
+        if requested == "cuda" and not torch.cuda.is_available():
+            logger.warning("Embedding device 'cuda' requested but CUDA not available; using cpu")
+            return "cpu"
+        return requested
+
+    def _load_model_for_device(self, device: str) -> None:
+        """Load model and tokenizer for a specific device."""
+        if AutoModel is None or AutoTokenizer is None:
+            return
+        self._device = device
+
+        logger.info(f"[EMBEDDING MODEL] Resolved: {self.model_name}")
+        if self.model_name != EMBEDDING_MODEL_NAME:
+            raise ValueError(
+                f"Embedding model mismatch: expected '{EMBEDDING_MODEL_NAME}', "
+                f"got '{self.model_name}'. No fallbacks allowed."
+            )
+
+        offline_mode = os.environ.get("HOMLLM_OFFLINE", "0").strip() != "0"
+        local_only = offline_mode
+        resolved = resolve_snapshot_dir(self.model_name)
+        model_source = str(resolved) if resolved is not None else self.model_name
+
+        self._tokenizer = AutoTokenizer.from_pretrained(
+            model_source,
+            local_files_only=local_only,
+        )
+        self._model = AutoModel.from_pretrained(
+            model_source,
+            trust_remote_code=True,
+            local_files_only=local_only,
+        ).to(self._device)
+        self._model.eval()
+
+        if hasattr(self._model, "config") and hasattr(self._model.config, "hidden_size"):
+            self._dimension = self._model.config.hidden_size
+
+        model_max = getattr(self._model.config, "max_position_embeddings", None)
+        if isinstance(model_max, int) and model_max > 0:
+            self._effective_max_input_tokens = min(
+                self._requested_max_input_tokens,
+                model_max,
+            )
+        else:
+            self._effective_max_input_tokens = self._requested_max_input_tokens
+
+        logger.info(
+            "Embedding loaded on %s, dimension: %s, embed_max_tokens: %s",
+            self._device,
+            self._dimension,
+            self._effective_max_input_tokens,
+        )
+
     def _load_model(self) -> None:
         """Load embedding model."""
         if AutoModel is None or AutoTokenizer is None:
             return
 
         try:
-            logger.info(f"[EMBEDDING MODEL] Resolved: {self.model_name}")
-            if self.model_name != EMBEDDING_MODEL_NAME:
-                raise ValueError(
-                    f"Embedding model mismatch: expected '{EMBEDDING_MODEL_NAME}', "
-                    f"got '{self.model_name}'. No fallbacks allowed."
-                )
-
-            # Prefer local snapshot dir (avoids hub API calls even when cached).
-            # If not found, fall back to repo-id loading (may download).
-            offline_mode = os.environ.get("HOMLLM_OFFLINE", "0").strip() != "0"
-            local_only = offline_mode
-            resolved = resolve_snapshot_dir(self.model_name)
-            model_source = str(resolved) if resolved is not None else self.model_name
-
-            self._tokenizer = AutoTokenizer.from_pretrained(
-                model_source,
-                local_files_only=local_only,
-            )
-            self._model = AutoModel.from_pretrained(
-                model_source,
-                trust_remote_code=True,
-                local_files_only=local_only,
-            ).to(self._device)
-            self._model.eval()  # Set to evaluation mode
-
-            # Get actual dimension from model
-            if hasattr(self._model, "config") and hasattr(
-                self._model.config, "hidden_size"
-            ):
-                self._dimension = self._model.config.hidden_size
-
-            model_max = getattr(self._model.config, "max_position_embeddings", None)
-            if isinstance(model_max, int) and model_max > 0:
-                self._effective_max_input_tokens = min(
-                    self._requested_max_input_tokens,
-                    model_max,
-                )
-            else:
-                self._effective_max_input_tokens = self._requested_max_input_tokens
-
-            logger.info(
-                "Model loaded, dimension: %s, embed_max_tokens: %s",
-                self._dimension,
-                self._effective_max_input_tokens,
-            )
-
+            self._load_model_for_device(self._device)
         except Exception as e:
-            logger.error(f"Failed to load embedding model: {e}")
+            if self._device == "cuda":
+                logger.warning(
+                    "Embedding GPU init failed (%s). Retrying on CPU fallback.",
+                    e,
+                )
+                try:
+                    self._model = None
+                    self._tokenizer = None
+                    self._load_model_for_device("cpu")
+                    return
+                except Exception as cpu_e:
+                    logger.error(f"Failed to load embedding model on CPU fallback: {cpu_e}")
+            else:
+                logger.error(f"Failed to load embedding model: {e}")
             self._model = None
             self._tokenizer = None
 

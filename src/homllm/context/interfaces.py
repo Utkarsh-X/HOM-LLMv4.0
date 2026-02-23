@@ -90,6 +90,14 @@ class ContextConfig:
     coherence_same_file_bonus: float = 0.8
     coherence_different_file_bonus: float = 0.5
     ranking_surface_lock_enabled: bool = True
+    # Tier 2: Coherence refinement (post-lock, mid-range only)
+    coherence_enabled: bool = True
+    coherence_max_contribution: float = 0.15      # Max 15% of base score
+    coherence_protect_top_n: int = 3               # Never reorder top N
+    coherence_proximity_lines: int = 50            # Same-file adjacency window
+    coherence_synergy_threshold: float = 0.3       # Jaccard threshold for synergy
+    coherence_dispersion_threshold: float = 0.9    # File/block ratio penalty trigger
+    coherence_callgraph_bonus: float = 0.1         # Caller-callee adjacency bonus
 
 
 class BlockScorer(Protocol):

@@ -35,7 +35,7 @@ class QwenReranker(Reranker):
     GPU_BATCH_SIZE = 8
     CPU_BATCH_SIZE = 4
 
-    def __init__(self, model_name: str = RERANKER_MODEL_NAME):
+    def __init__(self, model_name: str = RERANKER_MODEL_NAME, device: str = "auto"):
         """
         Initialize reranker.
         
@@ -47,7 +47,8 @@ class QwenReranker(Reranker):
         self.model_name = model_name
         self._model: Optional[torch.nn.Module] = None
         self._tokenizer: Optional[object] = None
-        self._device = "cuda" if torch.cuda.is_available() else "cpu"
+        self._device = self._resolve_device(device)
+        self._requested_device = device
         self._available = False
         self._head_validated = False
         self._load_error: Optional[str] = None
@@ -75,6 +76,19 @@ class QwenReranker(Reranker):
             self._load_model()
         else:
             print("[RERANKER] transformers not available", flush=True)
+
+    @staticmethod
+    def _resolve_device(device: str) -> str:
+        requested = (device or "auto").strip().lower()
+        if requested not in {"auto", "cuda", "cpu"}:
+            logger.warning("Unknown reranker device '%s', using auto", device)
+            requested = "auto"
+        if requested == "auto":
+            return "cuda" if torch.cuda.is_available() else "cpu"
+        if requested == "cuda" and not torch.cuda.is_available():
+            logger.warning("Reranker device 'cuda' requested but CUDA not available; using cpu")
+            return "cpu"
+        return requested
 
     @staticmethod
     def _is_head_key(name: str) -> bool:
@@ -125,106 +139,109 @@ class QwenReranker(Reranker):
                     f"{tuple(score_weight.shape)} (num_labels={num_labels})"
                 )
 
-    def _load_model(self) -> None:
-        """Load reranker model."""
+    def _load_model_for_device(self, device: str) -> None:
+        """Load reranker model on a specific device."""
         if AutoModelForSequenceClassification is None:
             return
+        self._device = device
+        logger.info(f"[RERANKER MODEL] Resolved: {self.model_name}")
+        if self.model_name != RERANKER_MODEL_NAME:
+            logger.warning("Non-canonical reranker model: %s", self.model_name)
 
-        try:
-            logger.info(f"[RERANKER MODEL] Resolved: {self.model_name}")
-            # Allow alternate reranker checkpoints that include a trained head.
-            # Keep a warning for non-canonical names but do not hard-fail.
-            if self.model_name != RERANKER_MODEL_NAME:
-                logger.warning(
-                    "Non-canonical reranker model: %s", self.model_name
-                )
-            offline_mode = os.environ.get("HOMLLM_OFFLINE", "0").strip() != "0"
-            local_only = offline_mode
-            resolved = resolve_snapshot_dir(self.model_name)
-            model_source = str(resolved) if resolved is not None else self.model_name
+        offline_mode = os.environ.get("HOMLLM_OFFLINE", "0").strip() != "0"
+        local_only = offline_mode
+        resolved = resolve_snapshot_dir(self.model_name)
+        model_source = str(resolved) if resolved is not None else self.model_name
 
-            self._tokenizer = AutoTokenizer.from_pretrained(
-                model_source,
-                trust_remote_code=True,
-                local_files_only=local_only,
-            )
-            
-            # Ensure padding token is set for batched inference
-            # Try multiple fallbacks since some models don't have proper defaults
-            if self._tokenizer.pad_token is None:
-                if self._tokenizer.eos_token is not None:
-                    self._tokenizer.pad_token = self._tokenizer.eos_token
-                    logger.info("Set pad_token to eos_token for batched inference")
-                elif self._tokenizer.unk_token is not None:
-                    self._tokenizer.pad_token = self._tokenizer.unk_token
-                    logger.info("Set pad_token to unk_token for batched inference")
-                else:
-                    # Last resort: add a new pad token
-                    self._tokenizer.add_special_tokens({'pad_token': '[PAD]'})
-                    logger.info("Added new [PAD] token for batched inference")
-            
-            dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+        self._tokenizer = AutoTokenizer.from_pretrained(
+            model_source,
+            trust_remote_code=True,
+            local_files_only=local_only,
+        )
+
+        if self._tokenizer.pad_token is None:
+            if self._tokenizer.eos_token is not None:
+                self._tokenizer.pad_token = self._tokenizer.eos_token
+                logger.info("Set pad_token to eos_token for batched inference")
+            elif self._tokenizer.unk_token is not None:
+                self._tokenizer.pad_token = self._tokenizer.unk_token
+                logger.info("Set pad_token to unk_token for batched inference")
+            else:
+                self._tokenizer.add_special_tokens({"pad_token": "[PAD]"})
+                logger.info("Added new [PAD] token for batched inference")
+
+        dtype = torch.float16 if self._device == "cuda" else torch.float32
+        use_device_map = False
+        if self._device == "cuda":
             try:
                 import accelerate  # noqa: F401
                 use_device_map = True
             except Exception:
                 use_device_map = False
+        if self._device == "cuda" and not use_device_map:
+            logger.warning(
+                "accelerate not available; loading reranker without device_map"
+            )
 
-            load_kwargs: dict[str, Any] = {
-                "trust_remote_code": True,
-                "local_files_only": local_only,
-                "dtype": dtype,
-            }
-            if use_device_map:
-                load_kwargs["device_map"] = "auto"
-            else:
-                logger.warning(
-                    "accelerate not available; loading reranker without device_map"
-                )
+        load_kwargs: dict[str, Any] = {
+            "trust_remote_code": True,
+            "local_files_only": local_only,
+            "dtype": dtype,
+        }
+        if use_device_map:
+            load_kwargs["device_map"] = "auto"
 
-            loading_info: dict[str, Any] = {}
-            if use_device_map:
-                try:
-                    self._model, loading_info = AutoModelForSequenceClassification.from_pretrained(
-                        model_source,
-                        output_loading_info=True,
-                        **load_kwargs,
-                    )
-                except TypeError as exc:
-                    raise RuntimeError(
-                        "Reranker load requires transformers support for "
-                        "output_loading_info=True to validate head initialization."
-                    ) from exc
-            else:
-                try:
-                    self._model, loading_info = AutoModelForSequenceClassification.from_pretrained(
-                        model_source,
-                        output_loading_info=True,
-                        **load_kwargs,
-                    )
-                except TypeError as exc:
-                    raise RuntimeError(
-                        "Reranker load requires transformers support for "
-                        "output_loading_info=True to validate head initialization."
-                    ) from exc
-                self._model = self._model.to(self._device)
+        try:
+            self._model, loading_info = AutoModelForSequenceClassification.from_pretrained(
+                model_source,
+                output_loading_info=True,
+                **load_kwargs,
+            )
+        except TypeError as exc:
+            raise RuntimeError(
+                "Reranker load requires transformers support for "
+                "output_loading_info=True to validate head initialization."
+            ) from exc
+        if not use_device_map:
+            self._model = self._model.to(self._device)
 
-            # Sync model config with tokenizer's pad_token_id
-            if self._model.config.pad_token_id is None and self._tokenizer.pad_token_id is not None:
-                self._model.config.pad_token_id = self._tokenizer.pad_token_id
-                logger.info(f"Set model config pad_token_id to {self._tokenizer.pad_token_id}")
+        if self._model.config.pad_token_id is None and self._tokenizer.pad_token_id is not None:
+            self._model.config.pad_token_id = self._tokenizer.pad_token_id
+            logger.info(f"Set model config pad_token_id to {self._tokenizer.pad_token_id}")
 
-            self._loading_info = loading_info or {}
-            self._validate_loaded_head(self._model, self._loading_info)
-            self._head_validated = True
-            self._model.eval()
-            self._available = True
-            self._load_error = None
-            logger.info("Reranker model loaded")
+        self._loading_info = loading_info or {}
+        self._validate_loaded_head(self._model, self._loading_info)
+        self._head_validated = True
+        self._model.eval()
+        self._available = True
+        self._load_error = None
+        logger.info("Reranker model loaded on %s", self._device)
 
+    def _load_model(self) -> None:
+        """Load reranker model with optional GPU-to-CPU fallback."""
+        if AutoModelForSequenceClassification is None:
+            return
+        try:
+            self._load_model_for_device(self._device)
         except Exception as e:
-            self._load_error = str(e)
-            logger.error(f"Failed to load reranker model: {e}")
+            if self._device == "cuda":
+                logger.warning(
+                    "Reranker GPU init failed (%s). Retrying on CPU fallback.",
+                    e,
+                )
+                try:
+                    self._model = None
+                    self._tokenizer = None
+                    self._available = False
+                    self._head_validated = False
+                    self._load_model_for_device("cpu")
+                    return
+                except Exception as cpu_e:
+                    self._load_error = str(cpu_e)
+                    logger.error(f"Failed to load reranker model on CPU fallback: {cpu_e}")
+            else:
+                self._load_error = str(e)
+                logger.error(f"Failed to load reranker model: {e}")
             self._model = None
             self._tokenizer = None
             self._available = False

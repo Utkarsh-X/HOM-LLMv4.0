@@ -76,6 +76,7 @@ class IndexerPipeline:
             model_name=config.embedding_model,
             dimension=config.embedding_dimension,
             max_input_tokens=config.embedding_max_tokens,
+            device=config.embedding_device,
         )
 
         # Initialize storage adapters

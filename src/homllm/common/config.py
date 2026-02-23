@@ -60,6 +60,7 @@ class IndexerConfig:
     embedding_model: str = "Qwen/Qwen3-Embedding-0.6B"
     embedding_dimension: int = 1024
     embedding_max_tokens: int = 8192
+    embedding_device: str = "auto"
     # Entity-centric indexing (Plan A)
     entity_centric_indexing_enabled: bool = True
     type_alias_extraction_enabled: bool = False  # Disabled by default
@@ -143,6 +144,7 @@ class Config(BaseModel):
             embedding_model=idx_cfg.get("embedding_model", "Qwen/Qwen3-Embedding-0.6B"),
             embedding_dimension=idx_cfg.get("embedding_dimension", 1024),
             embedding_max_tokens=idx_cfg.get("embedding_max_tokens", 8192),
+            embedding_device=idx_cfg.get("embedding_device", "auto"),
             entity_centric_indexing_enabled=idx_cfg.get("entity_centric_indexing_enabled", True),
             type_alias_extraction_enabled=idx_cfg.get("type_alias_extraction_enabled", False),
             entity_confidence=entity_confidence,
@@ -303,6 +305,7 @@ class Config(BaseModel):
         return RankConfig(
             reranker_enabled=reranker_cfg.get("enabled", True),
             reranker_model=reranker_cfg.get("model", "Qwen/Qwen3-Reranker-0.6B"),
+            reranker_device=reranker_cfg.get("device", "auto"),
             reranker_top_m=reranker_cfg.get("top_m", 40),
             w_base=weights_cfg.get("w_base", 0.4),
             w_rerank=weights_cfg.get("w_rerank", 0.55),
@@ -395,6 +398,14 @@ class Config(BaseModel):
             ranking_surface_lock_enabled=ctx_cfg.get(
                 "ranking_surface_lock_enabled", True
             ),
+            # Tier 2: Coherence refinement
+            coherence_enabled=ctx_cfg.get("coherence_enabled", True),
+            coherence_max_contribution=ctx_cfg.get("coherence_max_contribution", 0.15),
+            coherence_protect_top_n=ctx_cfg.get("coherence_protect_top_n", 3),
+            coherence_proximity_lines=ctx_cfg.get("coherence_proximity_lines", 50),
+            coherence_synergy_threshold=ctx_cfg.get("coherence_synergy_threshold", 0.3),
+            coherence_dispersion_threshold=ctx_cfg.get("coherence_dispersion_threshold", 0.9),
+            coherence_callgraph_bonus=ctx_cfg.get("coherence_callgraph_bonus", 0.1),
         )
 
     def get_generation_config(self) -> "GenerationConfig":

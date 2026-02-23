@@ -222,6 +222,10 @@ class PresentationRenderer:
         # Pattern 4: Remove standalone "NOT_IN_CONTEXT" markers
         text = re.sub(r'\bNOT_IN_CONTEXT\b', '[not in context]', text, flags=re.IGNORECASE)
         
+        # Pattern 5: Strip <thought> blocks and their contents
+        # This keeps the terminal output clean while preserving reasoning in artifacts
+        text = re.sub(r'<thought>.*?</thought>\s*', '', text, flags=re.IGNORECASE | re.DOTALL)
+        
         # Clean up extra whitespace
         text = re.sub(r' {2,}', ' ', text)
         text = re.sub(r'\n\s*\n\s*\n+', '\n\n', text)
@@ -867,6 +871,7 @@ def main():
         context_pipeline = ContextPipeline(
             config=context_config,
             embedder=embedder,
+            callgraph=callgraph,
         )
 
         context_artifact = context_pipeline.assemble(
@@ -1145,6 +1150,7 @@ def main():
                     boosted_pipeline = ContextPipeline(
                         config=boosted_context_config,
                         embedder=embedder,
+                        callgraph=callgraph,
                     )
                     context_artifact = boosted_pipeline.assemble(
                         ranking_output=ranking_output,
@@ -1471,97 +1477,16 @@ def main():
         generation_result = generation_adapter.generate(generation_request)
         generation_end = time.perf_counter()
 
-        # ── DUAL-PASS CRITIQUE (CQI ≥ 0.50 + weak generation) ──
-        dual_pass_applied = False
-        if cqi_result and cqi_result["cqi4"] >= 0.50:
-            try:
-                from homllm.quality.answer_validator import validate_answer
-                drop_trace = context_artifact.provenance.get("context_drop_trace", [])
-                first_pass_validation = validate_answer(
-                    args.query,
-                    generation_result.raw_text,
-                    drop_trace,
-                    context_artifact.used_tokens,
-                )
-                gci_evid = first_pass_validation["dimensions"]["evidence_density"]
-                gci_trace = first_pass_validation["dimensions"]["trace_completeness"]
-                gci_entity = first_pass_validation["dimensions"]["entity_coverage"]
-                # Completeness proxy: average of trace + entity + comparative
-                completeness_score = (
-                    gci_trace 
-                    + gci_entity 
-                    + first_pass_validation["dimensions"]["comparative_structure"]
-                ) / 3.0
-
-                # Phase 7: Lowered trigger — focus on evidence + completeness axes
-                dual_pass_reason = None
-                if gci_evid < 0.45:
-                    dual_pass_reason = "low_evidence"
-                elif completeness_score < 0.80:
-                    dual_pass_reason = "low_completeness"
-                
-                if dual_pass_reason:
-                    logger.info(
-                        f"[DUAL_PASS_TRIGGERED] reason={dual_pass_reason} "
-                        f"CQI={cqi_result['cqi4']:.3f}, evid={gci_evid:.3f}, "
-                        f"completeness={completeness_score:.3f}"
-                    )
-                    # Phase 7: Improved critique prompt with deterministic completeness
-                    critique_variables = dict(template_variables)
-                    critique_variables["query"] = (
-                        f"CRITIQUE AND IMPROVE the following answer to: {args.query}\n\n"
-                        f"--- FIRST-PASS ANSWER ---\n{generation_result.raw_text}\n"
-                        f"--- END FIRST-PASS ---\n\n"
-                        f"Systematically review the answer against the provided context. "
-                        f"Check each dimension:\n"
-                        f"1. CONTROL FLOW: Does the answer trace the complete execution path? "
-                        f"   List any missing steps.\n"
-                        f"2. EDGE CASES: Are boundary conditions and special inputs addressed? "
-                        f"   List any missing edge cases from context.\n"
-                        f"3. ERROR HANDLING: Are failure modes and exception paths covered? "
-                        f"   List any missing error handling from context.\n"
-                        f"4. CROSS-COMPONENT: Are interactions between modules documented? "
-                        f"   List any missing integration points.\n"
-                        f"5. EVIDENCE: Does every claim reference a specific source?\n\n"
-                        f"Then provide a CORRECTED, COMPLETE version that addresses ALL gaps. "
-                        f"Do NOT add speculative information. Do NOT increase verbosity "
-                        f"beyond what is needed to cover missing dimensions. "
-                        f"For anything not in context, state 'The provided context does not specify X.'\n"
-                    )
-                    critique_request = GenerationRequest(
-                        request_id=f"{retrieval_result.query_id}_critique",
-                        query=critique_variables["query"],
-                        intent=intent,
-                        context_artifact=context_artifact,
-                        prompt_template=selected_template,
-                        template_variables=critique_variables,
-                        output_mode="TEXT",
-                        model_config=model_config,
-                    )
-                    critique_result = generation_adapter.generate(critique_request)
-                    if critique_result.status == "OK" and len(critique_result.raw_text) > 100:
-                        generation_result = critique_result
-                        dual_pass_applied = True
-                        logger.info(
-                            f"[DUAL_PASS] Applied — reason={dual_pass_reason}, "
-                            f"tokens_out={critique_result.tokens_out}"
-                        )
-            except Exception as e:
-                logger.debug(f"Dual-pass skipped: {e}")
-
-        generation_end_final = time.perf_counter()
-
         telemetry.record_phase(
             "GENERATION",
             generation_start,
-            generation_end_final,
+            generation_end,
             provider=provider_name,
             model=generation_result.model,
             tokens_in=generation_result.tokens_in,
             tokens_out=generation_result.tokens_out,
             status=generation_result.status,
             finish_reason=generation_result.finish_reason,
-            dual_pass=dual_pass_applied,
             cqi4=cqi_result["cqi4"] if cqi_result else None,
         )
 
