@@ -98,6 +98,19 @@ class ContextConfig:
     coherence_synergy_threshold: float = 0.3       # Jaccard threshold for synergy
     coherence_dispersion_threshold: float = 0.9    # File/block ratio penalty trigger
     coherence_callgraph_bonus: float = 0.1         # Caller-callee adjacency bonus
+    # Tier 3B: Submodular context packer
+    submodular_packer_enabled: bool = False
+    submodular_w_rrf: float = 0.40
+    submodular_w_novelty: float = 0.20
+    submodular_w_graph: float = 0.20
+    submodular_w_concept: float = 0.20
+    submodular_min_density_epsilon: float = 0.001
+    submodular_novelty_scaling: str = "none"  # "none" or "file_concentration"
+    # Tier 3B: Relevance safety guard
+    relevance_gate_enabled: bool = False
+    relevance_gate_threshold: float = 0.25
+    # Tier 3B: Sufficiency escape hatch
+    escape_hatch_enabled: bool = False
 
 
 class BlockScorer(Protocol):

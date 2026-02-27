@@ -15,6 +15,7 @@ indexer:
   embedding_model: "Qwen/Qwen3-Embedding-0.6B"
   embedding_dimension: 1024
   embedding_max_tokens: 1024
+  embedding_device: "auto"  # auto|cuda|cpu
   storage:
     duckdb_path: "indexes/metadata.duckdb"
     tantivy_path: "indexes/bm25.index"
@@ -97,14 +98,25 @@ retrieval:
     min_similarity: 0.25
   
   # ==========================================================================
+  # Tier 3B: Adaptive Retrieval Geometry
+  # ==========================================================================
+  adaptive_seed:
+    enabled: true
+    min_k: 20
+    max_k: 150
+    drop_threshold: 0.30
+  
+  # ==========================================================================
   # Plan B: Retrieval Layer Activation
   # ==========================================================================
   
   plan_b_enabled: true
   
   # Diversity-aware MMR (post-RRF redundancy elimination)
+  # DISABLED: Diversity is now handled solely by the ranking set optimizer
+  # (richer signals). Retrieval-level MMR was double-enforcing diversity.
   diversity_mmr:
-    enabled: true
+    enabled: false
     lambda: 0.6  # Trade-off: 1.0 = relevance only, 0.0 = diversity only
     similarity_threshold: 0.85  # Penalize if similarity exceeds this
   
@@ -197,7 +209,8 @@ ranking:
     lambda: 0.85
   set_optimization:
     enabled: true
-    token_budget: 3200
+    token_budget: 3600  # Tier 2: Matches effective context budget (4400 - 800 reserve)
+    max_rounds: 100  # Safety cap (CELF converges naturally, no brute-force scaling)
     w_relevance: 1.0
     w_structural: 0.6
     w_coverage: 0.8
@@ -206,7 +219,8 @@ ranking:
   reranker:
     enabled: true
     model: "tomaarsen/Qwen3-Reranker-0.6B-seq-cls"
-    top_m: 40
+    device: "auto"  # auto|cuda|cpu
+    top_m: 20  # Reduced from 40 to halve CPU reranker time
     gating:
       enabled: false
       threshold_margin: 0.2
@@ -231,7 +245,7 @@ ranking:
       bonus_cap: 0.2
 
 context:
-  max_tokens: 4000
+  max_tokens: 4400  # Tier 2: Increased from 4000 (effective: 3600 after reserve)
   generation_reserve_tokens: 800  # Tokens reserved for generation output
   budget_mode: adaptive
   summarization_enabled: false
@@ -243,13 +257,28 @@ context:
     w_name: 0.2
     w_structural: 0.0
     w_novelty: 0.0
-    w_coherence: 0.0
+    w_coherence: 0.1
   structural_priority_entrypoint_bonus: 0.5
   structural_priority_decorator_bonus: 0.3
   structural_priority_callgraph_bonus: 0.2
   structural_priority_cap: 1.0
   coherence_same_file_bonus: 0.8
   coherence_different_file_bonus: 0.5
+  # Tier 2: Coherence refinement (post-lock, mid-range only)
+  coherence_enabled: true
+  coherence_max_contribution: 0.15
+  coherence_protect_top_n: 3
+  coherence_proximity_lines: 50
+  coherence_synergy_threshold: 0.3
+  coherence_dispersion_threshold: 0.9
+  coherence_callgraph_bonus: 0.1
+  # Tier 3B: Submodular context packing
+  submodular_packer_enabled: true
+  # Tier 3B: Relevance safety guard
+  relevance_gate_enabled: true
+  relevance_gate_threshold: 0.25
+  # Tier 3B: Sufficiency escape hatch (not yet implemented)
+  escape_hatch_enabled: false
 
 intelligence:
   enabled: true

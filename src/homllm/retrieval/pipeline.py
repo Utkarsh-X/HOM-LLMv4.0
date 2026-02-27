@@ -19,6 +19,7 @@ from homllm.indexer.embedder import QwenEmbedder
 from homllm.indexer.storage.duckdb_adapter import DuckDBAdapter
 from homllm.indexer.storage.filesystem_adapter import FilesystemAdapter
 from homllm.retrieval.bm25 import BM25Retriever
+from homllm.retrieval.adaptive_gate import hybrid_knee_gate
 from homllm.retrieval.budget import select_candidates_with_budget
 from homllm.retrieval.deduplication import deduplicate_hierarchical
 from homllm.retrieval.expander import StructuralExpanderImpl
@@ -34,6 +35,16 @@ from homllm.retrieval.preparer import SimpleQueryPreparer
 from homllm.retrieval.vector import VectorRetriever
 
 logger = logging.getLogger(__name__)
+
+
+def _candidate_order_key(candidate) -> tuple[float, str, str, str]:
+    """Deterministic retrieval ordering key."""
+    return (
+        -float(candidate.hybrid_score),
+        str(candidate.doc_id),
+        str(candidate.file or ""),
+        str(candidate.symbol_id or ""),
+    )
 
 
 class RetrievalPipeline:
@@ -124,7 +135,16 @@ class RetrievalPipeline:
         
         # Plan B: Initialize graph stitch expander
         self._graph_stitch_expander = None
-        if config.plan_b_enabled and config.graph_stitch_enabled and duckdb_path:
+        if not config.plan_b_enabled:
+            self._graph_stitch_status = "disabled_plan_b_off"
+            self._graph_stitch_status_detail: dict[str, object] = {"reason": "plan_b_disabled"}
+        elif not config.graph_stitch_enabled:
+            self._graph_stitch_status = "disabled_config_off"
+            self._graph_stitch_status_detail = {"reason": "graph_stitch_disabled_in_config"}
+        elif not duckdb_path:
+            self._graph_stitch_status = "disabled_no_duckdb"
+            self._graph_stitch_status_detail = {"reason": "duckdb_path_missing"}
+        else:
             try:
                 from homllm.retrieval.graph_stitch import GraphStitchExpander, GraphStitchConfig
                 
@@ -139,8 +159,17 @@ class RetrievalPipeline:
                     beam_low=config.graph_stitch_beam_low,
                 )
                 self._graph_stitch_expander = GraphStitchExpander(duckdb_path, graph_config)
+                self._graph_stitch_status = self._graph_stitch_expander.status()
+                self._graph_stitch_status_detail = self._graph_stitch_expander.status_detail()
+                logger.info(
+                    "[GRAPH_STITCH] status=%s detail=%s",
+                    self._graph_stitch_status,
+                    self._graph_stitch_status_detail,
+                )
             except Exception as e:
                 logger.warning(f"Failed to initialize graph stitch: {e}")
+                self._graph_stitch_status = "disabled_init_error"
+                self._graph_stitch_status_detail = {"error": str(e)}
 
     def retrieve(
         self, query: str, intent: Intent = Intent.UNKNOWN, top_k: int = 50
@@ -253,14 +282,34 @@ class RetrievalPipeline:
                 apply_mmr=apply_mmr_in_merge,
             )
             merge_ms = (time.perf_counter() - merge_start) * 1000
+            count_after_merge = len(merged)
 
-            # Post-merge cap (applied before MMR/graph/expansion)
-            if effective_post_merge_candidates and len(merged) > effective_post_merge_candidates:
+            # Post-merge gate: adaptive knee or static cap
+            knee_gate_result = None
+            if plan_b_active and self.config.adaptive_seed_enabled:
+                knee_gate_result = hybrid_knee_gate(
+                    merged,
+                    min_k=self.config.adaptive_seed_min_k,
+                    max_k=self.config.adaptive_seed_max_k,
+                    relative_drop_threshold=self.config.adaptive_seed_drop_threshold,
+                )
+                merged = knee_gate_result.candidates
+            elif plan_b_active:
+                # Stabilization invariant: no static post-merge caps in Plan B.
+                if effective_post_merge_candidates and len(merged) > effective_post_merge_candidates:
+                    logger.info(
+                        "[RETRIEVAL] static post-merge cap ignored under Plan B stabilization (configured=%d current=%d)",
+                        effective_post_merge_candidates,
+                        len(merged),
+                    )
+            elif effective_post_merge_candidates and len(merged) > effective_post_merge_candidates:
                 merged = merged[:effective_post_merge_candidates]
+            count_after_cap = len(merged)
             
             # Hierarchical deduplication before MMR
             if plan_b_active and self.config.hierarchical_dedup_enabled:
                 merged = deduplicate_hierarchical(merged, intent=intent)
+            count_after_dedup = len(merged)
 
             # MMR
             if not apply_mmr_in_merge:
@@ -269,6 +318,7 @@ class RetrievalPipeline:
                 mmr_ms = (time.perf_counter() - mmr_start) * 1000
             else:
                 mmr_ms = 0.0
+            count_after_mmr = len(merged)
             
             # =================================================================
             # Plan B: Step 3 — Intent-Driven Granularity Boosting
@@ -287,6 +337,7 @@ class RetrievalPipeline:
                     intent,
                     self.config.granularity_mixing_profiles,
                 )
+            count_after_granularity = len(merged)
 
             # 4. Structural expansion
             if self.config.expansion_enabled:
@@ -297,6 +348,7 @@ class RetrievalPipeline:
                     graph_stitch_ms = (time.perf_counter() - gs_start) * 1000
                 else:
                     graph_stitch_ms = 0.0
+                count_after_graph_stitch = len(merged)
                 
                 # Legacy expansion (callgraph-based, cached at init)
                 callgraph = self._callgraph_cache
@@ -306,6 +358,8 @@ class RetrievalPipeline:
             else:
                 graph_stitch_ms = 0.0
                 expansion_ms = 0.0
+                count_after_graph_stitch = len(merged)
+            count_after_expansion = len(merged)
 
             # 5. Precision recovery (missing entity detection)
             pr_start = time.perf_counter()
@@ -317,6 +371,7 @@ class RetrievalPipeline:
             )
             precision_ms = (time.perf_counter() - pr_start) * 1000
             precision_metrics = getattr(self.precision_recovery, "last_metrics", {})
+            count_after_precision = len(merged)
             if precision_metrics.get("precision_recovery_added", 0):
                 logger.info(
                     "[PRECISION_RECOVERY_QUERY] query_id=%s added=%s cap=%s conf_mean=%s",
@@ -327,10 +382,12 @@ class RetrievalPipeline:
                 )
 
             # 6. Budget-aware selection + top-k
+            # When adaptive_seed_enabled, skip retrieval-level budget gate
+            # (the submodular packer in context layer handles allocation)
             budget_used = None
             budget_effective = None
-            if plan_b_active and self.config.budget_aware_selection:
-                merged = sorted(merged, key=lambda c: c.hybrid_score, reverse=True)
+            if plan_b_active and self.config.budget_aware_selection and not self.config.adaptive_seed_enabled:
+                merged = sorted(merged, key=_candidate_order_key)
                 merged, budget_tracker = select_candidates_with_budget(
                     merged,
                     total_budget=self.config.context_budget,
@@ -341,6 +398,21 @@ class RetrievalPipeline:
 
             final_candidates = merged[:effective_output_top_k]
             total_ms = (time.perf_counter() - t0) * 1000
+
+            # Stage trace (Tier 3 instrumentation)
+            retrieval_stage_trace = {
+                "bm25_raw": len(bm25_results),
+                "vector_raw": len(vector_results),
+                "after_merge": count_after_merge,
+                "after_cap": count_after_cap,
+                "after_dedup": count_after_dedup,
+                "after_mmr": count_after_mmr,
+                "after_granularity": count_after_granularity,
+                "after_graph_stitch": count_after_graph_stitch,
+                "after_expansion": count_after_expansion,
+                "after_precision": count_after_precision,
+                "final_output": len(final_candidates),
+            }
 
             logger.info(
                 "[RETRIEVAL_PROFILE] prep_ms=%.1f bm25_ms=%s vector_ms=%s merge_ms=%.1f mmr_ms=%.1f granularity_ms=%.1f graph_stitch_ms=%.1f expansion_ms=%.1f precision_ms=%.1f total_ms=%.1f",
@@ -398,6 +470,16 @@ class RetrievalPipeline:
                     "mmr_error": getattr(self.merger, "last_metrics", {}).get("mmr_error"),
                     "budget_used_tokens": budget_used,
                     "budget_effective_tokens": budget_effective,
+                    "retrieval_stage_trace": retrieval_stage_trace,
+                    "graph_stitch_status": self._graph_stitch_status,
+                    "graph_stitch_status_detail": self._graph_stitch_status_detail,
+                    # Tier 3B: adaptive seed gate telemetry
+                    "adaptive_seed_enabled": self.config.adaptive_seed_enabled,
+                    "knee_gate": {
+                        "knee_position": knee_gate_result.knee_position if knee_gate_result else None,
+                        "pre_knee_count": knee_gate_result.pre_knee_count if knee_gate_result else None,
+                        "post_knee_count": knee_gate_result.post_knee_count if knee_gate_result else None,
+                    } if knee_gate_result else None,
                 },
             )
 

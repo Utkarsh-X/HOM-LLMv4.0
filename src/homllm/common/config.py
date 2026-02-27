@@ -249,6 +249,11 @@ class Config(BaseModel):
             granularity_mixing_enabled=granularity_mix_cfg.get("enabled", True),
             granularity_mixing_profiles=self._parse_granularity_mixing_profiles(granularity_mix_cfg),
             hierarchical_dedup_enabled=dedup_cfg.get("enabled", True),
+            # Tier 3B: Adaptive retrieval geometry
+            adaptive_seed_enabled=ret_cfg.get("adaptive_seed", {}).get("enabled", False),
+            adaptive_seed_min_k=ret_cfg.get("adaptive_seed", {}).get("min_k", 20),
+            adaptive_seed_max_k=ret_cfg.get("adaptive_seed", {}).get("max_k", 150),
+            adaptive_seed_drop_threshold=ret_cfg.get("adaptive_seed", {}).get("drop_threshold", 0.30),
         )
     
     def _parse_granularity_boost_table(self, cfg: dict) -> dict:
@@ -350,6 +355,8 @@ class Config(BaseModel):
             set_opt_w_coverage=set_opt_cfg.get("w_coverage", 0.8),
             set_opt_w_redundancy=set_opt_cfg.get("w_redundancy", 0.5),
             set_opt_w_dispersion=set_opt_cfg.get("w_dispersion", 0.4),
+
+            set_opt_max_rounds=set_opt_cfg.get("max_rounds", 100),
             concentration_top_k=rank_cfg.get("concentration_top_k", 10),
         )
 
@@ -360,6 +367,7 @@ class Config(BaseModel):
         ctx_cfg = self.context
 
         scoring_weights = ctx_cfg.get("scoring_weights", {})
+        submodular_cfg = ctx_cfg.get("submodular", {})
         
         # Compute safe default for generation reserve: 20% of max_tokens, minimum 400
         max_tokens = ctx_cfg.get("max_tokens", 4000)
@@ -406,6 +414,23 @@ class Config(BaseModel):
             coherence_synergy_threshold=ctx_cfg.get("coherence_synergy_threshold", 0.3),
             coherence_dispersion_threshold=ctx_cfg.get("coherence_dispersion_threshold", 0.9),
             coherence_callgraph_bonus=ctx_cfg.get("coherence_callgraph_bonus", 0.1),
+            # Tier 3B: Submodular packer
+            submodular_packer_enabled=ctx_cfg.get("submodular_packer_enabled", False),
+            submodular_w_rrf=submodular_cfg.get("w_rrf", 0.40),
+            submodular_w_novelty=submodular_cfg.get("w_novelty", 0.20),
+            submodular_w_graph=submodular_cfg.get("w_graph", 0.20),
+            submodular_w_concept=submodular_cfg.get("w_concept", 0.20),
+            submodular_min_density_epsilon=submodular_cfg.get(
+                "min_density_epsilon", 0.001
+            ),
+            submodular_novelty_scaling=submodular_cfg.get(
+                "novelty_scaling", "none"
+            ),
+            # Tier 3B: Relevance gate
+            relevance_gate_enabled=ctx_cfg.get("relevance_gate_enabled", False),
+            relevance_gate_threshold=ctx_cfg.get("relevance_gate_threshold", 0.25),
+            # Tier 3B: Escape hatch
+            escape_hatch_enabled=ctx_cfg.get("escape_hatch_enabled", False),
         )
 
     def get_generation_config(self) -> "GenerationConfig":

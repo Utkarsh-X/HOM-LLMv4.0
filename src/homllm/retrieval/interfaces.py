@@ -181,6 +181,14 @@ class RetrievalConfig:
     
     # Hierarchical deduplication
     hierarchical_dedup_enabled: bool = True
+
+    # ==========================================================================
+    # Tier 3B: Adaptive Retrieval Geometry
+    # ==========================================================================
+    adaptive_seed_enabled: bool = False
+    adaptive_seed_min_k: int = 20
+    adaptive_seed_max_k: int = 150
+    adaptive_seed_drop_threshold: float = 0.30
     
     def __post_init__(self):
         """Set defaults for Plan B config."""

@@ -16,6 +16,7 @@ from homllm.context.interfaces import (
 )
 from homllm.context.scorer import ContextBlockScorer
 from homllm.context.stitcher import ContextStitcher
+from homllm.context.submodular_packer import PackerConfig, submodular_pack
 from homllm.ranking.interfaces import DebugTrace, RankingOutput
 
 logger = logging.getLogger(__name__)
@@ -218,34 +219,102 @@ class ContextPipeline:
                 sb for sb in scored_blocks if sb.block.block_id in unique_ids
             ]
 
-            # 4. Budget allocation
-            # Apply generation reserve: context cannot use the full token budget
+            # 4. Budget allocation (standard or submodular packer)
             effective_context_budget = self.config.max_tokens - self.config.generation_reserve_tokens
-            
-            budget_config = BudgetConfig(
-                max_tokens=effective_context_budget,
-                budget_mode=self.config.budget_mode,
-                structural_priority_multiplier=self.config.structural_priority_multiplier,
-            )
+            submodular_telemetry = None
 
-            allocated_blocks = self.budget_manager.allocate(
-                unique_scored,
-                {
-                    "query": query,
-                    "synthesis_score": synthesis_profile.synthesis_score,
-                    "synthesis_components": {
-                        "concept_density": synthesis_profile.concept_density,
-                        "file_dispersion": synthesis_profile.file_dispersion,
-                        "semantic_entropy": synthesis_profile.semantic_entropy,
-                        "retrieval_disagreement": synthesis_profile.retrieval_disagreement,
+            if getattr(self.config, "submodular_packer_enabled", False):
+                # Tier 3B: Submodular context packing
+                # Build graph edges from callgraph for graph_gain
+                graph_edges: dict[str, set[str]] = {}
+                submodular_graph_weight = float(
+                    getattr(self.config, "submodular_w_graph", 0.20) or 0.0
+                )
+                graph_isolation_active = submodular_graph_weight <= 0.0
+                graph_isolation_reason = "weight_zero" if graph_isolation_active else "weight_nonzero"
+                if not graph_isolation_active and self.callgraph:
+                    # Support both legacy {"edges":[...]} and runtime map {caller:[callee,...]}.
+                    if isinstance(self.callgraph.get("edges"), list):
+                        for edge in self.callgraph.get("edges", []):
+                            caller = edge.get("caller_id", "")
+                            callee = edge.get("callee_id", "")
+                            if caller and callee:
+                                graph_edges.setdefault(caller, set()).add(callee)
+                                graph_edges.setdefault(callee, set()).add(caller)
+                    else:
+                        for caller, callees in sorted(self.callgraph.items()):
+                            if not caller or not isinstance(callees, list):
+                                continue
+                            for callee in sorted(callees):
+                                if callee:
+                                    graph_edges.setdefault(caller, set()).add(callee)
+                                    graph_edges.setdefault(callee, set()).add(caller)
+
+                packer_config = PackerConfig(
+                    max_tokens=effective_context_budget,
+                    w_rrf=getattr(self.config, "submodular_w_rrf", 0.40),
+                    w_novelty=getattr(self.config, "submodular_w_novelty", 0.20),
+                    w_graph=getattr(self.config, "submodular_w_graph", 0.20),
+                    w_concept=getattr(self.config, "submodular_w_concept", 0.20),
+                    min_density_epsilon=getattr(
+                        self.config, "submodular_min_density_epsilon", 0.001
+                    ),
+                    novelty_scaling=getattr(
+                        self.config, "submodular_novelty_scaling", "none"
+                    ),
+                    enabled=True,
+                )
+                pack_result = submodular_pack(
+                    unique_scored, query, packer_config, graph_edges
+                )
+                # Re-sort to preserve original ranking order (packer selects WHICH,
+                # ranking controls ORDER — ranking surface lock invariant)
+                selected_ids = {sb.block.block_id for sb in pack_result.selected}
+                ordered_selected = [sb for sb in unique_scored if sb.block.block_id in selected_ids]
+                # Wrap into AllocatedBlock (stitcher expects truncated_content)
+                from homllm.context.interfaces import AllocatedBlock
+                allocated_blocks = [
+                    AllocatedBlock(
+                        block=sb.block,
+                        allocated_tokens=len(sb.block.content or "") // 4,
+                        truncated_content=sb.block.content or "",
+                    )
+                    for sb in ordered_selected
+                ]
+                submodular_telemetry = pack_result.telemetry
+                if isinstance(submodular_telemetry, dict):
+                    submodular_telemetry["graph_isolation"] = {
+                        "active": graph_isolation_active,
+                        "reason": graph_isolation_reason,
+                        "graph_weight": submodular_graph_weight,
+                        "graph_edge_count_used": sum(len(v) for v in graph_edges.values()),
+                    }
+            else:
+                # Standard budget allocation
+                budget_config = BudgetConfig(
+                    max_tokens=effective_context_budget,
+                    budget_mode=self.config.budget_mode,
+                    structural_priority_multiplier=self.config.structural_priority_multiplier,
+                )
+
+                allocated_blocks = self.budget_manager.allocate(
+                    unique_scored,
+                    {
+                        "query": query,
+                        "synthesis_score": synthesis_profile.synthesis_score,
+                        "synthesis_components": {
+                            "concept_density": synthesis_profile.concept_density,
+                            "file_dispersion": synthesis_profile.file_dispersion,
+                            "semantic_entropy": synthesis_profile.semantic_entropy,
+                            "retrieval_disagreement": synthesis_profile.retrieval_disagreement,
+                        },
+                        "integration_pressure": integration_profile.integration_pressure,
+                        "distinct_files_topn": max(1, int(round(integration_profile.file_dispersion * min(20, len(unique_scored))))),
                     },
-                    "integration_pressure": integration_profile.integration_pressure,
-                    "distinct_files_topn": max(1, int(round(integration_profile.file_dispersion * min(20, len(unique_scored))))),
-                },
-                budget_config,
-                self.tokenizer,
-                preserve_order=True,
-            )
+                    budget_config,
+                    self.tokenizer,
+                    preserve_order=True,
+                )
             stage_counts["allocated_blocks"] = len(allocated_blocks)
             stage_file_histograms["allocated"] = _file_hist([ab.block for ab in allocated_blocks])
 
@@ -321,6 +390,32 @@ class ContextPipeline:
                         "block_content": block.content if reason == "kept" else None,
                     }
                 )
+            kept_drop_entries = [d for d in drop_trace if d["drop_reason"] == "kept"]
+            kept_file_counts = Counter(d["file"] for d in kept_drop_entries if d.get("file"))
+            top_file_concentration = (
+                max(kept_file_counts.values()) / max(1, len(kept_drop_entries))
+                if kept_file_counts
+                else 0.0
+            )
+            top3_ranked_survivors = sum(
+                1 for d in drop_trace[:3] if d["drop_reason"] == "kept"
+            )
+            depth_preservation_check = {
+                "top_file_concentration_ratio": round(top_file_concentration, 6),
+                "top3_ranked_survivors": int(top3_ranked_survivors),
+                "top3_ranked_retention_ratio": round(top3_ranked_survivors / 3.0, 6),
+                "top3_min2_guard_passed": bool(top3_ranked_survivors >= 2),
+                "multi_block_same_file_present": any(v >= 2 for v in kept_file_counts.values()),
+                "file_repetition_distribution": dict(
+                    sorted(kept_file_counts.items(), key=lambda kv: (-kv[1], kv[0]))
+                ),
+            }
+            if top3_ranked_survivors < 2:
+                logger.warning(
+                    "[DEPTH_PRESERVATION] top3 survivor guard failed: survivors=%d query_id=%s",
+                    top3_ranked_survivors,
+                    query_id,
+                )
 
             # Coherence refinement telemetry
             coherence_details = getattr(self.scorer, "_last_coherence_details", None) or []
@@ -359,6 +454,11 @@ class ContextPipeline:
                 "context_drop_trace": drop_trace,
                 "coherence_refinement": coherence_telemetry,
                 "stitching": stitch_telemetry,
+                "submodular_packer": submodular_telemetry,
+                "depth_preservation_check": depth_preservation_check,
+                "utilization_diagnostic": getattr(
+                    self.budget_manager, "_last_utilization_diagnostic", None
+                ),
                 "context_synthesis": {
                     "synthesis_score": synthesis_profile.synthesis_score,
                     "concept_density": synthesis_profile.concept_density,
@@ -411,6 +511,7 @@ class ContextPipeline:
         except Exception as e:
             if "RANKING_AUTHORITY_LOCK_VIOLATION" in str(e):
                 raise
+            import traceback, sys; sys.stderr.write(f"[CTX_ASSEMBLY_ERROR] {e}\n"); traceback.print_exc(file=sys.stderr); sys.stderr.flush()
             logger.error(f"Context assembly failed: {e}")
             # Return empty context on error
             return ContextArtifact(
