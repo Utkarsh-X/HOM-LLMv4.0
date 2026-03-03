@@ -11,6 +11,20 @@ indexer:
     - "__pycache__"
     - "*.pyc"
     - ".venv"
+    # Investigation/debug scaffolding exclusions
+    - "tests/**"
+    - "**/tests/**"
+    - "**/test_*.py"
+    - "tmp_*"
+    - "**/tmp_*"
+    - "**/tmp_*.py"
+    - "diagnose_*"
+    - "**/diagnose_*"
+    - "debug_*"
+    - "**/debug_*"
+    - "diagnostics/**"
+    - "**/diagnostics/**"
+    - "scripts/diagnose_*"
   chunk_max_lines: 100
   embedding_model: "Qwen/Qwen3-Embedding-0.6B"
   embedding_dimension: 1024
@@ -209,7 +223,7 @@ ranking:
     lambda: 0.85
   set_optimization:
     enabled: true
-    token_budget: 3600  # Tier 2: Matches effective context budget (4400 - 800 reserve)
+    token_budget: 8000  # Stage 2 root-cause pass: reduce pre-context pruning starvation
     max_rounds: 100  # Safety cap (CELF converges naturally, no brute-force scaling)
     w_relevance: 1.0
     w_structural: 0.6
@@ -220,7 +234,8 @@ ranking:
     enabled: true
     model: "tomaarsen/Qwen3-Reranker-0.6B-seq-cls"
     device: "auto"  # auto|cuda|cpu
-    top_m: 20  # Reduced from 40 to halve CPU reranker time
+    top_m: 35  # A3: expanded from 20 for better coverage without tripling latency
+    bm25_rescue_top_k: 15  # A3: also rerank high-BM25 candidates outside top-M
     gating:
       enabled: false
       threshold_margin: 0.2
@@ -228,13 +243,16 @@ ranking:
       threshold_disagreement: 0.5
       top_k: 50
       min_candidates: 3
+  # Canonical control surfaces for final score fusion (D1).
+  # Formula: final_score = w_base*base + w_rerank*rerank + w_struct*struct
+  # Replaces legacy geometry.rerank_alpha / struct_gamma.
   geometry:
-    rerank_alpha: 0.32
-    struct_gamma: 0.05
+    rerank_alpha: 0.32  # deprecated, use weights.w_rerank
+    struct_gamma: 0.05  # deprecated, use weights.w_struct
   weights:
-    w_base: 0.4
-    w_rerank: 0.55
-    w_struct: 0.05
+    w_base: 1.0    # base score weight (1.0 = additive baseline)
+    w_rerank: 0.32 # reranker contribution (was rerank_alpha)
+    w_struct: 0.05 # structural bonus weight (was struct_gamma)
     w_bm25: 0.4
     w_dense: 0.4
     w_name: 0.2
@@ -274,9 +292,21 @@ context:
   coherence_callgraph_bonus: 0.1
   # Tier 3B: Submodular context packing
   submodular_packer_enabled: true
+  submodular:
+    w_rrf: 0.70
+    w_novelty: 0.10
+    w_graph: 0.05
+    w_concept: 0.15
+    min_density_epsilon: 0.0003
+    novelty_scaling: file_concentration
   # Tier 3B: Relevance safety guard
   relevance_gate_enabled: true
   relevance_gate_threshold: 0.25
+  # Tier 3C: Conservative precision filter to reduce low-signal spillover blocks.
+  precision_filter_enabled: false
+  precision_filter_query_identifier_min: 1
+  precision_filter_low_score_threshold: 0.25
+  precision_filter_min_kept_blocks: 10
   # Tier 3B: Sufficiency escape hatch (not yet implemented)
   escape_hatch_enabled: false
 
@@ -313,14 +343,24 @@ intelligence:
     utilization_expand_max: 10
   
   # ABRM (Assumption-Bound Reasoning Mode)
-  abrm_enabled: true
+  abrm_enabled: false
   abrm_disable_on_cold_start: false
   p2_budget_increase_pct: 40
+
+  # Claim-Coverage Gate (query-agnostic context sufficiency control)
+  claim_coverage:
+    enabled: false  # Keep off by default until post-coverage context quality gap is fixed
+    required_coverage_threshold: 0.70
+    claim_cover_threshold: 0.55
+    soft_recovery_enabled: true
+    max_recovery_passes: 1
+    max_required_claims: 8
+    recovery_top_k: 20
 
 generation:
   default_provider: gemini
   default_model: "gemini-2.5-flash"
-  temperature: 0.0
+  temperature: 0.15
   max_output_tokens: 12000  # Increased to reduce PARTIAL responses
 
 evaluation:

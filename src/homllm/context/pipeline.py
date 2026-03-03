@@ -1,6 +1,7 @@
 """Context assembly pipeline orchestrator."""
 
 import logging
+import re
 import uuid
 from collections import Counter
 from typing import Optional
@@ -72,6 +73,7 @@ class ContextPipeline:
         ranking_output: RankingOutput,
         query: str,
         query_id: Optional[str] = None,
+        unresolved_claim_hints: Optional[list[str]] = None,
     ) -> ContextArtifact:
         """
         Execute context assembly pipeline.
@@ -110,6 +112,7 @@ class ContextPipeline:
                     provenance={
                         "query": query,
                         "query_text": query,
+                        "unresolved_claim_hints": list(unresolved_claim_hints or []),
                         "ranking_surface_lock_enabled": ranking_surface_lock_enabled,
                         "ranking_order_preserved": True,
                         "context_reorder_count": 0,
@@ -265,7 +268,8 @@ class ContextPipeline:
                     enabled=True,
                 )
                 pack_result = submodular_pack(
-                    unique_scored, query, packer_config, graph_edges
+                    unique_scored, query, packer_config, graph_edges,
+                    tokenizer=self.tokenizer,
                 )
                 # Re-sort to preserve original ranking order (packer selects WHICH,
                 # ranking controls ORDER — ranking surface lock invariant)
@@ -318,6 +322,19 @@ class ContextPipeline:
             stage_counts["allocated_blocks"] = len(allocated_blocks)
             stage_file_histograms["allocated"] = _file_hist([ab.block for ab in allocated_blocks])
 
+            # Tier 3C: Conservative precision filter for explicit-identifier queries.
+            precision_filter_trace = None
+            if getattr(self.config, "precision_filter_enabled", False):
+                allocated_blocks, precision_filter_trace = self._apply_precision_filter(
+                    allocated_blocks=allocated_blocks,
+                    scored_map={sb.block.block_id: sb for sb in unique_scored},
+                    query=query,
+                )
+                stage_counts["precision_filtered_blocks"] = len(allocated_blocks)
+                stage_file_histograms["precision_filtered"] = _file_hist(
+                    [ab.block for ab in allocated_blocks]
+                )
+
             ranking_ids = [block.block_id for block in blocks]
             allocated_ids = [ab.block.block_id for ab in allocated_blocks]
             context_reorder_count = self._count_reorders(ranking_ids, allocated_ids)
@@ -365,6 +382,9 @@ class ContextPipeline:
             scored_map = {sb.block.block_id: sb for sb in scored_blocks}
             allocated_id_set = set(allocated_ids)
             drop_trace = []
+            filtered_out_ids = set()
+            if precision_filter_trace and precision_filter_trace.get("dropped_block_ids"):
+                filtered_out_ids = set(precision_filter_trace["dropped_block_ids"])
             for block in blocks:
                 scored = scored_map.get(block.block_id)
                 reason = "kept"
@@ -372,6 +392,8 @@ class ContextPipeline:
                     reason = "dedup"
                 elif block.block_id not in allocated_id_set:
                     reason = "budget"
+                if block.block_id in filtered_out_ids:
+                    reason = "precision_filter"
                 drop_trace.append(
                     {
                         "block_id": block.block_id,
@@ -445,6 +467,7 @@ class ContextPipeline:
             provenance = {
                 "query": query,
                 "query_text": query,
+                "unresolved_claim_hints": list(unresolved_claim_hints or []),
                 "ranking_surface_lock_enabled": ranking_surface_lock_enabled,
                 "ranking_order_preserved": ranking_order_preserved,
                 "context_reorder_count": context_reorder_count,
@@ -455,6 +478,7 @@ class ContextPipeline:
                 "coherence_refinement": coherence_telemetry,
                 "stitching": stitch_telemetry,
                 "submodular_packer": submodular_telemetry,
+                "precision_filter": precision_filter_trace,
                 "depth_preservation_check": depth_preservation_check,
                 "utilization_diagnostic": getattr(
                     self.budget_manager, "_last_utilization_diagnostic", None
@@ -552,6 +576,106 @@ class ContextPipeline:
                 )
             )
         return scored
+
+    def _apply_precision_filter(
+        self,
+        allocated_blocks,
+        scored_map: dict[str, ScoredBlock],
+        query: str,
+    ):
+        """Conservative filter for low-signal spillover on identifier-rich queries."""
+        if not allocated_blocks:
+            return allocated_blocks, {"active": False, "reason": "no_allocated_blocks"}
+
+        identifiers = self._extract_query_identifiers(query)
+        min_identifiers = int(
+            getattr(self.config, "precision_filter_query_identifier_min", 1) or 1
+        )
+        if len(identifiers) < min_identifiers:
+            return allocated_blocks, {
+                "active": False,
+                "reason": "insufficient_query_identifiers",
+                "query_identifiers": sorted(identifiers),
+            }
+
+        low_score_threshold = float(
+            getattr(self.config, "precision_filter_low_score_threshold", 0.25) or 0.25
+        )
+        min_kept = int(getattr(self.config, "precision_filter_min_kept_blocks", 10) or 10)
+
+        anchor_files: set[str] = set()
+        for ab in allocated_blocks:
+            if self._block_identifier_overlap(ab.block, identifiers) and ab.block.file:
+                anchor_files.add(ab.block.file)
+
+        if not anchor_files:
+            return allocated_blocks, {
+                "active": False,
+                "reason": "no_anchor_files",
+                "query_identifiers": sorted(identifiers),
+            }
+
+        kept = []
+        dropped_ids = []
+        for ab in allocated_blocks:
+            sb = scored_map.get(ab.block.block_id)
+            final_score = float(sb.final_score) if sb else 0.0
+            file_is_anchor = ab.block.file in anchor_files
+            has_identifier_overlap = self._block_identifier_overlap(ab.block, identifiers)
+
+            drop = (
+                (not file_is_anchor)
+                and (not has_identifier_overlap)
+                and final_score < low_score_threshold
+            )
+            if drop:
+                dropped_ids.append(ab.block.block_id)
+            else:
+                kept.append(ab)
+
+        if len(kept) < min_kept:
+            return allocated_blocks, {
+                "active": False,
+                "reason": "min_kept_guard",
+                "query_identifiers": sorted(identifiers),
+                "anchor_files": sorted(anchor_files),
+                "attempted_drop_count": len(dropped_ids),
+                "kept_after_filter": len(kept),
+            }
+
+        return kept, {
+            "active": True,
+            "reason": "applied",
+            "query_identifiers": sorted(identifiers),
+            "anchor_files": sorted(anchor_files),
+            "low_score_threshold": low_score_threshold,
+            "dropped_count": len(dropped_ids),
+            "dropped_block_ids": dropped_ids,
+            "kept_count": len(kept),
+        }
+
+    @staticmethod
+    def _extract_query_identifiers(query: str) -> set[str]:
+        query = query or ""
+        identifiers: set[str] = set()
+        pattern = r"\b[A-Z][a-zA-Z0-9]+\b|\b[a-z]+_[a-z0-9_]+\b|\b[A-Z][A-Z0-9_]{2,}\b"
+        for match in re.findall(pattern, query):
+            token = match.strip().lower()
+            if len(token) >= 4:
+                identifiers.add(token)
+        return identifiers
+
+    @staticmethod
+    def _block_identifier_overlap(block, identifiers: set[str]) -> bool:
+        if not identifiers:
+            return False
+        hay_raw = f"{(block.file or '').lower()} {(block.symbol_name or '').lower()}"
+        hay = re.sub(r"[^a-z0-9]+", "", hay_raw)
+        for tok in identifiers:
+            norm_tok = re.sub(r"[^a-z0-9]+", "", tok.lower())
+            if norm_tok and norm_tok in hay:
+                return True
+        return False
 
     @staticmethod
     def _count_reorders(source_ids: list[str], target_ids: list[str]) -> int:

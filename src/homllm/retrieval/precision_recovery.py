@@ -103,6 +103,23 @@ class PrecisionRecovery:
 
         recovered: list[tuple[Candidate, float]] = []
         recovered_ids: set[str] = set()
+
+        # Batch pre-fetch: fire a single BM25 query with all identifiers
+        # to warm up the candidate pool (improves recall for related identifiers)
+        if self.bm25_retriever and len(identifiers) > 1:
+            try:
+                batch_query = " ".join(identifiers)
+                batch_k = min(
+                    config.precision_recovery_bm25_top_k * len(identifiers),
+                    50,  # hard cap to avoid excessive results
+                )
+                batch_results = self.bm25_retriever.search(batch_query, batch_k)
+                self._batch_bm25_cache = {c.doc_id: c for c in batch_results}
+            except Exception:
+                self._batch_bm25_cache = {}
+        else:
+            self._batch_bm25_cache = {}
+
         for identifier in identifiers:
             if len(recovered) >= effective_cap:
                 break
@@ -199,12 +216,16 @@ class PrecisionRecovery:
             results,
             key=lambda candidate: (-float(candidate.bm25_score), candidate.doc_id),
         )
+        # Normalize confidence against top-score in results
+        max_score = max((c.bm25_score for c in ranked), default=1.0) or 1.0
         for candidate in ranked:
             if candidate.doc_id in seen_ids:
                 continue
             if not self._exact_identifier_match(identifier, candidate):
                 continue
-            confidence = 1.0
+            # Floor at 0.85 for exact identifier matches since
+            # _exact_identifier_match already validates correctness.
+            confidence = max(0.85, min(1.0, candidate.bm25_score / max_score))
             if confidence < config.precision_recovery_min_confidence:
                 continue
             return self._with_precision_provenance(candidate, "bm25_exact", identifier), confidence
@@ -276,6 +297,7 @@ class PrecisionRecovery:
             entity_ids=candidate.entity_ids,
             doc_type=candidate.doc_type,
             semantic_embedding=candidate.semantic_embedding,
+            symbol_name=candidate.symbol_name,
         )
 
     def _normalize_identifier(self, value: str) -> str:

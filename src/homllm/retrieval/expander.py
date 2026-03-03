@@ -57,7 +57,6 @@ class StructuralExpanderImpl(StructuralExpander):
 
         expanded = list(candidates)
         added_count = 0
-        seen_ids = {c.doc_id for c in candidates}
 
         # For each candidate, find related symbols
         for candidate in candidates:
@@ -69,7 +68,7 @@ class StructuralExpanderImpl(StructuralExpander):
 
             # Find callees (functions called by this candidate)
             # Callgraph format: {caller_id: [callee_id, ...]}
-            callees = callgraph.get(candidate.symbol_id, [])
+            callees = sorted(callgraph.get(candidate.symbol_id, []))
             for callee_id in callees[:2]:  # Limit to 2 callees per candidate
                 if added_count >= config.expansion_max_additions:
                     break
@@ -114,7 +113,6 @@ class StructuralExpanderImpl(StructuralExpander):
                 )
 
                 expanded.append(callee_candidate)
-                seen_ids.add(callee_candidate.doc_id)
                 added_count += 1
 
         logger.info(f"Expanded {added_count} candidates")

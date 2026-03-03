@@ -176,5 +176,7 @@ class ChunkInfo:
     granularity_level: str                  # From GranularityLevel
     span_start: int                         # Start line (1-indexed)
     span_end: int                           # End line (1-indexed)
-    entity_ids: tuple[str, ...] = ()        # Linked entity IDs
+    entity_ids: tuple[str, ...] = ()        # Linked entity IDs (parser symbol_id first for fine)
+    is_summary: bool = False                # True for coarse chunks (signatures only, no bodies)
+    symbol_name: Optional[str] = None      # Qualified name (ClassName.method_name) for name_score
 

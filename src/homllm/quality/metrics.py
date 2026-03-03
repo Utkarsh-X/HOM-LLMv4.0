@@ -214,13 +214,13 @@ def reranker_influence(
     rerank_alpha: float,
 ) -> float:
     """
-    Reranker variance share of final scores using Stage-2 delta geometry.
+    Reranker variance share of final scores using Stage-2 additive geometry.
 
-    Measures: Var(α × rerank_delta) / Var(final_score)
-    where rerank_delta = rerank_score - mean(rerank_scores)
+    Measures: Var(α × rerank_score) / Var(final_score)
 
     This matches the ranking pipeline geometry:
-        final_score = base_score + α × (rerank_score − mean_rerank) + γ × struct_bonus
+        final_score = base_score + α × rerank_score + γ × struct_bonus
+    (rerank_score=0 for non-reranked candidates)
 
     Args:
         final_scores: Final combined scores for all candidates on the full ranked surface.
@@ -244,24 +244,17 @@ def reranker_influence(
     if var_final < 1e-15:
         return 0.0
 
-    # Compute rerank delta: rerank_score - mean(rerank_scores)
-    # Only non-zero rerank scores contribute to the mean (matching pipeline logic).
-    rerank_nonzero = [s for s in rerank_scores if s != 0.0]
-    rerank_mean = (sum(rerank_nonzero) / len(rerank_nonzero)) if rerank_nonzero else 0.0
+    # Alpha-weighted rerank scores (0.0 for candidates not reranked)
+    alpha_contribs = [
+        rerank_alpha * rs if rs != 0.0 else 0.0
+        for rs in rerank_scores
+    ]
 
-    # Alpha-weighted rerank deltas (0.0 for candidates not reranked)
-    alpha_deltas = []
-    for rs in rerank_scores:
-        if rs != 0.0:
-            alpha_deltas.append(rerank_alpha * (rs - rerank_mean))
-        else:
-            alpha_deltas.append(0.0)
+    # Variance of alpha-weighted contributions
+    mu_alpha = sum(alpha_contribs) / n
+    var_alpha = sum((c - mu_alpha) ** 2 for c in alpha_contribs) / n
 
-    # Variance of alpha-weighted deltas
-    mu_alpha_delta = sum(alpha_deltas) / n
-    var_alpha_delta = sum((d - mu_alpha_delta) ** 2 for d in alpha_deltas) / n
-
-    return min(1.0, var_alpha_delta / var_final)
+    return min(1.0, var_alpha / var_final)
 
 
 # ============================================================================

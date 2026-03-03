@@ -220,13 +220,23 @@ class RetrievalPipeline:
                     self.config.query_expansion_max_terms,
                 )
 
+            # A4: Adaptive k by query complexity (synthesis/medium/standard)
+            requested_k = getattr(prepared, "required_k", top_k)
+            requested_k = max(top_k, requested_k)
+            if requested_k > 50:
+                logger.info(
+                    "[RETRIEVAL] adaptive_k=%d (query complexity) candidates_requested=%d",
+                    requested_k,
+                    requested_k,
+                )
+
             (
                 effective_bm25_top_k,
                 effective_vector_top_k,
                 effective_post_merge_candidates,
                 effective_output_top_k,
                 static_ceiling_mode,
-            ) = self._resolve_static_ceiling_limits(top_k)
+            ) = self._resolve_static_ceiling_limits(top_k, requested_branch_k=requested_k)
 
             # 2. BM25 + Vector search (parallel when enabled)
             bm25_results = []
@@ -306,12 +316,8 @@ class RetrievalPipeline:
                 merged = merged[:effective_post_merge_candidates]
             count_after_cap = len(merged)
             
-            # Hierarchical deduplication before MMR
-            if plan_b_active and self.config.hierarchical_dedup_enabled:
-                merged = deduplicate_hierarchical(merged, intent=intent)
-            count_after_dedup = len(merged)
-
-            # MMR
+            # MMR diversity reranking BEFORE dedup
+            # (so MMR preserves diversity-valuable candidates that dedup would remove)
             if not apply_mmr_in_merge:
                 mmr_start = time.perf_counter()
                 merged = self.merger.apply_mmr(merged, self.config)
@@ -319,6 +325,11 @@ class RetrievalPipeline:
             else:
                 mmr_ms = 0.0
             count_after_mmr = len(merged)
+
+            # Hierarchical deduplication AFTER MMR
+            if plan_b_active and self.config.hierarchical_dedup_enabled:
+                merged = deduplicate_hierarchical(merged, intent=intent)
+            count_after_dedup = len(merged)
             
             # =================================================================
             # Plan B: Step 3 — Intent-Driven Granularity Boosting
@@ -445,6 +456,7 @@ class RetrievalPipeline:
                     "effective_vector_top_k": effective_vector_top_k,
                     "effective_post_merge_candidates": effective_post_merge_candidates,
                     "effective_output_top_k": effective_output_top_k,
+                    "adaptive_k": requested_k,
                     "query_expansion_enabled": self.config.query_expansion_enabled,
                     "query_expansion_terms": list(prepared.lexical_expansion_terms),
                     "query_expansion_term_count": len(prepared.lexical_expansion_terms),
@@ -490,6 +502,58 @@ class RetrievalPipeline:
                 query_id=query_id,
                 metadata={"error": str(e)},
             )
+
+    def retrieve_focused_candidates(
+        self,
+        query: str,
+        focused_queries: list[str],
+        intent: Intent = Intent.UNKNOWN,
+        top_k: int = 20,
+    ) -> list:
+        """
+        Targeted retrieval surface for unresolved-claim recovery.
+
+        This is read-only and query-agnostic: it runs lightweight branch retrieval
+        for each focused query and returns deduplicated candidates by doc_id.
+        """
+        if not focused_queries:
+            return []
+
+        all_candidates = []
+        for fq in focused_queries:
+            try:
+                prepared = self.preparer.prepare(fq, intent)
+                lexical_query = " ".join(prepared.lexical_terms)
+                bm25_results, _ = self._run_bm25_search(
+                    self.bm25_retriever,
+                    lexical_query,
+                    max(1, int(top_k)),
+                )
+                vector_results, _ = self._run_vector_search(
+                    self.vector_retriever,
+                    prepared.dense_query,
+                    max(1, int(top_k)),
+                )
+                merged = self.merger.merge(
+                    bm25_results,
+                    vector_results,
+                    self.config,
+                    apply_mmr=False,
+                )
+                all_candidates.extend(merged[: max(1, int(top_k))])
+            except Exception as exc:
+                logger.warning("[RETRIEVAL] focused query failed: %s", exc)
+                continue
+
+        # Deterministic dedup by doc_id, retaining highest hybrid score.
+        by_id = {}
+        for cand in all_candidates:
+            prev = by_id.get(cand.doc_id)
+            if prev is None or float(cand.hybrid_score) > float(prev.hybrid_score):
+                by_id[cand.doc_id] = cand
+        out = list(by_id.values())
+        out.sort(key=_candidate_order_key)
+        return out
 
     def _validate_parallel_adapter_safety(self) -> bool:
         """Return True only when both retrievers explicitly declare thread-safe search."""
@@ -561,9 +625,11 @@ class RetrievalPipeline:
     def _resolve_static_ceiling_limits(
         self,
         top_k: int,
+        requested_branch_k: int | None = None,
     ) -> tuple[int, int, int, int, str]:
         """
         Resolve deterministic static retrieval ceilings for Phase-A experimentation.
+        A4: When static experiment is off, use requested_branch_k (adaptive k) if provided.
         """
         bm25_top_k = self.config.bm25_top_k
         vector_top_k = self.config.vector_top_k
@@ -571,6 +637,10 @@ class RetrievalPipeline:
         output_top_k = top_k
 
         if not self.config.static_ceiling_experiment_enabled:
+            if requested_branch_k is not None:
+                bm25_top_k = max(bm25_top_k, requested_branch_k)
+                vector_top_k = max(vector_top_k, requested_branch_k)
+                output_top_k = max(top_k, requested_branch_k)
             return bm25_top_k, vector_top_k, post_merge, output_top_k, "baseline"
 
         bm25_top_k = max(1, bm25_top_k * self.config.static_ceiling_branch_multiplier)

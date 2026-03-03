@@ -65,10 +65,9 @@ class ScoreFusion:
         config: RankConfig,
     ) -> float:
         """
-        Compute final score.
+        Compute final score (weighted blend).
         
-        Formula:
-        final_score = (
+        Formula: final_score = (
             config.w_base * base_score +
             config.w_rerank * rerank_score +  # 0 if reranker disabled
             config.w_struct * struct_bonus

@@ -69,8 +69,13 @@ def _normalize_fp(value: float) -> float:
     return round(float(value), _FP_ROUND_DECIMALS)
 
 
-def _estimate_tokens(content: str) -> int:
-    """Fast token estimation (chars / 4)."""
+def _estimate_tokens(content: str, tokenizer: object | None = None) -> int:
+    """Token count: uses real tokenizer if available, else chars / 4."""
+    if tokenizer is not None:
+        try:
+            return max(1, len(tokenizer.encode(content)))
+        except Exception:
+            pass
     return max(1, len(content) // 4)
 
 
@@ -93,6 +98,7 @@ def submodular_pack(
     query: str,
     config: PackerConfig,
     graph_edges: Optional[dict[str, set[str]]] = None,
+    tokenizer: object | None = None,
 ) -> PackerResult:
     """Greedy density-maximized submodular context packing.
 
@@ -124,7 +130,7 @@ def submodular_pack(
     score_range = score_max - score_min if score_max > score_min else 1.0
 
     # Pre-compute token estimates
-    token_counts = [_estimate_tokens(c.block.content or "") for c in candidates]
+    token_counts = [_estimate_tokens(c.block.content or "", tokenizer) for c in candidates]
 
     # Pre-compute concept sets
     query_concepts = _extract_concepts(query)

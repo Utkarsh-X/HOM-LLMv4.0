@@ -35,6 +35,7 @@ class Candidate:
     entity_ids: tuple[str, ...] = ()
     doc_type: str | None = None
     semantic_embedding: tuple[float, ...] | None = None
+    symbol_name: str | None = None  # Qualified name (ClassName_method) for name_score
 
 
 @dataclass(frozen=True)
@@ -45,6 +46,7 @@ class PreparedQuery:
     lexical_terms: list[str]  # Extracted keywords for BM25
     intent: Intent
     lexical_expansion_terms: tuple[str, ...] = ()
+    required_k: int = 50  # A4: adaptive retrieval k from query complexity
 
 
 @dataclass(frozen=True)

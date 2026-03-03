@@ -177,3 +177,113 @@ def _compute_cqi4_core(drop_trace: List[Dict]) -> Optional[Dict[str, Any]]:
     except Exception as e:
         logger.warning(f"CQI_4 computation failed: {e}")
         return None
+
+
+def compute_m7_callgraph_coverage(
+    callgraph: dict,
+    context_blocks: list,
+    depth: int = 2,
+) -> dict[str, Any]:
+    """Compute M7: callgraph coverage ratio via file+line matching.
+
+    M7 = edges_in_context / edges_in_relevant_subgraph
+
+    Matches context blocks to callgraph nodes by checking if a node's line
+    falls within a block's [start_line, end_line] range (same file hash).
+
+    Args:
+        callgraph: {caller_id: [callee_id, ...]} where IDs are "hash:symbol:line"
+        context_blocks: list of objects with .file, .start_line, .end_line
+        depth: max BFS depth for relevant subgraph (default=2)
+    """
+    if not callgraph or not context_blocks:
+        return {"M7_raw": 0.0, "M7_percentile": 0.5, "edges_in_context": 0,
+                "edges_in_relevant_subgraph": 0, "context_nodes_matched": 0}
+
+    # Collect all callgraph node IDs
+    all_cg_ids: set[str] = set()
+    for caller, callees in callgraph.items():
+        all_cg_ids.add(caller)
+        for callee in callees:
+            all_cg_ids.add(callee)
+
+    # Parse callgraph IDs: "file_hash:symbol:line" -> (file_hash, line)
+    cg_node_info: dict[str, tuple[str, int]] = {}
+    for node_id in all_cg_ids:
+        parts = node_id.split(":")
+        if len(parts) >= 3:
+            file_hash = parts[0]
+            try:
+                line = int(parts[-1])
+                cg_node_info[node_id] = (file_hash, line)
+            except ValueError:
+                pass
+
+    # Group callgraph nodes by file_hash
+    cg_by_hash: dict[str, list[str]] = {}
+    for node_id, (fhash, _) in cg_node_info.items():
+        cg_by_hash.setdefault(fhash, []).append(node_id)
+
+    # Build block line ranges per file
+    block_ranges: list[tuple[int, int]] = []
+    for block in context_blocks:
+        f = getattr(block, "file", None)
+        sl = getattr(block, "start_line", None)
+        el = getattr(block, "end_line", None)
+        if f and sl is not None and el is not None:
+            block_ranges.append((int(sl), int(el)))
+
+    # Match: for each callgraph node, check if its line falls in any block range
+    context_cg_ids: set[str] = set()
+    for node_id, (fhash, line) in cg_node_info.items():
+        for start, end in block_ranges:
+            if start <= line <= end:
+                context_cg_ids.add(node_id)
+                break
+
+    if not context_cg_ids:
+        return {"M7_raw": 0.0, "M7_percentile": 0.5, "edges_in_context": 0,
+                "edges_in_relevant_subgraph": 0, "context_nodes_matched": 0}
+
+    # BFS from matched nodes to depth
+    reverse_graph: dict[str, list[str]] = {}
+    for caller, callees in callgraph.items():
+        for callee in callees:
+            reverse_graph.setdefault(callee, []).append(caller)
+
+    relevant: set[str] = set(context_cg_ids)
+    frontier = set(context_cg_ids)
+    for _ in range(depth):
+        nxt: set[str] = set()
+        for sym in frontier:
+            for c in callgraph.get(sym, []):
+                if c not in relevant:
+                    nxt.add(c)
+            for c in reverse_graph.get(sym, []):
+                if c not in relevant:
+                    nxt.add(c)
+        relevant |= nxt
+        frontier = nxt
+        if not frontier:
+            break
+
+    edges_relevant = 0
+    edges_in_context = 0
+    for caller in relevant:
+        for callee in callgraph.get(caller, []):
+            if callee in relevant:
+                edges_relevant += 1
+                if caller in context_cg_ids and callee in context_cg_ids:
+                    edges_in_context += 1
+
+    m7_raw = edges_in_context / max(edges_relevant, 1)
+    z7 = _z(m7_raw, 0.15, 0.12)
+    m7_percentile = _percentile_from_z(z7)
+
+    return {
+        "M7_raw": round(m7_raw, 4),
+        "M7_percentile": round(m7_percentile, 4),
+        "edges_in_context": edges_in_context,
+        "edges_in_relevant_subgraph": edges_relevant,
+        "context_nodes_matched": len(context_cg_ids),
+    }

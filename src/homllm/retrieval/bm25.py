@@ -105,12 +105,14 @@ class BM25Retriever:
                         parent_symbol_id = candidate_data.get("parent_symbol_id")
                         entity_ids = tuple(candidate_data.get("entity_ids") or ())
                         doc_type = candidate_data.get("doc_type")
+                        symbol_name = candidate_data.get("symbol_name")
                     else:
                         span_start = None
                         span_end = None
                         parent_symbol_id = None
                         entity_ids = ()
                         doc_type = None
+                        symbol_name = None
                 elif ":" in doc_id:
                     symbol_id = doc_id.split(":", 1)[1]
                     file_path = doc_id.split(":", 1)[0]
@@ -119,6 +121,7 @@ class BM25Retriever:
                     parent_symbol_id = None
                     entity_ids = ()
                     doc_type = None
+                    symbol_name = None
 
                 candidate = Candidate(
                     doc_id=doc_id,
@@ -133,6 +136,7 @@ class BM25Retriever:
                     parent_symbol_id=parent_symbol_id,
                     entity_ids=entity_ids,
                     doc_type=doc_type,
+                    symbol_name=symbol_name,
                 )
                 candidates.append(candidate)
 

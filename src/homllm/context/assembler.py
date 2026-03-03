@@ -55,7 +55,16 @@ class BlockAssembler:
             # Extract symbol name
             symbol_name = None
             if symbol_id:
-                symbol_name = symbol_id.split(":")[-1] if ":" in symbol_id else symbol_id
+                if ":" in symbol_id:
+                    parts = symbol_id.split(":")
+                    tail = parts[-1]
+                    # Common format: <hash>:<symbol_name>:<line_number>
+                    if tail.isdigit() and len(parts) >= 2:
+                        symbol_name = parts[-2]
+                    else:
+                        symbol_name = tail
+                else:
+                    symbol_name = symbol_id
 
             block = ContextBlock(
                 block_id=candidate.doc_id,

@@ -44,6 +44,7 @@ class RankMetadata:
     signal_profile: dict | None = None
     ranking_concentration: dict | None = None
     ranking_geometry: dict | None = None
+    ranking_subtrace_summary: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -62,6 +63,7 @@ class RankingOutput:
     ranked_candidates: tuple[Candidate, ...]  # Sorted by final_score
     debug_traces: tuple[DebugTrace, ...]
     metadata: RankMetadata
+    ranking_subtrace: dict | None = None
 
 
 @dataclass
@@ -117,7 +119,9 @@ class RankConfig:
     set_opt_w_coverage: float = 0.8
     set_opt_w_redundancy: float = 0.5
     set_opt_w_dispersion: float = 0.4
+    set_opt_max_rounds: int = 100
     concentration_top_k: int = 10
+    reranker_bm25_rescue_top_k: int = 15  # A3: also rerank BM25 top-K that fell outside top_m
 
 
 class Reranker(Protocol):

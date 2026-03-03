@@ -1,6 +1,7 @@
 """Feature enrichment implementation."""
 
 import logging
+import re
 from typing import Optional
 
 from homllm.ranking.interfaces import FeatureVector
@@ -54,8 +55,8 @@ class FeatureEnricher:
         bm25_max = max(bm25_scores) if bm25_scores else 1.0
         dense_max = max(dense_scores) if dense_scores else 1.0
 
-        # Extract query terms for name matching
-        query_terms = set(query.lower().split())
+        # Extract robust identifier terms (camel/snake/dot/punctuation-aware).
+        query_terms = self._tokenize_name_terms(query)
 
         features: dict[str, FeatureVector] = {}
 
@@ -102,21 +103,70 @@ class FeatureEnricher:
     def _compute_name_match(
         self, candidate: Candidate, query_terms: set[str]
     ) -> float:
-        """Compute name match score between candidate and query."""
-        if not candidate.symbol_id:
+        """Compute name match score between candidate and query.
+
+        Prefers candidate.symbol_name (qualified: ClassName_method) when set.
+        Falls back to parsing symbol_id (file_id:name:line) for name part.
+        Splits by '_', '.', and camel-case boundaries to get overlap terms.
+        """
+        symbol_name = None
+        if candidate.symbol_name:
+            symbol_name = candidate.symbol_name
+        elif candidate.symbol_id:
+            # Parser format: file_id:name:line — use middle part (name)
+            parts = candidate.symbol_id.split(":")
+            symbol_name = parts[1] if len(parts) >= 2 else candidate.symbol_id
+        if not symbol_name:
             return 0.0
 
-        # Extract symbol name from doc_id or symbol_id
-        # Format: file_id:symbol_id or symbol name
-        symbol_name = candidate.symbol_id.split(":")[-1] if ":" in candidate.symbol_id else candidate.symbol_id
-        symbol_terms = set(symbol_name.lower().split("_"))
+        symbol_terms = self._tokenize_name_terms(symbol_name)
 
-        # Compute overlap
         if not query_terms or not symbol_terms:
             return 0.0
 
         overlap = len(query_terms & symbol_terms)
         return overlap / max(len(query_terms), len(symbol_terms))
+
+    @staticmethod
+    def _tokenize_name_terms(text: str) -> set[str]:
+        """
+        Tokenize text for identifier overlap.
+
+        Handles:
+        - snake_case and dotted paths
+        - CamelCase / PascalCase
+        - punctuation-heavy query text
+        - preserves whole token and sub-tokens (e.g. QueryOptimizer -> queryoptimizer, query, optimizer)
+        """
+        if not text:
+            return set()
+
+        # Keep only identifier-like runs, then split structurally.
+        identifier_runs = re.findall(r"[A-Za-z0-9_.]+", text)
+        if not identifier_runs:
+            return set()
+
+        tokens: set[str] = set()
+        camel_parts_pattern = re.compile(
+            r"[A-Z]+(?=[A-Z][a-z]|[0-9]|\b)|[A-Z]?[a-z]+|[0-9]+"
+        )
+
+        for run in identifier_runs:
+            for part in run.replace(".", "_").split("_"):
+                part = part.strip()
+                if not part:
+                    continue
+
+                # Whole token preserves exact identifier matching (e.g., connectionpool).
+                tokens.add(part.lower())
+
+                # Sub-token support for camel/pascal mixed naming.
+                for sub in camel_parts_pattern.findall(part):
+                    sub = sub.strip()
+                    if sub:
+                        tokens.add(sub.lower())
+
+        return tokens
 
     def _is_entrypoint(self, candidate: Candidate) -> bool:
         """Check if candidate is an entry point (e.g., main function)."""

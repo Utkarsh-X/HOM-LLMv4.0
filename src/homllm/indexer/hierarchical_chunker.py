@@ -125,10 +125,19 @@ class HierarchicalChunker:
         chunks = []
         chunk_idx = 0
         symbol_by_id = {s.id: s for s in context.symbols}
+        child_counts: dict[str, int] = {}
+        for s in context.symbols:
+            if s.parent_id:
+                child_counts[s.parent_id] = child_counts.get(s.parent_id, 0) + 1
 
         for symbol in context.symbols:
             # Skip very small symbols (less than 2 lines)
             if symbol.end_line - symbol.start_line < 2:
+                continue
+
+            # If a class has child symbols (methods/inner defs), skip full class-body fine chunk.
+            # Child symbols preserve implementation details with better lexical precision.
+            if symbol.kind.value == "class" and child_counts.get(symbol.id, 0) > 0:
                 continue
 
             # Build scope-aware fine chunk to avoid orphaned method/function bodies.
@@ -162,6 +171,10 @@ class HierarchicalChunker:
                     segment_end,
                     context.entities,
                 )
+                # Wire symbol linkage: parser symbol_id first for DuckDB resolution,
+                # qualified name for name_score (ClassName_method or function_name).
+                entity_ids = (symbol.id,) + tuple(linked_entities)
+                symbol_name = self._build_qualified_symbol_name(symbol, scope_chain)
                 chunk = ChunkInfo(
                     chunk_id=self._compute_chunk_id(
                         context.file_path,
@@ -173,7 +186,8 @@ class HierarchicalChunker:
                     granularity_level=GranularityLevel.FINE.value,
                     span_start=segment_start,
                     span_end=segment_end,
-                    entity_ids=tuple(linked_entities),
+                    entity_ids=entity_ids,
+                    symbol_name=symbol_name,
                 )
                 chunks.append(chunk)
                 chunk_idx += 1
@@ -200,6 +214,19 @@ class HierarchicalChunker:
         
         return chain
     
+    def _build_qualified_symbol_name(
+        self,
+        symbol: SymbolInfo,
+        scope_chain: list[SymbolInfo],
+    ) -> str:
+        """
+        Build qualified name for name_score: ClassName_method or function_name.
+        Uses underscore so split('_') yields tokens for query overlap.
+        """
+        if scope_chain and scope_chain[0].kind.value == "class":
+            return f"{scope_chain[0].name}_{symbol.name}"
+        return symbol.name
+
     def _get_scope_signature(self, symbol: SymbolInfo) -> str:
         """
         Return a signature-only line for an enclosing scope.
@@ -347,6 +374,10 @@ class HierarchicalChunker:
         - Class / function signatures (no bodies)
         
         No inference, no LLM.
+        
+        Span reflects actual content lines (honest span), not the
+        entire file.  Tagged is_summary=True so downstream dedup
+        can prefer fine blocks over coarse stubs.
         """
         summary_parts = []
         
@@ -376,6 +407,8 @@ class HierarchicalChunker:
             chunk_content = "\n".join(segment_lines).rstrip()
             if not chunk_content:
                 continue
+            # Honest span: reflects actual content lines, not the entire file.
+            content_line_count = len(chunk_content.splitlines())
             chunk = ChunkInfo(
                 chunk_id=self._compute_chunk_id(
                     context.file_path,
@@ -386,8 +419,9 @@ class HierarchicalChunker:
                 content=chunk_content,
                 granularity_level=GranularityLevel.COARSE.value,
                 span_start=1,
-                span_end=len(context.lines),
+                span_end=content_line_count,
                 entity_ids=tuple(all_entity_ids),
+                is_summary=True,
             )
             chunks.append(chunk)
 

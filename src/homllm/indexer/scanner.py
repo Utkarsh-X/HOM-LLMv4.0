@@ -131,15 +131,16 @@ class RipgrepScanner(FileScanner):
                 content_hash = self._compute_file_hash(file_path)
                 line_count = self._count_lines(file_path)
                 rel_path = file_path.relative_to(repo_path)
+                rel_posix = rel_path.as_posix()
 
                 # Generate deterministic file_id from path and hash
                 file_id = hashlib.sha256(
-                    f"{rel_path}:{content_hash}".encode()
+                    f"{rel_posix}:{content_hash}".encode()
                 ).hexdigest()[:16]
 
                 yield FileInfo(
                     file_id=file_id,
-                    path=rel_path,
+                    path=Path(rel_posix),
                     language=language,
                     content_hash=content_hash,
                     line_count=line_count,

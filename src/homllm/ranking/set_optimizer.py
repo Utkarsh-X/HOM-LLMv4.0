@@ -45,6 +45,7 @@ class SetOptimizationMetrics:
     topK_unique_file_count_post_selection: int | None = None
     topK_max_file_block_ratio_post_selection: float | None = None
     marginal_gain_breakdown: list[dict[str, float]] = field(default_factory=list)
+    round_trace: list[dict[str, object]] = field(default_factory=list)
     base_weight_vector: dict[str, float] | None = None
     effective_weight_vector: dict[str, float] | None = None
     final_distinct_file_count: int | None = None
@@ -59,11 +60,13 @@ class SetOptimizer:
         weights: SetObjectiveWeights,
         callgraph: Optional[dict] = None,
         concentration_top_k: int = 10,
+        max_rounds: int = 100,
     ) -> None:
         self.token_budget = token_budget
         self.weights = weights
         self.callgraph = callgraph or {}
         self.concentration_top_k = max(int(concentration_top_k), 1)
+        self.max_rounds = max(int(max_rounds), 1)
 
     def select(
         self,
@@ -83,6 +86,7 @@ class SetOptimizer:
                 blocks_selected=0,
                 marginal_gain_sequence=[],
                 marginal_gain_breakdown=[],
+                round_trace=[],
                 weight_vector_used=self._weights_dict(),
                 base_weight_vector=self._weights_dict(),
                 effective_weight_vector=self._weights_dict(),
@@ -93,6 +97,7 @@ class SetOptimizer:
         budget_left = self.token_budget
         marginal_gains: list[float] = []
         marginal_gain_breakdown: list[dict[str, float]] = []
+        round_trace: list[dict[str, object]] = []
         accepted_redundancy_penalties: list[float] = []
         accepted_dispersion_bonuses: list[float] = []
 
@@ -109,92 +114,177 @@ class SetOptimizer:
         for cand in remaining:
             concept_hits[cand.doc_id] = self._concepts_for_candidate(cand, concept_set)
 
-        while remaining:
-            best_gain = 0.0
-            best_idx = None
-            best_metrics = None
+        # Pre-compute and cache pairwise span overlaps (immutable per candidate pair)
+        self._overlap_cache: dict[tuple[str, str], float] = {}
 
-            current_metrics = self._compute_metrics(
-                selected,
-                relevance_map,
-                concept_set,
-                concept_hits,
+        rounds = 0
+
+        # -------------------------------------------------------------------
+        # CELF (Cost-Effective Lazy Forward) greedy selection.
+        #
+        # Key insight: for approximately-submodular objectives, marginal gains
+        # are non-increasing as more items are selected. So after the initial
+        # full scan (round 0), we only need to re-evaluate the top candidate
+        # from a max-heap. If its re-evaluated gain is still the best, select
+        # it immediately; otherwise push it back and try the next one.
+        #
+        # Complexity: O(N) for round 0, then O(~2 × log N) per subsequent
+        # round vs O(N) per round for brute-force. Typical 10-50× speedup.
+        # -------------------------------------------------------------------
+        import heapq
+
+        # Round 0: full scan to seed the heap with initial marginal gains.
+        current_metrics = self._compute_metrics(
+            selected, relevance_map, concept_set, concept_hits, max_candidates,
+        )
+        current_obj = self._objective(current_metrics, self.weights)
+
+        # Max-heap entries: (-gain, candidate_index_in_remaining, eval_round)
+        # Python heapq is a min-heap, so negate gain for max-heap behavior.
+        heap: list[tuple[float, int, int]] = []
+        remaining_map: dict[int, Candidate] = {}
+
+        for idx, cand in enumerate(remaining):
+            cost = self._estimate_tokens(cand)
+            if cost > budget_left:
+                continue
+
+            tentative = selected + [cand]
+            tentative_metrics = self._compute_metrics(
+                tentative, relevance_map, concept_set, concept_hits,
                 max_candidates,
             )
-            current_obj = self._objective(current_metrics, self.weights)
+            gain, tentative_obj = self._marginal_gain(
+                current_metrics=current_metrics,
+                current_obj=current_obj,
+                tentative_metrics=tentative_metrics,
+            )
+            components = self._component_contributions(tentative_metrics)
 
-            for idx, cand in enumerate(remaining):
-                cost = self._estimate_tokens(cand)
-                if cost > budget_left:
+            # Record telemetry for first 10 evaluations
+            if len(marginal_gain_breakdown) < 10:
+                self._record_breakdown(
+                    marginal_gain_breakdown, gain, tentative_metrics,
+                    current_obj, tentative_obj,
+                )
+            round_trace.append(
+                {
+                    "event": "eval",
+                    "phase": "round0_seed",
+                    "round": 0,
+                    "candidate_id": cand.doc_id,
+                    "gain": float(gain),
+                    "current_obj": float(current_obj),
+                    "tentative_obj": float(tentative_obj),
+                    "budget_left_before": int(budget_left),
+                    "candidate_tokens": int(cost),
+                    "components": components,
+                }
+            )
+
+            remaining_map[idx] = cand
+            heapq.heappush(heap, (-gain, idx, 0))
+
+        # Greedy selection rounds using CELF lazy evaluation.
+        while heap and rounds < self.max_rounds:
+            neg_gain, best_idx, eval_round = heapq.heappop(heap)
+
+            # If this entry was evaluated in the current round, it's fresh.
+            if eval_round == rounds:
+                gain = -neg_gain
+                if gain <= 0:
+                    break  # No positive marginal gain left
+
+                cand = remaining_map.pop(best_idx)
+                selected.append(cand)
+                budget_left -= self._estimate_tokens(cand)
+
+                # Compute metrics for the chosen candidate (for telemetry)
+                chosen_metrics = self._compute_metrics(
+                    selected, relevance_map, concept_set, concept_hits,
+                    max_candidates,
+                )
+                accepted_redundancy_penalties.append(
+                    self.weights.redundancy * chosen_metrics["redundancy_penalty"]
+                )
+                accepted_dispersion_bonuses.append(
+                    self.weights.dispersion * chosen_metrics["dispersion_bonus"]
+                )
+                if len(marginal_gains) < 10:
+                    marginal_gains.append(gain)
+
+                # Update current objective for next round's lazy evaluations.
+                current_metrics = chosen_metrics
+                current_obj = self._objective(chosen_metrics, self.weights)
+                round_trace.append(
+                    {
+                        "event": "select",
+                        "round": int(rounds),
+                        "candidate_id": cand.doc_id,
+                        "gain": float(gain),
+                        "current_obj": float(current_obj),
+                        "budget_left_after": int(budget_left),
+                        "selected_count": len(selected),
+                        "components_after_select": self._component_contributions(chosen_metrics),
+                    }
+                )
+                rounds += 1
+
+                # Prune heap: remove entries that can no longer fit budget.
+                pruned: list[tuple[float, int, int]] = []
+                for entry in heap:
+                    _, entry_idx, _ = entry
+                    if entry_idx in remaining_map:
+                        entry_cand = remaining_map[entry_idx]
+                        if self._estimate_tokens(entry_cand) <= budget_left:
+                            pruned.append(entry)
+                heapq.heapify(pruned)
+                heap = pruned
+
+            else:
+                # Stale entry: re-evaluate with current selected set.
+                if best_idx not in remaining_map:
+                    continue  # Already selected or removed
+
+                cand = remaining_map[best_idx]
+                if self._estimate_tokens(cand) > budget_left:
+                    del remaining_map[best_idx]
                     continue
 
                 tentative = selected + [cand]
                 tentative_metrics = self._compute_metrics(
-                    tentative,
-                    relevance_map,
-                    concept_set,
-                    concept_hits,
+                    tentative, relevance_map, concept_set, concept_hits,
                     max_candidates,
                 )
-                tentative_obj = self._objective(tentative_metrics, self.weights)
-                gain = tentative_obj - current_obj
+                fresh_gain, tentative_obj = self._marginal_gain(
+                    current_metrics=current_metrics,
+                    current_obj=current_obj,
+                    tentative_metrics=tentative_metrics,
+                )
+                components = self._component_contributions(tentative_metrics)
 
+                # Record telemetry for first 10
                 if len(marginal_gain_breakdown) < 10:
-                    relevance_contribution = self.weights.relevance * tentative_metrics["relevance"]
-                    structural_contribution = (
-                        self.weights.structural_coherence
-                        * tentative_metrics["structural_coherence"]
+                    self._record_breakdown(
+                        marginal_gain_breakdown, fresh_gain, tentative_metrics,
+                        current_obj, tentative_obj,
                     )
-                    coverage_contribution = self.weights.coverage * tentative_metrics["coverage"]
-                    redundancy_penalty = (
-                        self.weights.redundancy * tentative_metrics["redundancy_penalty"]
-                    )
-                    dispersion_bonus = (
-                        self.weights.dispersion * tentative_metrics["dispersion_bonus"]
-                    )
-                    marginal_gain_breakdown.append(
-                        {
-                            "gain": gain,
-                            "relevance": relevance_contribution,
-                            "coverage": coverage_contribution,
-                            "structural": structural_contribution,
-                            "redundancy_penalty": redundancy_penalty,
-                            "dispersion_bonus": dispersion_bonus,
-                        }
-                    )
-                    logger.debug(
-                        "[SET_OPT_GAIN] current_obj=%.6f tentative_obj=%.6f gain=%.6f "
-                        "relevance=%.6f structural=%.6f coverage=%.6f redundancy_penalty=%.6f dispersion_bonus=%.6f",
-                        current_obj,
-                        tentative_obj,
-                        gain,
-                        relevance_contribution,
-                        structural_contribution,
-                        coverage_contribution,
-                        redundancy_penalty,
-                        dispersion_bonus,
-                    )
-
-                if gain > best_gain:
-                    best_gain = gain
-                    best_idx = idx
-                    best_metrics = tentative_metrics
-
-            if best_idx is None or best_gain <= 0:
-                break
-
-            chosen = remaining.pop(best_idx)
-            selected.append(chosen)
-            if best_metrics:
-                accepted_redundancy_penalties.append(
-                    self.weights.redundancy * best_metrics["redundancy_penalty"]
+                round_trace.append(
+                    {
+                        "event": "eval",
+                        "phase": "lazy_reeval",
+                        "round": int(rounds),
+                        "candidate_id": cand.doc_id,
+                        "gain": float(fresh_gain),
+                        "current_obj": float(current_obj),
+                        "tentative_obj": float(tentative_obj),
+                        "budget_left_before": int(budget_left),
+                        "candidate_tokens": int(self._estimate_tokens(cand)),
+                        "components": components,
+                    }
                 )
-                accepted_dispersion_bonuses.append(
-                    self.weights.dispersion * best_metrics["dispersion_bonus"]
-                )
-            budget_left -= self._estimate_tokens(chosen)
-            if len(marginal_gains) < 10:
-                marginal_gains.append(best_gain)
+
+                heapq.heappush(heap, (-fresh_gain, best_idx, rounds))
 
         if not selected and remaining:
             fallback = None
@@ -209,6 +299,15 @@ class SetOptimizer:
             if fallback is not None:
                 selected.append(fallback)
                 budget_left -= self._estimate_tokens(fallback)
+                round_trace.append(
+                    {
+                        "event": "fallback_select",
+                        "round": int(rounds),
+                        "candidate_id": fallback.doc_id,
+                        "budget_left_after": int(budget_left),
+                        "reason": "no_positive_marginal_gain",
+                    }
+                )
 
         final_metrics = self._compute_metrics(
             selected,
@@ -226,12 +325,27 @@ class SetOptimizer:
         )
         objective_term_contributions = {
             "relevance": self.weights.relevance * final_metrics["relevance"],
+            "structural_coherence": self.weights.structural_coherence
+            * final_metrics["structural_coherence"],
+            "coverage": self.weights.coverage * final_metrics["coverage"],
             "redundancy_penalty": self.weights.redundancy
             * final_metrics["redundancy_penalty"],
             "dispersion_bonus": self.weights.dispersion
             * final_metrics["dispersion_bonus"],
             "total_objective": final_obj,
         }
+        logger.debug(
+            "[SET_OPT_FINAL] objective=%.6f relevance=%.6f structural=%.6f "
+            "coverage=%.6f redundancy_penalty=%.6f dispersion_bonus=%.6f "
+            "weights=%s",
+            final_obj,
+            objective_term_contributions["relevance"],
+            objective_term_contributions["structural_coherence"],
+            objective_term_contributions["coverage"],
+            objective_term_contributions["redundancy_penalty"],
+            objective_term_contributions["dispersion_bonus"],
+            weight_vector,
+        )
         metrics = SetOptimizationMetrics(
             objective=final_obj,
             relevance=final_metrics["relevance"],
@@ -265,6 +379,7 @@ class SetOptimizer:
             blocks_selected=len(selected),
             marginal_gain_sequence=marginal_gains,
             marginal_gain_breakdown=marginal_gain_breakdown,
+            round_trace=round_trace,
             weight_vector_used=weight_vector,
             base_weight_vector=weight_vector,
             effective_weight_vector=weight_vector,
@@ -272,12 +387,86 @@ class SetOptimizer:
         )
         return selected, metrics
 
+    def _marginal_gain(
+        self,
+        *,
+        current_metrics: dict[str, float],
+        current_obj: float,
+        tentative_metrics: dict[str, float],
+    ) -> tuple[float, float]:
+        """
+        Compute marginal gain with non-negative dispersion contribution.
+
+        We still reward dispersion increases, but we do not let a dispersion drop
+        alone make additional same-file evidence look worse than the current set.
+        """
+        tentative_obj_raw = self._objective(tentative_metrics, self.weights)
+
+        current_disp = self.weights.dispersion * current_metrics["dispersion_bonus"]
+        tentative_disp = self.weights.dispersion * tentative_metrics["dispersion_bonus"]
+        dispersion_delta = tentative_disp - current_disp
+
+        adjusted_tentative_obj = tentative_obj_raw
+        if dispersion_delta < 0.0:
+            adjusted_tentative_obj -= dispersion_delta
+
+        return adjusted_tentative_obj - current_obj, adjusted_tentative_obj
+
     def _objective(self, metrics: dict[str, float], weights: SetObjectiveWeights) -> float:
         return (
             weights.relevance * metrics["relevance"]
+            + weights.structural_coherence * metrics["structural_coherence"]
+            + weights.coverage * metrics["coverage"]
             - weights.redundancy * metrics["redundancy_penalty"]
             + weights.dispersion * metrics["dispersion_bonus"]
         )
+
+    def _record_breakdown(
+        self,
+        breakdown_list: list[dict[str, float]],
+        gain: float,
+        tentative_metrics: dict[str, float],
+        current_obj: float,
+        tentative_obj: float,
+    ) -> None:
+        """Record marginal gain breakdown telemetry for a candidate evaluation."""
+        relevance_contribution = self.weights.relevance * tentative_metrics["relevance"]
+        structural_contribution = (
+            self.weights.structural_coherence * tentative_metrics["structural_coherence"]
+        )
+        coverage_contribution = self.weights.coverage * tentative_metrics["coverage"]
+        redundancy_penalty = self.weights.redundancy * tentative_metrics["redundancy_penalty"]
+        dispersion_bonus = self.weights.dispersion * tentative_metrics["dispersion_bonus"]
+        breakdown_list.append({
+            "gain": gain,
+            "relevance": relevance_contribution,
+            "coverage": coverage_contribution,
+            "structural": structural_contribution,
+            "redundancy_penalty": redundancy_penalty,
+            "dispersion_bonus": dispersion_bonus,
+        })
+        logger.debug(
+            "[SET_OPT_GAIN] current_obj=%.6f tentative_obj=%.6f gain=%.6f "
+            "relevance=%.6f structural=%.6f coverage=%.6f redundancy_penalty=%.6f dispersion_bonus=%.6f",
+            current_obj, tentative_obj, gain,
+            relevance_contribution, structural_contribution, coverage_contribution,
+            redundancy_penalty, dispersion_bonus,
+        )
+
+    def _component_contributions(self, metrics: dict[str, float]) -> dict[str, float]:
+        return {
+            "relevance": float(self.weights.relevance * metrics["relevance"]),
+            "structural_coherence": float(
+                self.weights.structural_coherence * metrics["structural_coherence"]
+            ),
+            "coverage": float(self.weights.coverage * metrics["coverage"]),
+            "redundancy_penalty": float(
+                self.weights.redundancy * metrics["redundancy_penalty"]
+            ),
+            "dispersion_bonus": float(
+                self.weights.dispersion * metrics["dispersion_bonus"]
+            ),
+        }
 
     def _compute_metrics(
         self,
@@ -398,10 +587,21 @@ class SetOptimizer:
         overlaps = []
         for i, a in enumerate(selected):
             for b in selected[i + 1:]:
-                overlaps.append(self._span_overlap_ratio(a, b))
+                overlaps.append(self._span_overlap_ratio_cached(a, b))
         if not overlaps:
             return 0.0
         return sum(overlaps) / len(overlaps)
+
+    def _span_overlap_ratio_cached(self, a: Candidate, b: Candidate) -> float:
+        """Cached pairwise span overlap. Results are immutable per candidate pair."""
+        key = (a.doc_id, b.doc_id) if a.doc_id <= b.doc_id else (b.doc_id, a.doc_id)
+        cache = getattr(self, "_overlap_cache", None)
+        if cache is not None and key in cache:
+            return cache[key]
+        result = self._span_overlap_ratio(a, b)
+        if cache is not None:
+            cache[key] = result
+        return result
 
     def _span_overlap_ratio(self, a: Candidate, b: Candidate) -> float:
         if a.file != b.file:

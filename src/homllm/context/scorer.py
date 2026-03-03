@@ -75,7 +75,9 @@ class ContextBlockScorer(BlockScorer):
             # Name score (identifier overlap with query)
             name_score = self._compute_name_score(block, query)
 
-            structural_priority = 0.0
+            # Structural priority from ranking trace (entry points, decorators, etc.)
+            trace = debug_traces.get(block.block_id)
+            structural_priority = float(trace.struct_bonus) if trace else 0.0
             novelty_score = 0.0
             coherence_score = 0.0
 

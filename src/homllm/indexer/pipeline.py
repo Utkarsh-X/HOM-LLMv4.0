@@ -10,6 +10,7 @@ Extended for entity-centric indexing (Plan A) with:
 import hashlib
 import json
 import logging
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Iterator, Optional
@@ -138,9 +139,6 @@ class IndexerPipeline:
         if self.config.vector_indexing_enabled:
             self.lancedb.connect()
 
-        # Compute repo hash
-        repo_hash = self._compute_repo_hash(repo_path)
-
         # Preflight embeddings before any destructive operations (no quality deterioration).
         if self.config.vector_indexing_enabled:
             _ = self.embedder.embed_query("embedding_preflight")
@@ -149,6 +147,7 @@ class IndexerPipeline:
         scan_config = ScanConfig(self.config)
         files = list(self.scanner.scan(repo_path, scan_config))
         logger.info(f"Scanned {len(files)} files")
+        repo_hash = self._compute_scope_hash(files)
 
         files_to_process = files
         deleted_paths: list[str] = []
@@ -199,7 +198,11 @@ class IndexerPipeline:
             try:
                 # Parse file
                 file_path = repo_path / file_info.path
+                file_rel_path = file_info.path.as_posix()
                 result = self.parser.parse(file_path, file_info.language or "unknown")
+                result_symbols = [
+                    replace(symbol, file=file_rel_path) for symbol in result.symbols
+                ]
                 file_chunk_docs_added = False
 
                 # Store file metadata
@@ -207,7 +210,7 @@ class IndexerPipeline:
                 self.duckdb.insert_file(file_info)
 
                 # Add symbols
-                for symbol in result.symbols:
+                for symbol in result_symbols:
                     all_symbols.append(symbol)
                     # Extract symbol code for storage
                     symbol_code = self._extract_symbol_code(
@@ -216,7 +219,7 @@ class IndexerPipeline:
                     self.duckdb.insert_symbol(symbol, file_info.file_id, content=symbol_code)
 
                 # Add to graph builder
-                self.graph_builder.add_file_result(str(file_info.path), result)
+                self.graph_builder.add_file_result(file_rel_path, result)
                 
                 # ===============================================================
                 # Entity-Centric Indexing (Plan A)
@@ -226,14 +229,14 @@ class IndexerPipeline:
                     entities = self.entity_extractor.extract_entities(
                         result.tree.root_node,
                         result.content,
-                        str(file_info.path),
+                        file_rel_path,
                     )
                     all_entities.extend(entities)
 
                     import_specs = self.symbol_resolver.extract_import_specs(
                         result.tree.root_node,
                         result.content,
-                        str(file_info.path),
+                        file_rel_path,
                     )
                     all_import_specs.extend(import_specs)
                     
@@ -242,14 +245,14 @@ class IndexerPipeline:
                     
                     # Extract import relations
                     self.graph_builder.extract_import_relations(
-                        entities, str(file_info.path)
+                        entities, file_rel_path
                     )
                     
                     # Create hierarchical chunks
                     chunks = self.hierarchical_chunker.create_chunks(
-                        str(file_info.path),
+                        file_rel_path,
                         result.content,
-                        result.symbols,
+                        result_symbols,
                         entities,
                     )
                     all_chunks.extend(chunks)
@@ -271,7 +274,7 @@ class IndexerPipeline:
                 # Legacy fallback: if chunk docs are unavailable for this file,
                 # index symbol-level docs to preserve retrievability.
                 if not file_chunk_docs_added:
-                    for symbol in result.symbols:
+                    for symbol in result_symbols:
                         symbol_code = self._extract_symbol_code(
                             result.content, symbol.start_line, symbol.end_line
                         )
@@ -280,7 +283,7 @@ class IndexerPipeline:
                             doc_id=doc_id,
                             content=symbol_code,
                             metadata={
-                                "file": str(file_info.path),
+                                "file": file_rel_path,
                                 "symbol_id": symbol.id,
                                 "symbol_name": symbol.name,
                                 "symbol_kind": symbol.kind.value,
@@ -372,6 +375,10 @@ class IndexerPipeline:
         self.duckdb.set_metadata("index_schema_version", INDEX_SCHEMA_VERSION)
         self.duckdb.set_metadata("created_at", datetime.utcnow().isoformat())
         self.duckdb.set_metadata("repo_hash", repo_hash)
+        self.duckdb.set_metadata("index_scope_repo_name", repo_path.name)
+        self.duckdb.set_metadata("index_scope_file_count", str(len(files)))
+        self.duckdb.set_metadata("index_scope_languages", json.dumps(sorted(self.config.languages)))
+        self.duckdb.set_metadata("index_scope_ignore_patterns", json.dumps(self.config.ignore_patterns))
         self.duckdb.set_metadata(
             "entity_centric_indexing_enabled",
             str(self.config.entity_centric_indexing_enabled),
@@ -379,7 +386,14 @@ class IndexerPipeline:
 
         # 7. Write artifacts
         self._write_artifacts(
-            all_symbols, all_files, call_edges, all_entities, all_relations, all_chunks
+            all_symbols,
+            all_files,
+            call_edges,
+            all_entities,
+            all_relations,
+            all_chunks,
+            repo_name=repo_path.name,
+            file_count=len(files),
         )
 
         self.incremental_indexer.save(files)
@@ -407,6 +421,8 @@ class IndexerPipeline:
         entities: list[EntityInfo],
         relations: list[RelationInfo],
         chunks: list[ChunkInfo],
+        repo_name: str,
+        file_count: int,
     ) -> None:
         """Write immutable artifacts to filesystem."""
         # Sort for determinism
@@ -440,7 +456,7 @@ class IndexerPipeline:
             "files": [
                 {
                     "file_id": f.file_id,
-                    "path": str(f.path),
+                    "path": f.path.as_posix(),
                     "language": f.language,
                     "content_hash": f.content_hash,
                     "line_count": f.line_count,
@@ -541,25 +557,22 @@ class IndexerPipeline:
             }
             self.fs_adapter.write_json("chunks.json", chunks_data)
 
-    def _compute_repo_hash(self, repo_path: Path) -> str:
-        """Compute deterministic hash of repository state."""
-        # Hash all file paths and content hashes
+        # Write index scope manifest for corpus-integrity diagnostics.
+        scope_data = {
+            "version": INDEX_SCHEMA_VERSION,
+            "repo_name": repo_name,
+            "file_count": int(file_count),
+            "languages": sorted(self.config.languages),
+            "ignore_patterns": list(self.config.ignore_patterns),
+            "path_convention": "repo_relative_posix",
+        }
+        self.fs_adapter.write_json("index_scope.json", scope_data)
+
+    def _compute_scope_hash(self, files: list[FileInfo]) -> str:
+        """Compute deterministic hash of the indexed corpus scope."""
         sha256 = hashlib.sha256()
-
-        # Get all files sorted deterministically
-        files = sorted(repo_path.rglob("*"), key=lambda p: str(p))
-        for file_path in files:
-            if file_path.is_file():
-                try:
-                    # Include path and content hash
-                    content_hash = hashlib.sha256(
-                        file_path.read_bytes()
-                    ).hexdigest()
-                    entry = f"{file_path.relative_to(repo_path)}:{content_hash}\n"
-                    sha256.update(entry.encode())
-                except Exception:
-                    # Skip files that can't be read
-                    continue
-
+        for file_info in sorted(files, key=lambda f: f.path.as_posix()):
+            entry = f"{file_info.path.as_posix()}:{file_info.content_hash}\n"
+            sha256.update(entry.encode())
         return sha256.hexdigest()
 

@@ -13,6 +13,16 @@ from homllm.retrieval.interfaces import Candidate, RetrievalConfig
 logger = logging.getLogger(__name__)
 
 
+def _deterministic_candidate_sort_key(candidate: Candidate) -> tuple[float, str, str, str]:
+    """Stable ordering key for deterministic candidate ranking."""
+    return (
+        -float(candidate.hybrid_score),
+        str(candidate.doc_id),
+        str(candidate.file or ""),
+        str(candidate.symbol_id or ""),
+    )
+
+
 class RRFHybridMerger:
     """Reciprocal Rank Fusion hybrid merger.
     
@@ -173,7 +183,7 @@ class RRFHybridMerger:
 
         # Sort by hybrid score descending
         merged = list(candidates_by_id.values())
-        merged.sort(key=lambda c: c.hybrid_score, reverse=True)
+        merged.sort(key=_deterministic_candidate_sort_key)
 
         return merged
 
@@ -234,7 +244,7 @@ class RRFHybridMerger:
 
         # Sort by hybrid score descending
         merged = list(candidates_by_id.values())
-        merged.sort(key=lambda c: c.hybrid_score, reverse=True)
+        merged.sort(key=_deterministic_candidate_sort_key)
 
         return merged
 
@@ -256,6 +266,13 @@ class RRFHybridMerger:
             span_start = min(primary.span_start, secondary.span_start)
             span_end = max(primary.span_end, secondary.span_end)
 
+        # Merge provenance from both sources (deduplicated, deterministic order)
+        merged_prov = list(primary.provenance or ())
+        for tag in (secondary.provenance or ()):
+            if tag not in merged_prov:
+                merged_prov.append(tag)
+        merged_provenance = tuple(sorted(merged_prov))
+
         return Candidate(
             doc_id=primary.doc_id,
             file=primary.file or secondary.file,
@@ -264,7 +281,7 @@ class RRFHybridMerger:
             bm25_score=primary.bm25_score or secondary.bm25_score,
             vector_score=primary.vector_score or secondary.vector_score,
             hybrid_score=primary.hybrid_score,
-            provenance=primary.provenance or secondary.provenance,
+            provenance=merged_provenance,
             granularity_level=primary.granularity_level or secondary.granularity_level,
             span_start=span_start,
             span_end=span_end,
@@ -272,6 +289,7 @@ class RRFHybridMerger:
             entity_ids=primary.entity_ids or secondary.entity_ids,
             doc_type=primary.doc_type or secondary.doc_type,
             semantic_embedding=primary.semantic_embedding or secondary.semantic_embedding,
+            symbol_name=primary.symbol_name or secondary.symbol_name,
         )
 
     def _with_hybrid_score(self, candidate: Candidate, hybrid_score: float) -> Candidate:
@@ -291,6 +309,7 @@ class RRFHybridMerger:
             entity_ids=candidate.entity_ids,
             doc_type=candidate.doc_type,
             semantic_embedding=candidate.semantic_embedding,
+            symbol_name=candidate.symbol_name,
         )
 
     def _with_semantic_embedding(
@@ -314,5 +333,6 @@ class RRFHybridMerger:
             entity_ids=candidate.entity_ids,
             doc_type=candidate.doc_type,
             semantic_embedding=embedding,
+            symbol_name=candidate.symbol_name,
         )
 

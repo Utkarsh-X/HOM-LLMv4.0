@@ -191,7 +191,8 @@ class DuckDBAdapter:
                 granularity_level TEXT NOT NULL,
                 span_start INTEGER NOT NULL,
                 span_end INTEGER NOT NULL,
-                entity_ids TEXT
+                entity_ids TEXT,
+                symbol_name TEXT
             )
         """)
 
@@ -214,6 +215,12 @@ class DuckDBAdapter:
         self.conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_chunks_granularity ON chunks(granularity_level)
         """)
+
+        # Migration: add symbol_name column for name_score linkage (if missing)
+        try:
+            self.conn.execute("ALTER TABLE chunks ADD COLUMN symbol_name TEXT")
+        except Exception:
+            pass  # Column already exists
 
     def insert_file(self, file_info: FileInfo) -> None:
         """Insert file metadata."""
@@ -351,19 +358,32 @@ class DuckDBAdapter:
         }
 
         placeholders = ", ".join(["?"] * len(unique_doc_ids))
-        chunk_rows = self.conn.execute(
-            f"""
-            SELECT chunk_id, file_path, content, granularity_level, entity_ids, span_start, span_end
-            FROM chunks
-            WHERE chunk_id IN ({placeholders})
-            """,
-            unique_doc_ids,
-        ).fetchall()
+        try:
+            chunk_rows = self.conn.execute(
+                f"""
+                SELECT chunk_id, file_path, content, granularity_level, entity_ids, span_start, span_end, symbol_name
+                FROM chunks
+                WHERE chunk_id IN ({placeholders})
+                """,
+                unique_doc_ids,
+            ).fetchall()
+            has_symbol_name = True
+        except Exception:
+            chunk_rows = self.conn.execute(
+                f"""
+                SELECT chunk_id, file_path, content, granularity_level, entity_ids, span_start, span_end
+                FROM chunks
+                WHERE chunk_id IN ({placeholders})
+                """,
+                unique_doc_ids,
+            ).fetchall()
+            has_symbol_name = False
 
         chunk_payload: dict[str, dict[str, Any]] = {}
         first_entity_ids: list[str] = []
         for row in chunk_rows:
-            chunk_id, file_path, content, granularity_level, entity_ids_raw, span_start, span_end = row
+            chunk_id, file_path, content, granularity_level, entity_ids_raw, span_start, span_end = row[:7]
+            symbol_name = row[7] if has_symbol_name and len(row) > 7 else None
             entity_ids = json.loads(entity_ids_raw) if entity_ids_raw else []
             symbol_id = entity_ids[0] if entity_ids else None
             if symbol_id:
@@ -379,6 +399,7 @@ class DuckDBAdapter:
                 "span_end": span_end,
                 "parent_symbol_id": None,
                 "doc_type": "chunk",
+                "symbol_name": symbol_name,
             }
 
         parent_by_symbol_id: dict[str, Any] = {}
@@ -673,27 +694,44 @@ class DuckDBAdapter:
         if self.conn is None:
             self.connect()
 
-        rows = self.conn.execute(
-            """
-            SELECT chunk_id, file_path, content, granularity_level,
-                   span_start, span_end, entity_ids
-            FROM chunks
-            ORDER BY file_path, granularity_level, span_start
-            """
-        ).fetchall()
+        try:
+            rows = self.conn.execute(
+                """
+                SELECT chunk_id, file_path, content, granularity_level,
+                       span_start, span_end, entity_ids, symbol_name
+                FROM chunks
+                ORDER BY file_path, granularity_level, span_start
+                """
+            ).fetchall()
+            rows_have_symbol_name = True
+        except Exception:
+            rows = self.conn.execute(
+                """
+                SELECT chunk_id, file_path, content, granularity_level,
+                       span_start, span_end, entity_ids
+                FROM chunks
+                ORDER BY file_path, granularity_level, span_start
+                """
+            ).fetchall()
+            rows_have_symbol_name = False
 
-        return [
-            ChunkInfo(
-                chunk_id=row[0],
-                file_path=row[1],
-                content=row[2],
-                granularity_level=row[3],
-                span_start=row[4],
-                span_end=row[5],
-                entity_ids=tuple(json.loads(row[6])) if row[6] else (),
+        chunks: list[ChunkInfo] = []
+        for row in rows:
+            entity_ids = tuple(json.loads(row[6])) if row[6] else ()
+            symbol_name = row[7] if rows_have_symbol_name and len(row) > 7 else None
+            chunks.append(
+                ChunkInfo(
+                    chunk_id=row[0],
+                    file_path=row[1],
+                    content=row[2],
+                    granularity_level=row[3],
+                    span_start=row[4],
+                    span_end=row[5],
+                    entity_ids=entity_ids,
+                    symbol_name=symbol_name,
+                )
             )
-            for row in rows
-        ]
+        return chunks
 
     # =========================================================================
     # Entity-Centric Indexing Methods (Plan A)
@@ -703,6 +741,7 @@ class DuckDBAdapter:
         """Insert entity metadata."""
         if self.conn is None:
             self.connect()
+        normalized_file_path = self._normalize_path(entity.file_path)
 
         self.conn.execute(
             """
@@ -716,7 +755,7 @@ class DuckDBAdapter:
                 entity.entity_id,
                 entity.entity_type,
                 entity.name,
-                entity.file_path,
+                normalized_file_path,
                 entity.span_start,
                 entity.span_end,
                 entity.docstring_hash,
@@ -751,24 +790,27 @@ class DuckDBAdapter:
         """Insert hierarchical chunk."""
         if self.conn is None:
             self.connect()
+        normalized_file_path = self._normalize_path(chunk.file_path)
 
         # Serialize entity_ids as JSON
         entity_ids_json = json.dumps(list(chunk.entity_ids))
+        symbol_name = chunk.symbol_name or ""
 
         self.conn.execute(
             """
             INSERT OR REPLACE INTO chunks
-            (chunk_id, file_path, content, granularity_level, span_start, span_end, entity_ids)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            (chunk_id, file_path, content, granularity_level, span_start, span_end, entity_ids, symbol_name)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 chunk.chunk_id,
-                chunk.file_path,
+                normalized_file_path,
                 chunk.content,
                 chunk.granularity_level,
                 chunk.span_start,
                 chunk.span_end,
                 entity_ids_json,
+                symbol_name,
             ],
         )
 
@@ -777,15 +819,17 @@ class DuckDBAdapter:
         if self.conn is None:
             self.connect()
 
+        variants = self._path_variants(file_path)
+        placeholders = ", ".join(["?"] * len(variants))
         result = self.conn.execute(
-            """
+            f"""
             SELECT entity_id, entity_type, name, file_path, span_start, span_end,
                    docstring_hash, granularity_level, confidence_score,
                    has_type_annotation, is_exported, parent_entity_id
-            FROM entities WHERE file_path = ?
+            FROM entities WHERE file_path IN ({placeholders})
             ORDER BY span_start
             """,
-            [file_path],
+            variants,
         ).fetchall()
 
         return [
@@ -836,28 +880,46 @@ class DuckDBAdapter:
         if self.conn is None:
             self.connect()
 
-        result = self.conn.execute(
-            """
-            SELECT chunk_id, file_path, content, granularity_level,
-                   span_start, span_end, entity_ids
-            FROM chunks WHERE granularity_level = ?
-            ORDER BY file_path, span_start
-            """,
-            [granularity],
-        ).fetchall()
+        try:
+            result = self.conn.execute(
+                """
+                SELECT chunk_id, file_path, content, granularity_level,
+                       span_start, span_end, entity_ids, symbol_name
+                FROM chunks WHERE granularity_level = ?
+                ORDER BY file_path, span_start
+                """,
+                [granularity],
+            ).fetchall()
+            rows_have_symbol_name = True
+        except Exception:
+            result = self.conn.execute(
+                """
+                SELECT chunk_id, file_path, content, granularity_level,
+                       span_start, span_end, entity_ids
+                FROM chunks WHERE granularity_level = ?
+                ORDER BY file_path, span_start
+                """,
+                [granularity],
+            ).fetchall()
+            rows_have_symbol_name = False
 
-        return [
-            ChunkInfo(
-                chunk_id=row[0],
-                file_path=row[1],
-                content=row[2],
-                granularity_level=row[3],
-                span_start=row[4],
-                span_end=row[5],
-                entity_ids=tuple(json.loads(row[6])) if row[6] else (),
+        chunks = []
+        for row in result:
+            entity_ids = tuple(json.loads(row[6])) if row[6] else ()
+            symbol_name = row[7] if rows_have_symbol_name and len(row) > 7 else None
+            chunks.append(
+                ChunkInfo(
+                    chunk_id=row[0],
+                    file_path=row[1],
+                    content=row[2],
+                    granularity_level=row[3],
+                    span_start=row[4],
+                    span_end=row[5],
+                    entity_ids=entity_ids,
+                    symbol_name=symbol_name,
+                )
             )
-            for row in result
-        ]
+        return chunks
 
     def get_entity_count(self) -> int:
         """Get total count of entities in the index."""
@@ -956,10 +1018,13 @@ class DuckDBAdapter:
             self.conn = None
 
     def _path_variants(self, file_path: str) -> list[str]:
-        normalized = str(file_path).lstrip("./")
+        normalized = self._normalize_path(file_path)
         slash = normalized.replace("\\", "/")
         backslash = slash.replace("/", "\\")
         return sorted({normalized, slash, backslash})
+
+    def _normalize_path(self, file_path: str) -> str:
+        return str(file_path).lstrip("./").replace("\\", "/")
 
     def _get_file_ids_for_path(self, file_path: str) -> list[str]:
         variants = self._path_variants(file_path)

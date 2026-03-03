@@ -311,15 +311,17 @@ class Config(BaseModel):
             reranker_enabled=reranker_cfg.get("enabled", True),
             reranker_model=reranker_cfg.get("model", "Qwen/Qwen3-Reranker-0.6B"),
             reranker_device=reranker_cfg.get("device", "auto"),
-            reranker_top_m=reranker_cfg.get("top_m", 40),
-            w_base=weights_cfg.get("w_base", 0.4),
-            w_rerank=weights_cfg.get("w_rerank", 0.55),
-            w_struct=weights_cfg.get("w_struct", 0.05),
+            reranker_top_m=reranker_cfg.get("top_m", 35),
+            reranker_bm25_rescue_top_k=reranker_cfg.get("bm25_rescue_top_k", 15),
+            # Canonical fusion weights (D1). geometry.rerank_alpha/struct_gamma are deprecated aliases.
+            w_base=weights_cfg.get("w_base", 1.0),
+            w_rerank=weights_cfg.get("w_rerank", geometry_cfg.get("rerank_alpha", 0.32)),
+            w_struct=weights_cfg.get("w_struct", geometry_cfg.get("struct_gamma", 0.05)),
             w_bm25=weights_cfg.get("w_bm25", 0.4),
             w_dense=weights_cfg.get("w_dense", 0.4),
             w_name=weights_cfg.get("w_name", 0.2),
-            rerank_alpha=geometry_cfg.get("rerank_alpha", 0.32),
-            struct_gamma=geometry_cfg.get("struct_gamma", 0.05),
+            rerank_alpha=weights_cfg.get("w_rerank", geometry_cfg.get("rerank_alpha", 0.32)),  # alias
+            struct_gamma=weights_cfg.get("w_struct", geometry_cfg.get("struct_gamma", 0.05)),  # alias
             struct_entrypoint_bonus=struct_weights.get("entrypoint_bonus", 0.1),
             struct_decorator_bonus=struct_weights.get("decorator_bonus", 0.05),
             struct_callgraph_bonus=struct_weights.get("callgraph_bonus", 0.05),
@@ -429,6 +431,17 @@ class Config(BaseModel):
             # Tier 3B: Relevance gate
             relevance_gate_enabled=ctx_cfg.get("relevance_gate_enabled", False),
             relevance_gate_threshold=ctx_cfg.get("relevance_gate_threshold", 0.25),
+            # Tier 3C: Precision filter
+            precision_filter_enabled=ctx_cfg.get("precision_filter_enabled", False),
+            precision_filter_query_identifier_min=ctx_cfg.get(
+                "precision_filter_query_identifier_min", 1
+            ),
+            precision_filter_low_score_threshold=ctx_cfg.get(
+                "precision_filter_low_score_threshold", 0.25
+            ),
+            precision_filter_min_kept_blocks=ctx_cfg.get(
+                "precision_filter_min_kept_blocks", 10
+            ),
             # Tier 3B: Escape hatch
             escape_hatch_enabled=ctx_cfg.get("escape_hatch_enabled", False),
         )

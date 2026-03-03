@@ -255,6 +255,29 @@ class PresentationRenderer:
         return None
 
 
+def log_index_scope_manifest(artifacts_path: Path) -> dict | None:
+    """Log index-scope manifest for corpus-integrity visibility."""
+    try:
+        fs_adapter = FilesystemAdapter(artifacts_path)
+        if not fs_adapter.exists("index_scope.json"):
+            logger.warning(
+                "[INDEX_SCOPE] manifest_missing path=%s expected=index_scope.json",
+                artifacts_path,
+            )
+            return None
+        scope = fs_adapter.read_json("index_scope.json")
+        logger.info(
+            "[INDEX_SCOPE] repo=%s files=%s path_convention=%s",
+            scope.get("repo_name"),
+            scope.get("file_count"),
+            scope.get("path_convention"),
+        )
+        return scope
+    except Exception as exc:
+        logger.warning("[INDEX_SCOPE] manifest_read_failed error=%s", exc)
+        return None
+
+
 def print_telemetry(phase: str, **kwargs):
     """Print telemetry line in consistent format (duration-focused)."""
     parts = [f"[{phase}]"]
@@ -414,6 +437,103 @@ def _dump_candidate_diagnostics(
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
+
+
+def _write_ranking_subtrace(
+    run_id: str,
+    ranking_output,
+    context_artifact,
+    enabled: bool,
+) -> None:
+    """Write ranking subcomponent trace artifact (diagnostic-only)."""
+    if not enabled:
+        return
+
+    subtrace = getattr(ranking_output, "ranking_subtrace", None)
+    if not isinstance(subtrace, dict):
+        logger.warning("[RANKING_TRACE] ranking_subtrace not available for run_id=%s", run_id)
+        return
+
+    payload = dict(subtrace)
+    drop_trace = (context_artifact.provenance or {}).get("context_drop_trace", []) or []
+    drop_map = {str(d.get("block_id", "")): d for d in drop_trace if d.get("block_id")}
+    context_handoff: list[dict[str, object]] = []
+    for idx, cand in enumerate(getattr(ranking_output, "ranked_candidates", ()) or (), start=1):
+        doc_id = str(getattr(cand, "doc_id", ""))
+        drop_entry = drop_map.get(doc_id, {})
+        context_handoff.append(
+            {
+                "rank_position": idx,
+                "doc_id": doc_id,
+                "file": getattr(cand, "file", None),
+                "drop_reason": drop_entry.get("drop_reason", "not_in_drop_trace"),
+                "estimated_tokens": drop_entry.get("estimated_tokens"),
+                "context_final_score": drop_entry.get("final_score"),
+            }
+        )
+    payload["context_handoff"] = context_handoff
+
+    ledger = list(payload.get("elimination_ledger") or [])
+    existing = {str(item.get("doc_id", "")) for item in ledger if item.get("doc_id")}
+    for row in context_handoff:
+        if row.get("drop_reason") == "kept":
+            continue
+        doc_id = str(row.get("doc_id", ""))
+        if not doc_id or doc_id in existing:
+            continue
+        ledger.append(
+            {
+                "doc_id": doc_id,
+                "file": row.get("file"),
+                "first_eliminating_subcomponent": "R8_CONTEXT_HANDOFF",
+                "reason_code": f"context_drop:{row.get('drop_reason')}",
+            }
+        )
+    payload["elimination_ledger"] = ledger
+
+    out_path = Path("artifacts") / "runs" / run_id / "ranking_subtrace.json"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+    print_telemetry(
+        "RANKING_TRACE",
+        saved=str(out_path),
+        input_candidates=len(payload.get("input_surface") or []),
+        final_candidates=len(payload.get("final_output_surface") or []),
+        eliminated=len(payload.get("elimination_ledger") or []),
+    )
+
+
+def _write_claim_coverage_artifacts(
+    run_id: str,
+    claim_packet: dict | None,
+    coverage_report: dict | None,
+    recovery_trace: dict | None,
+    enabled: bool,
+) -> None:
+    """Write claim-coverage artifacts."""
+    if not enabled:
+        return
+    out_dir = Path("artifacts") / "runs" / run_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if claim_packet is not None:
+        with open(out_dir / "claim_packet.json", "w", encoding="utf-8") as f:
+            json.dump(claim_packet, f, indent=2, ensure_ascii=False)
+    if coverage_report is not None:
+        with open(out_dir / "coverage_report.json", "w", encoding="utf-8") as f:
+            json.dump(coverage_report, f, indent=2, ensure_ascii=False)
+    if recovery_trace is not None:
+        with open(out_dir / "recovery_trace.json", "w", encoding="utf-8") as f:
+            json.dump(recovery_trace, f, indent=2, ensure_ascii=False)
+
+    print_telemetry(
+        "CLAIM_COVERAGE_ARTIFACTS",
+        path=str(out_dir),
+        claim_packet=bool(claim_packet is not None),
+        coverage_report=bool(coverage_report is not None),
+        recovery_trace=bool(recovery_trace is not None),
+    )
 
 
 def _run_and_save_diagnostic_layers(
@@ -687,6 +807,8 @@ def main():
                         help="Comma-separated: p1,p2,p3,p4. Run P1–P4 diagnostic layers and save to a separate file (e.g. p1,p2 or p1,p2,p3,p4).")
     parser.add_argument("--context-diagnostics", action="store_true",
                         help="Run L1/L2/L3 context diagnostics (per-block, relational, summary) and save to context_diagnostics.json")
+    parser.add_argument("--ranking-trace", action="store_true",
+                        help="Export ranking subcomponent trace to ranking_subtrace.json")
     parser.add_argument(
         "--diagnostics-only",
         action="store_true",
@@ -708,6 +830,26 @@ def main():
         context_config = config.get_context_config()
         intelligence_config = config.get_intelligence_config()
         generation_config = config.get_generation_config()
+        intelligence_cfg_raw = getattr(config, "intelligence", {}) or {}
+        claim_cov_cfg_raw = intelligence_cfg_raw.get("claim_coverage", {}) or {}
+        from homllm.claim_coverage.interfaces import ClaimCoverageConfig
+
+        claim_coverage_config = ClaimCoverageConfig(
+            enabled=claim_cov_cfg_raw.get("enabled", True),
+            required_coverage_threshold=float(
+                claim_cov_cfg_raw.get("required_coverage_threshold", 0.70)
+            ),
+            claim_cover_threshold=float(
+                claim_cov_cfg_raw.get("claim_cover_threshold", 0.55)
+            ),
+            soft_recovery_enabled=bool(
+                claim_cov_cfg_raw.get("soft_recovery_enabled", True)
+            ),
+            max_recovery_passes=int(claim_cov_cfg_raw.get("max_recovery_passes", 1)),
+            max_required_claims=int(claim_cov_cfg_raw.get("max_required_claims", 8)),
+            recovery_top_k=int(claim_cov_cfg_raw.get("recovery_top_k", 20)),
+            debug=bool(claim_cov_cfg_raw.get("debug", False)),
+        )
     except Exception as e:
         logger.error(f"Error loading config: {e}")
         sys.exit(1)
@@ -752,6 +894,7 @@ def main():
             normalize=not args.raw,
             map_file_ids=not args.no_file_mapping,
         )
+        _index_scope = log_index_scope_manifest(indexer_config.storage.artifacts_path)
 
         # Initialize embedder (shared across retrieval and context)
         embedder = QwenEmbedder(
@@ -773,6 +916,9 @@ def main():
 
         retrieval_result = retrieval_pipeline.retrieve(args.query, intent=intent)
         retrieval_end = time.perf_counter()
+        retrieval_candidate_order_top20 = [
+            str(getattr(c, "doc_id", "")) for c in retrieval_result.candidates[:20]
+        ]
 
         telemetry.record_phase(
             "RETRIEVAL",
@@ -807,6 +953,11 @@ def main():
             query_expansion_enabled=retrieval_result.metadata.get("query_expansion_enabled"),
             query_expansion_term_count=retrieval_result.metadata.get("query_expansion_term_count"),
             query_expansion_terms=",".join(retrieval_result.metadata.get("query_expansion_terms", [])),
+            retrieval_candidate_order_top20=",".join(retrieval_candidate_order_top20),
+            graph_stitch_status=retrieval_result.metadata.get("graph_stitch_status"),
+            graph_stitch_status_detail=retrieval_result.metadata.get("graph_stitch_status_detail"),
+            # Tier 3: per-stage candidate count trace
+            retrieval_stage_trace=retrieval_result.metadata.get("retrieval_stage_trace"),
         )
 
         if not retrieval_result.candidates:
@@ -844,6 +995,9 @@ def main():
 
         ranking_output = ranking_pipeline.rank(ranking_input)
         ranking_end = time.perf_counter()
+        ranking_candidate_order_top20 = [
+            str(getattr(c, "doc_id", "")) for c in ranking_output.ranked_candidates[:20]
+        ]
 
         telemetry.record_phase(
             "RANKING",
@@ -856,6 +1010,8 @@ def main():
             signal_profile=ranking_output.metadata.signal_profile,
             ranking_concentration=ranking_output.metadata.ranking_concentration,
             ranking_geometry=ranking_output.metadata.ranking_geometry,
+            ranking_subtrace_summary=ranking_output.metadata.ranking_subtrace_summary,
+            ranking_candidate_order_top20=",".join(ranking_candidate_order_top20),
         )
 
         # Diagnostic-only candidate dump (no behavior changes).
@@ -913,14 +1069,138 @@ def main():
                 if diagnostics_enabled
                 else None
             ),
+            # Tier 2: coherence refinement + stitching telemetry
+            coherence_refinement=context_artifact.provenance.get("coherence_refinement"),
+            stitching=context_artifact.provenance.get("stitching"),
+            # Tier 3B: submodular packer telemetry
+            submodular_packer=context_artifact.provenance.get("submodular_packer"),
+            depth_preservation_check=context_artifact.provenance.get("depth_preservation_check"),
+            # Tier 3A: token utilization diagnostic
+            utilization_diagnostic=context_artifact.provenance.get("utilization_diagnostic"),
         )
+        _write_ranking_subtrace(
+            run_id=telemetry.run_id,
+            ranking_output=ranking_output,
+            context_artifact=context_artifact,
+            enabled=bool(args.ranking_trace),
+        )
+
+        # Claim-Coverage Gate (query-agnostic): score context sufficiency by claims.
+        from homllm.claim_coverage.gate import (
+            build_unresolved_claim_queries,
+            coverage_summary_to_prompt_text,
+            decide_gate_action,
+            evidence_map_to_prompt_text,
+            packet_to_prompt_text,
+            run_claim_coverage,
+            to_serializable_dict,
+        )
+        claim_packet_obj = None
+        coverage_report_obj = None
+        claim_gate_decision = None
+        claim_recovery_trace = None
+
+        if claim_coverage_config.enabled:
+            cc_start = time.perf_counter()
+            claim_packet_obj, coverage_report_obj = run_claim_coverage(
+                args.query, context_artifact, claim_coverage_config
+            )
+            claim_gate_decision = decide_gate_action(
+                coverage_report_obj,
+                claim_coverage_config,
+                recovery_attempted=False,
+            )
+            recovery_triggered = False
+            coverage_before_recovery = float(coverage_report_obj.coverage_ratio)
+            coverage_after_recovery = float(coverage_report_obj.coverage_ratio)
+
+            if (
+                claim_gate_decision.action.value == "SOFT_RECOVERY"
+                and claim_coverage_config.soft_recovery_enabled
+                and claim_coverage_config.max_recovery_passes > 0
+            ):
+                recovery_triggered = True
+                focused_queries = build_unresolved_claim_queries(
+                    claim_packet_obj,
+                    coverage_report_obj,
+                    max_queries=claim_coverage_config.max_recovery_passes * 4,
+                )
+                focused_candidates = retrieval_pipeline.retrieve_focused_candidates(
+                    args.query,
+                    focused_queries,
+                    intent=intent,
+                    top_k=claim_coverage_config.recovery_top_k,
+                )
+
+                # Merge baseline retrieval + focused candidates (best hybrid score per doc_id).
+                merged_map = {}
+                for cand in retrieval_result.candidates + focused_candidates:
+                    prev = merged_map.get(cand.doc_id)
+                    if prev is None or float(cand.hybrid_score) > float(prev.hybrid_score):
+                        merged_map[cand.doc_id] = cand
+                merged_candidates = list(merged_map.values())
+                merged_candidates.sort(key=lambda c: (-float(c.hybrid_score), str(c.doc_id)))
+
+                ranking_input = RankingInput(
+                    query=args.query,
+                    candidates=tuple(merged_candidates),
+                    config=ranking_config,
+                )
+                ranking_output = ranking_pipeline.rank(ranking_input)
+                context_artifact = context_pipeline.assemble(
+                    ranking_output=ranking_output,
+                    query=args.query,
+                    query_id=retrieval_result.query_id,
+                    unresolved_claim_hints=list(coverage_report_obj.unresolved_claim_ids),
+                )
+
+                # Recompute coverage after single recovery pass.
+                _, coverage_report_after = run_claim_coverage(
+                    args.query, context_artifact, claim_coverage_config
+                )
+                coverage_report_obj = coverage_report_after
+                coverage_after_recovery = float(coverage_report_after.coverage_ratio)
+                claim_gate_decision = decide_gate_action(
+                    coverage_report_after,
+                    claim_coverage_config,
+                    recovery_attempted=True,
+                    coverage_before_recovery=coverage_before_recovery,
+                )
+                claim_recovery_trace = {
+                    "focused_queries": focused_queries,
+                    "focused_candidate_count": len(focused_candidates),
+                    "merged_candidate_count": len(merged_candidates),
+                    "coverage_before_recovery": coverage_before_recovery,
+                    "coverage_after_recovery": coverage_after_recovery,
+                }
+
+            cc_end = time.perf_counter()
+            telemetry.record_phase(
+                "CLAIM_COVERAGE",
+                cc_start,
+                cc_end,
+                required_claim_count=coverage_report_obj.required_claim_count,
+                covered_claim_count=coverage_report_obj.covered_required_claim_count,
+                coverage_ratio=coverage_report_obj.coverage_ratio,
+                recovery_triggered=recovery_triggered,
+                coverage_before_recovery=coverage_before_recovery,
+                coverage_after_recovery=coverage_after_recovery,
+                gate_action=claim_gate_decision.action.value if claim_gate_decision else None,
+                unresolved_claim_count=len(coverage_report_obj.unresolved_claim_ids),
+            )
 
         # CQI_4 Monitoring + Gate
         cqi_result = None
         try:
-            from homllm.quality.cqi_monitor import compute_cqi4_from_drop_trace
+            from homllm.quality.cqi_monitor import compute_cqi4_from_drop_trace, compute_m7_callgraph_coverage
             drop_trace_for_cqi = context_artifact.provenance.get("context_drop_trace", [])
             cqi_result = compute_cqi4_from_drop_trace(drop_trace_for_cqi)
+
+            # M7: Callgraph coverage (Tier 3A)
+            m7_result = compute_m7_callgraph_coverage(
+                callgraph or {}, context_artifact.blocks
+            )
+
             if cqi_result:
                 telemetry.record_phase("CQI_MONITOR", context_end, context_end,
                     cqi4=cqi_result["cqi4"],
@@ -929,6 +1209,14 @@ def main():
                     zone=cqi_result["zone"],
                     top_contributor=cqi_result["top_contributor"],
                     bottom_contributor=cqi_result["bottom_contributor"],
+                    # Tier 2: axis exposure fields
+                    axis_detail=cqi_result.get("axis_detail"),
+                    contributions=cqi_result.get("contributions"),
+                    coherence_delta=cqi_result.get("coherence_delta"),
+                    metrics=cqi_result.get("metrics"),
+                    z_scores=cqi_result.get("z_scores"),
+                    # Tier 3A: M7 callgraph coverage
+                    m7=m7_result,
                 )
                 logger.info(
                     f"[CQI_MONITOR] cqi4={cqi_result['cqi4']:.3f} "
@@ -1088,6 +1376,15 @@ def main():
                 status="SKIPPED",
                 finish_reason="diagnostics_only",
             )
+
+            if claim_coverage_config.enabled:
+                _write_claim_coverage_artifacts(
+                    run_id=telemetry.run_id,
+                    claim_packet=to_serializable_dict(claim_packet_obj) if claim_packet_obj else None,
+                    coverage_report=to_serializable_dict(coverage_report_obj) if coverage_report_obj else None,
+                    recovery_trace=claim_recovery_trace,
+                    enabled=True,
+                )
 
             if args.json:
                 artifacts_path = Path("artifacts") / "runs" / telemetry.run_id
@@ -1422,22 +1719,50 @@ def main():
         template_variables["mechanical_fix_notice"] = mechanical_fix_notice
         template_variables["query"] = args.query
         template_variables["context"] = context_artifact.context_text
+        if claim_coverage_config.enabled and claim_packet_obj and coverage_report_obj:
+            template_variables["required_claims"] = packet_to_prompt_text(claim_packet_obj)
+            template_variables["claim_evidence_map"] = evidence_map_to_prompt_text(
+                claim_packet_obj, coverage_report_obj
+            )
+            template_variables["claim_coverage_summary"] = coverage_summary_to_prompt_text(
+                coverage_report_obj
+            )
+            template_variables["claim_contract_header"] = (
+                "Required Claims Checklist:\n"
+                f"{template_variables['required_claims']}\n\n"
+                "Evidence Map:\n"
+                f"{template_variables['claim_evidence_map']}\n\n"
+                "Claim Coverage Summary:\n"
+                f"{template_variables['claim_coverage_summary']}"
+            )
+            template_variables["claim_contract_rules"] = (
+                "- Answer claim-by-claim with explicit labels: SUPPORTED, INFERRED, or UNRESOLVED."
+            )
+        else:
+            template_variables["required_claims"] = ""
+            template_variables["claim_evidence_map"] = ""
+            template_variables["claim_coverage_summary"] = ""
+            template_variables["claim_contract_header"] = ""
+            template_variables["claim_contract_rules"] = ""
         
         # ── HALLUCINATION GUARDRAIL (Phase 7.1 — concise + grounded) ──
         hallucination_guard = (
-            "\n\nEVIDENCE GROUNDING RULES (MANDATORY):\n"
-            "- Every factual claim MUST reference a specific source from the context "
-            "(e.g., 'In file.py:L42' or 'The function process() shows...')\n"
-            "- If information is NOT explicitly found in context, do NOT speculate. "
-            "Instead state: 'The provided context does not specify X.' "
-            "Then continue analysis using only verified information.\n"
-            "- NEVER invent function names, class names, file paths, or API signatures "
-            "not present in context\n"
-            "- NEVER use hedging language like 'might', 'possibly', 'perhaps', 'likely' "
-            "for code behavior. State what the code DOES or state what is unknown.\n"
-            "- List ALL evidence sources used at the end under '## Evidence Used'\n"
-            "- Be CONCISE. Answer only what the question asks. Do not add unrequested "
-            "sections, meta-commentary, or exhaustive edge cases unless specifically asked.\n"
+            "\n\nEVIDENCE-FIRST RESPONSE RULES (MANDATORY):\n"
+            "- Answer the user's asked scope first; do not add unrelated components or methods.\n"
+            "- Keep component scope tight: prefer symbols/files directly named or directly referenced by those symbols.\n"
+            "- If asked behavior is not implemented in the asked component, state it as unresolved there; do not substitute behavior from unrelated components.\n"
+            "- If the query asks multiple parts, answer each asked part explicitly (bullets are allowed).\n"
+            "- Prioritize direct, evidence-backed statements from the provided context.\n"
+            "- For compare/contrast questions, include concrete differences and practical implications when evidence exists.\n"
+            "- For each key method/rule mentioned, include its concrete in-code behavior (transform, return, and relevant error/fallback handling if shown).\n"
+            "- For interaction/conflict questions, explain mechanism (why outcome occurs), not only execution order.\n"
+            "- Bounded inference is allowed only with at least two concrete anchors; "
+            "mark inline as '[Inferred from <A> + <B>]'.\n"
+            "- Every factual claim must cite context evidence (file:line when available).\n"
+            "- Never invent function names, class names, file paths, APIs, or control flow.\n"
+            "- If context is partial, provide supported parts first; then note limitations only for unresolved asked parts.\n"
+            "- Avoid dedicated unresolved/gap sections unless explicitly requested.\n"
+            "- Prefer completeness for the asked scope; keep concise by excluding unrelated detail.\n"
         )
         template_variables["reasoning_enforcement"] = (
             template_variables.get("reasoning_enforcement", "") + hallucination_guard
@@ -1561,6 +1886,15 @@ def main():
             )
 
         # Export JSON if requested
+        if claim_coverage_config.enabled:
+            _write_claim_coverage_artifacts(
+                run_id=telemetry.run_id,
+                claim_packet=to_serializable_dict(claim_packet_obj) if claim_packet_obj else None,
+                coverage_report=to_serializable_dict(coverage_report_obj) if coverage_report_obj else None,
+                recovery_trace=claim_recovery_trace,
+                enabled=True,
+            )
+
         if args.json:
             artifacts_path = Path("artifacts") / "runs" / telemetry.run_id
             telemetry.write_json(artifacts_path / "telemetry.json")

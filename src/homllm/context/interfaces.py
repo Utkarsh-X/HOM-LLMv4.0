@@ -109,6 +109,11 @@ class ContextConfig:
     # Tier 3B: Relevance safety guard
     relevance_gate_enabled: bool = False
     relevance_gate_threshold: float = 0.25
+    # Tier 3C: Precision filter (remove low-signal cross-component spillover)
+    precision_filter_enabled: bool = False
+    precision_filter_query_identifier_min: int = 1
+    precision_filter_low_score_threshold: float = 0.25
+    precision_filter_min_kept_blocks: int = 10
     # Tier 3B: Sufficiency escape hatch
     escape_hatch_enabled: bool = False
 

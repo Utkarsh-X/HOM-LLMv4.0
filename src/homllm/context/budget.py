@@ -11,6 +11,10 @@ logger = logging.getLogger(__name__)
 class TokenBudgetManager:
     """Manages token budget allocation across blocks."""
 
+    def __init__(self):
+        # Populated after each allocate() for pipeline telemetry
+        self._last_utilization_diagnostic: dict | None = None
+
     def allocate(
         self,
         blocks: list[ScoredBlock],
@@ -41,6 +45,11 @@ class TokenBudgetManager:
         cap_ratio = base_cap_ratio - (0.30 * integration_pressure)
         cap_ratio = min(max(cap_ratio, min_cap_ratio), base_cap_ratio)
         per_block_cap = int(max(1, cap_ratio * config.max_tokens))
+
+        # Utilization diagnostic accumulators
+        offered_tokens_total = 0
+        cap_limited_total = 0
+        budget_limited_total = 0
 
         redundancy_penalty_scale = 1.0 + 0.50 * integration_pressure
 
@@ -97,6 +106,15 @@ class TokenBudgetManager:
                 allocated_tokens = min(tokens, remaining_budget)
             else:
                 allocated_tokens = min(tokens, remaining_budget, local_cap)
+
+            # Track where tokens are lost
+            offered_tokens_total += tokens
+            if tokens > local_cap:
+                cap_limited_total += tokens - local_cap
+            remaining_after_cap = min(tokens, local_cap)
+            if remaining_after_cap > remaining_budget:
+                budget_limited_total += remaining_after_cap - remaining_budget
+
             remaining_budget -= allocated_tokens
 
             # Truncate content if needed
@@ -155,7 +173,48 @@ class TokenBudgetManager:
                 dict(sorted(allocated_files.items(), key=lambda kv: (-kv[1], kv[0]))),
             )
 
+        # Build utilization diagnostic
+        self._finalize_utilization_diagnostic(
+            config, sorted_blocks, allocated_blocks, cap_ratio, per_block_cap,
+            offered_tokens_total, cap_limited_total, budget_limited_total,
+        )
+
         return allocated
+
+    def _finalize_utilization_diagnostic(
+        self, config, blocks, allocated_blocks, cap_ratio, per_block_cap,
+        offered_tokens_total, cap_limited_total, budget_limited_total,
+    ) -> None:
+        """Build utilization diagnostic for pipeline telemetry."""
+        final_tokens = sum(ab.allocated_tokens for ab in allocated_blocks)
+        unused = config.max_tokens - final_tokens
+        util_pct = final_tokens / max(config.max_tokens, 1) * 100
+
+        # Classify root cause
+        if len(blocks) <= 3 and offered_tokens_total < config.max_tokens * 0.5:
+            classification = "Candidate Scarcity"
+        elif cap_limited_total > budget_limited_total and cap_limited_total > offered_tokens_total * 0.1:
+            classification = "Cap-Limited"
+        elif budget_limited_total > 0:
+            classification = "Budget-Limited"
+        elif util_pct >= 60:
+            classification = "Healthy"
+        else:
+            classification = "Candidate Scarcity"
+
+        self._last_utilization_diagnostic = {
+            "offered_tokens": offered_tokens_total,
+            "cap_limited_tokens": cap_limited_total,
+            "budget_limited_tokens": budget_limited_total,
+            "final_tokens": final_tokens,
+            "unused_tokens": unused,
+            "candidate_count": len(blocks),
+            "selected_block_count": len(allocated_blocks),
+            "per_block_cap_ratio": round(cap_ratio, 3),
+            "per_block_cap": per_block_cap,
+            "utilization_pct": round(util_pct, 1),
+            "classification": classification,
+        }
 
     def _estimate_tokens(self, text: str) -> int:
         """Estimate token count (rough: ~4 chars per token)."""
@@ -174,17 +233,20 @@ class TokenBudgetManager:
             except Exception:
                 pass
 
-        # Fallback: character-based truncation
+        # Fallback: character-based truncation at code boundaries
         estimated_chars = max_tokens * 4
         if len(content) <= estimated_chars:
             return content
 
-        # Truncate at word boundary
         truncated = content[:estimated_chars]
-        last_space = truncated.rfind("\n")
-        if last_space > estimated_chars * 0.8:  # Keep if reasonable
-            return truncated[:last_space] + "\n..."
-        return truncated + "..."
+
+        # Prefer cutting at statement boundaries to preserve syntactic completeness
+        # Try: blank line, then def/class boundary, then any newline
+        for marker in ["\n\n", "\ndef ", "\nclass ", "\n"]:
+            pos = truncated.rfind(marker)
+            if pos > estimated_chars * 0.6:
+                return truncated[:pos] + "\n# ... truncated"
+        return truncated + "\n# ... truncated"
 
     def _max_span_overlap_ratio(self, block, prior_blocks) -> float:
         if not prior_blocks:

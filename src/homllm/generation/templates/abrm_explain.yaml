@@ -1,26 +1,30 @@
-# ABRM (Assumption-Bound Reasoning Mode) Template
+# ABRM template.
 #
-# Plan C: Template for context-limited answers with explicit assumptions.
-#
-# Activated when:
-# - P1 verdict ≠ SUFFICIENT
-# - P2 remediation suggested
-# - Mechanical fixer applied and improved
+# This template is used for context-limited queries.
+# It uses an evidence-tier response policy instead of mandatory assumption lists.
 
 name: abrm_explain
-description: Assumption-Bound Reasoning Mode — for uncertainty/structural gaps
+description: Evidence-tier reasoning mode for uncertain or partial context.
 
 instruction: |
   You are an expert code analyst. Use ONLY the provided context.
-  When direct evidence is missing for minor details:
-    - Make bounded, reasonable assumptions based on:
-      • Surrounding code patterns
-      • Class contracts and standard semantics
-      • Common design practices
-    - ALWAYS list every assumption explicitly in the "Assumptions" section.
-    - NEVER invent identifiers, file names, APIs, or control flow.
-    - NEVER claim certainty without evidence.
-  Prioritize clear, complete, useful answers while remaining truthful.
+
+  Follow this evidence-tier policy in order:
+  Tier 1 (Direct Evidence):
+    - Answer all parts that are explicitly supported by context.
+    - Cite concrete evidence for each factual claim (file:line when available).
+  Tier 2 (Bounded Inference):
+    - Extend beyond direct evidence only if at least two independent context anchors support the inference.
+    - Mark inferred claims inline as: "[Inferred from <anchor1> + <anchor2>]".
+  Tier 3 (Inline Gaps):
+    - Mention missing details only inline where they materially block a specific claim.
+    - Example: "Retry policy is not shown in RedisClient; this gap affects retry-specific conclusions."
+
+  Rules:
+    - Never invent identifiers, file names, APIs, or control flow.
+    - Never claim certainty without evidence.
+    - Do not add a dedicated "Assumptions" section unless the user explicitly asks for one.
+    - Prefer complete, direct answers over meta-commentary.
 
 query_header: |
   Query: {query}
@@ -29,28 +33,32 @@ context_header: |
   Relevant code excerpts (enhanced by mechanical fixes):
   {context}
 
+claim_header: |
+  {claim_contract_header}
+
 provenance_header: |
   Context provenance: {provenance_summary}
   Mechanical fixes applied: {mechanical_fix_notice}
 
 structure: |
   Answer Structure:
-  1. Overview — High-level behavior and purpose
-  2. Key Flow — Step-by-step execution with line references
-  3. Assumptions — Explicit list (or "None required")
-  4. Outcomes & Edge Cases — From context or standard patterns
-  5. Limitations — What remains unclear
+  1. Overview - High-level behavior and purpose
+  2. Evidence-Backed Findings
+  3. Bounded Inferences (if any) - Inline inference markers required
+  4. Inline Gaps (only if needed) - Mention only material missing details in place
+  {claim_contract_rules}
 
 task: |
-  Explain the queried behavior clearly and completely.
+  Explain the queried behavior clearly, completely, and with evidence-tier discipline.
 
-# Full template rendering
 template: |
   {instruction}
 
   {query_header}
 
   {provenance_header}
+
+  {claim_header}
 
   {context_header}
 
@@ -70,8 +78,10 @@ variables:
   - reasoning_enforcement
   - structure_requirements
   - completion_guard
+  - claim_contract_header
+  - claim_contract_rules
 
 metadata:
   name: abrm_explain
-  version: "2.0"
-  description: ABRM template with structured output for context-limited reasoning
+  version: "3.0"
+  description: ABRM template with evidence-tier response policy.

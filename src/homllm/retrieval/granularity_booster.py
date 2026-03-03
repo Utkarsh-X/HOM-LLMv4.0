@@ -125,6 +125,7 @@ def apply_granularity_boost(
                 entity_ids=candidate.entity_ids,
                 doc_type=candidate.doc_type,
                 semantic_embedding=candidate.semantic_embedding,
+                symbol_name=candidate.symbol_name,
             )
             boosted.append(boosted_candidate)
             boost_count += 1
@@ -150,6 +151,7 @@ def apply_granularity_boost(
                 entity_ids=candidate.entity_ids,
                 doc_type=candidate.doc_type,
                 semantic_embedding=candidate.semantic_embedding,
+                symbol_name=candidate.symbol_name,
             ))
     
     if boost_count > 0:
