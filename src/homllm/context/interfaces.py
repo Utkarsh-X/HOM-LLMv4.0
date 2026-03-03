@@ -114,6 +114,11 @@ class ContextConfig:
     precision_filter_query_identifier_min: int = 1
     precision_filter_low_score_threshold: float = 0.25
     precision_filter_min_kept_blocks: int = 10
+    # Tier 3C: Sparse-context backfill (coverage safety for under-filled contexts)
+    sparse_backfill_enabled: bool = False
+    sparse_backfill_min_utilization: float = 0.45
+    sparse_backfill_min_blocks: int = 18
+    sparse_backfill_max_additional_blocks: int = 10
     # Tier 3B: Sufficiency escape hatch
     escape_hatch_enabled: bool = False
 

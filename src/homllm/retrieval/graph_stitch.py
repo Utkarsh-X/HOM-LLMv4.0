@@ -178,16 +178,21 @@ class GraphTopology:
             except Exception as e:
                 logger.warning(f"GraphTopology: Failed to load entities.json: {e}")
         
-        # Load symbols.json for content resolution
+        # Load symbols.json for content resolution.
+        # Support both schemas:
+        # - {"symbol_id": "...", "content": "..."}  (older)
+        # - {"id": "...", ...}                       (current index export)
         symbols_path = artifacts_path / "symbols.json"
         symbols_count = 0
         if symbols_path.exists():
             try:
                 sdata = json.loads(symbols_path.read_text(encoding="utf-8"))
                 for sym in sdata.get("symbols", []):
-                    sid = str(sym.get("symbol_id", ""))
-                    content = sym.get("content", "")
-                    if sid and content:
+                    sid = str(sym.get("symbol_id") or sym.get("id") or "")
+                    if sid:
+                        content = str(sym.get("content") or "")
+                        # Content can be empty in lightweight symbol exports;
+                        # keep the ID so topology readiness still reflects graph presence.
                         self._symbol_index[sid] = content
                         symbols_count += 1
                 logger.info(
@@ -215,14 +220,13 @@ class GraphTopology:
             missing_files.append("relations.json")
         if not entities_path.exists():
             missing_files.append("entities.json")
-        if not symbols_path.exists():
-            missing_files.append("symbols.json")
+        # symbols.json is optional for topology readiness; content can be
+        # resolved via DuckDB/chunk fallback when needed.
 
         ready = (
             not missing_files
             and relations_count > 0
             and entities_count > 0
-            and symbols_count > 0
         )
         reason = "ok"
         if not ready:

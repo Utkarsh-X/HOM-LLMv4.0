@@ -335,6 +335,20 @@ class ContextPipeline:
                     [ab.block for ab in allocated_blocks]
                 )
 
+            # Tier 3C: Sparse-context backfill (conservative).
+            # If context is materially under-filled, append next-ranked unseen blocks.
+            sparse_backfill_trace = None
+            if getattr(self.config, "sparse_backfill_enabled", False):
+                allocated_blocks, sparse_backfill_trace = self._apply_sparse_backfill(
+                    allocated_blocks=allocated_blocks,
+                    ranked_scored_blocks=unique_scored,
+                    effective_context_budget=effective_context_budget,
+                )
+                stage_counts["sparse_backfill_blocks"] = len(allocated_blocks)
+                stage_file_histograms["sparse_backfill"] = _file_hist(
+                    [ab.block for ab in allocated_blocks]
+                )
+
             ranking_ids = [block.block_id for block in blocks]
             allocated_ids = [ab.block.block_id for ab in allocated_blocks]
             context_reorder_count = self._count_reorders(ranking_ids, allocated_ids)
@@ -479,6 +493,7 @@ class ContextPipeline:
                 "stitching": stitch_telemetry,
                 "submodular_packer": submodular_telemetry,
                 "precision_filter": precision_filter_trace,
+                "sparse_backfill": sparse_backfill_trace,
                 "depth_preservation_check": depth_preservation_check,
                 "utilization_diagnostic": getattr(
                     self.budget_manager, "_last_utilization_diagnostic", None
@@ -676,6 +691,80 @@ class ContextPipeline:
             if norm_tok and norm_tok in hay:
                 return True
         return False
+
+    def _apply_sparse_backfill(
+        self,
+        allocated_blocks,
+        ranked_scored_blocks: list[ScoredBlock],
+        effective_context_budget: int,
+    ):
+        """Append next-ranked unseen blocks when context is under-filled."""
+        if not allocated_blocks:
+            return allocated_blocks, {"active": False, "reason": "no_allocated_blocks"}
+
+        current_tokens = sum(int(ab.allocated_tokens) for ab in allocated_blocks)
+        current_blocks = len(allocated_blocks)
+        utilization = (current_tokens / max(1, effective_context_budget))
+
+        min_util = float(getattr(self.config, "sparse_backfill_min_utilization", 0.45) or 0.45)
+        min_blocks = int(getattr(self.config, "sparse_backfill_min_blocks", 18) or 18)
+        max_add = int(
+            getattr(self.config, "sparse_backfill_max_additional_blocks", 10) or 10
+        )
+        needs_backfill = (utilization < min_util) or (current_blocks < min_blocks)
+        if not needs_backfill:
+            return allocated_blocks, {
+                "active": False,
+                "reason": "not_sparse",
+                "utilization": round(utilization, 6),
+                "blocks": current_blocks,
+            }
+
+        selected_ids = {ab.block.block_id for ab in allocated_blocks}
+        target_tokens = int(min_util * effective_context_budget)
+        candidates = [sb for sb in ranked_scored_blocks if sb.block.block_id not in selected_ids]
+
+        added = []
+        added_ids = []
+        for sb in candidates:
+            if len(added) >= max_add:
+                break
+            est_tokens = self.budget_manager._estimate_tokens(sb.block.content)
+            if current_tokens + est_tokens > effective_context_budget:
+                continue
+            from homllm.context.interfaces import AllocatedBlock
+            added_block = AllocatedBlock(
+                block=sb.block,
+                allocated_tokens=est_tokens,
+                truncated_content=sb.block.content or "",
+            )
+            added.append(added_block)
+            added_ids.append(sb.block.block_id)
+            current_tokens += est_tokens
+            if current_tokens >= target_tokens and (current_blocks + len(added)) >= min_blocks:
+                break
+
+        if not added:
+            return allocated_blocks, {
+                "active": False,
+                "reason": "no_eligible_backfill",
+                "utilization_before": round(utilization, 6),
+                "blocks_before": current_blocks,
+                "target_tokens": target_tokens,
+            }
+
+        merged = list(allocated_blocks) + added
+        return merged, {
+            "active": True,
+            "reason": "applied",
+            "utilization_before": round(utilization, 6),
+            "blocks_before": current_blocks,
+            "target_tokens": target_tokens,
+            "added_count": len(added),
+            "added_block_ids": added_ids,
+            "tokens_after": current_tokens,
+            "blocks_after": len(merged),
+        }
 
     @staticmethod
     def _count_reorders(source_ids: list[str], target_ids: list[str]) -> int:

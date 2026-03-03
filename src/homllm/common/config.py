@@ -442,6 +442,15 @@ class Config(BaseModel):
             precision_filter_min_kept_blocks=ctx_cfg.get(
                 "precision_filter_min_kept_blocks", 10
             ),
+            # Tier 3C: Sparse-context backfill
+            sparse_backfill_enabled=ctx_cfg.get("sparse_backfill_enabled", False),
+            sparse_backfill_min_utilization=ctx_cfg.get(
+                "sparse_backfill_min_utilization", 0.45
+            ),
+            sparse_backfill_min_blocks=ctx_cfg.get("sparse_backfill_min_blocks", 18),
+            sparse_backfill_max_additional_blocks=ctx_cfg.get(
+                "sparse_backfill_max_additional_blocks", 10
+            ),
             # Tier 3B: Escape hatch
             escape_hatch_enabled=ctx_cfg.get("escape_hatch_enabled", False),
         )

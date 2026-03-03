@@ -12,6 +12,7 @@ API Key Configuration:
 
 import logging
 import os
+import re
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -119,8 +120,6 @@ class GeminiProvider(ProviderConnector):
             raise RuntimeError("Gemini provider not available")
 
         try:
-            start_time = time.time()
-
             # Build generation config using new SDK types
             config_dict = {
                 "temperature": request.config.temperature,
@@ -136,13 +135,13 @@ class GeminiProvider(ProviderConnector):
             # Debug log the config being sent
             logger.info(f"[GEMINI_CONFIG] max_output_tokens={config_dict.get('max_output_tokens')}, temp={config_dict.get('temperature')}")
 
-            # Invoke API using new SDK pattern — exactly 1 call
-            response = self._client.models.generate_content(
+            # Invoke API with bounded retries for transient provider failures.
+            start_time = time.time()
+            response = self._invoke_with_retry(
                 model=request.model,
-                contents=request.prompt,
-                config=config_dict,
+                prompt=request.prompt,
+                config_dict=config_dict,
             )
-
             latency_ms = int((time.time() - start_time) * 1000)
 
             # Extract response text
@@ -191,6 +190,67 @@ class GeminiProvider(ProviderConnector):
         except Exception as e:
             logger.error(f"Gemini provider invocation failed: {e}")
             raise
+
+    def _invoke_with_retry(self, model: str, prompt: str, config_dict: dict):
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            try:
+                return self._client.models.generate_content(
+                    model=model,
+                    contents=prompt,
+                    config=config_dict,
+                )
+            except Exception as e:
+                if attempt >= max_attempts or not self._is_retryable_exception(e):
+                    raise
+                sleep_s = self._retry_delay_seconds(e, attempt)
+                logger.warning(
+                    "[GEMINI_RETRY] transient error attempt=%d/%d sleep=%.1fs err=%s",
+                    attempt,
+                    max_attempts,
+                    sleep_s,
+                    str(e),
+                )
+                time.sleep(sleep_s)
+        raise RuntimeError("Gemini retry loop exhausted unexpectedly")
+
+    @staticmethod
+    def _is_retryable_exception(exc: Exception) -> bool:
+        msg = str(exc).lower()
+        retry_tokens = (
+            "429",
+            "rate limit",
+            "resource exhausted",
+            "quota",
+            "temporarily unavailable",
+            "unavailable",
+            "deadline exceeded",
+            "timeout",
+            "timed out",
+            "internal error",
+            "500",
+            "503",
+            "connection reset",
+        )
+        return any(tok in msg for tok in retry_tokens)
+
+    @staticmethod
+    def _retry_delay_seconds(exc: Exception, attempt: int) -> float:
+        """
+        Prefer provider-suggested retry delay when available.
+        Fallback to bounded linear backoff.
+        """
+        msg = str(exc)
+        lower = msg.lower()
+        # Gemini errors often contain: "Please retry in 39.88s."
+        m = re.search(r"retry in ([0-9]+(?:\.[0-9]+)?)s", lower)
+        if m:
+            try:
+                suggested = float(m.group(1))
+                return max(1.0, min(60.0, suggested + 0.5))
+            except Exception:
+                pass
+        return min(15.0, 1.5 * attempt)
 
     def invoke_stream(
         self, request: ProviderRequest, on_chunk: Callable[[str], None]

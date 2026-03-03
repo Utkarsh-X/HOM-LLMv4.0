@@ -308,7 +308,7 @@ context:
   precision_filter_low_score_threshold: 0.25
   precision_filter_min_kept_blocks: 10
   # Tier 3C: Sparse-context backfill to avoid under-filled contexts on hard queries.
-  sparse_backfill_enabled: true
+  sparse_backfill_enabled: false
   sparse_backfill_min_utilization: 0.45
   sparse_backfill_min_blocks: 18
   sparse_backfill_max_additional_blocks: 8
@@ -365,7 +365,7 @@ intelligence:
 generation:
   default_provider: gemini
   default_model: "gemini-2.5-flash"
-  temperature: 0.15
+  temperature: 0.10
   max_output_tokens: 12000  # Increased to reduce PARTIAL responses
 
 evaluation:

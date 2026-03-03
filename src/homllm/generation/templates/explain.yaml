@@ -23,7 +23,8 @@ template: |
 
   Mandatory Rules:
   {claim_contract_rules}
-  - For each factual claim, cite evidence as file:line when available.
+  - For each factual claim, cite evidence as file and symbol when available.
+  - Include line numbers only when explicitly present in provided context headers.
   - Do not invent identifiers, files, APIs, or control flow.
   - Do not output a generic "not in context" blanket statement when partial evidence exists.
   - Prefer complete, concrete answers; be concise only after covering key requested details.

@@ -566,6 +566,9 @@ class SetOptimizer:
         if not selected:
             return 0.0
         selected_count = len(selected)
+        # No diversity signal for a singleton set.
+        if selected_count <= 1:
+            return 0.0
         file_keys = [
             str(c.file) if c.file else f"__unknown__:{c.doc_id}"
             for c in selected
@@ -574,7 +577,10 @@ class SetOptimizer:
         distinct_files = len(counts)
         if selected_count <= 0:
             return 0.0
-        unique_ratio = distinct_files / float(selected_count)
+        # Normalize unique ratio so:
+        # - one file repeated => 0
+        # - every added item from a new file => 1
+        unique_ratio = (distinct_files - 1) / float(selected_count - 1)
         if distinct_files <= 1:
             entropy = 0.0
         else:

@@ -1,0 +1,354 @@
+context:
+  budget_mode: adaptive
+  coherence_callgraph_bonus: 0.1
+  coherence_different_file_bonus: 0.5
+  coherence_dispersion_threshold: 0.9
+  coherence_enabled: true
+  coherence_max_contribution: 0.15
+  coherence_protect_top_n: 3
+  coherence_proximity_lines: 50
+  coherence_same_file_bonus: 0.8
+  coherence_synergy_threshold: 0.3
+  escape_hatch_enabled: false
+  generation_reserve_tokens: 800
+  max_tokens: 4400
+  ordering: structural_first
+  ranking_surface_lock_enabled: true
+  relevance_gate_enabled: true
+  relevance_gate_threshold: 0.25
+  scoring_weights:
+    w_coherence: 0.1
+    w_name: 0.2
+    w_novelty: 0.0
+    w_semantic: 0.4
+    w_structural: 0.0
+  structural_priority_callgraph_bonus: 0.2
+  structural_priority_cap: 1.0
+  structural_priority_decorator_bonus: 0.3
+  structural_priority_entrypoint_bonus: 0.5
+  structural_priority_multiplier: 1.5
+  submodular_packer_enabled: true
+  summarization_enabled: false
+  submodular:
+    w_rrf: 0.55
+    w_novelty: 0.2
+    w_graph: 0.0
+    w_concept: 0.25
+    min_density_epsilon: 0.0001
+    novelty_scaling: file_concentration
+evaluation:
+  artifact_retention_days: 90
+  judge_model: gemini-2.5-flash
+  metrics:
+  - semantic_correctness
+  - factual_accuracy
+  - completeness
+generation:
+  default_model: gemini-2.5-flash
+  default_provider: gemini
+  max_output_tokens: 12000
+  temperature: 0.0
+indexer:
+  chunk_max_lines: 100
+  embedding_device: auto
+  embedding_dimension: 1024
+  embedding_max_tokens: 1024
+  embedding_model: Qwen/Qwen3-Embedding-0.6B
+  entity_centric_indexing_enabled: true
+  entity_confidence:
+    cap_at: 1.0
+    docstring_bonus: 0.4
+    exported_bonus: 0.2
+    public_name_bonus: 0.3
+    type_annotated_bonus: 0.1
+  hierarchical_chunking:
+    chunk_max_lines: 100
+    coarse_enabled: true
+    enabled: true
+    fine_enabled: true
+    medium_enabled: true
+  ignore_patterns:
+  - .git
+  - node_modules
+  - __pycache__
+  - '*.pyc'
+  - .venv
+  languages:
+  - python
+  - javascript
+  - typescript
+  storage:
+    artifacts_path: indexes
+    duckdb_path: indexes/metadata.duckdb
+    lancedb_path: indexes/vectors.lance
+    tantivy_path: indexes/bm25.index
+  type_alias_extraction_enabled: false
+intelligence:
+  abrm_disable_on_cold_start: false
+  abrm_enabled: true
+  action_priority:
+  - GRAPH_STITCH_RETRY
+  - SYMBOL_BACKFILL
+  - SEMANTIC_DEDUP_FORCE
+  - UTILIZATION_EXPAND
+  caps:
+    graph_stitch_max: 6
+    symbol_backfill_max: 4
+    utilization_expand_max: 10
+  enabled: true
+  level1_enabled: true
+  level2_enabled: true
+  level3_enabled: true
+  mechanical_fixer_enabled: true
+  p2_budget_increase_pct: 40
+  thresholds:
+    orphan_pct_trigger: 60
+    redundancy_cluster_pct_trigger: 25
+    used_budget_pct_low: 40
+ranking:
+  concentration_top_k: 10
+  dedup:
+    file_entropy_threshold: 0.6
+  geometry:
+    rerank_alpha: 0.32
+    struct_gamma: 0.05
+  graph_proximity:
+    anchor_k: 5
+    max_depth: 4
+  mmr_selection:
+    enabled: true
+    lambda: 0.85
+    top_n: 50
+  phase2:
+    adaptive_weights_enabled: true
+    enabled: true
+  reranker:
+    device: auto
+    enabled: true
+    gating:
+      enabled: false
+      min_candidates: 3
+      threshold_disagreement: 0.5
+      threshold_entropy: 0.7
+      threshold_margin: 0.2
+      top_k: 50
+    model: tomaarsen/Qwen3-Reranker-0.6B-seq-cls
+    top_m: 40
+  set_optimization:
+    enabled: true
+    token_budget: 3600
+    w_coverage: 0.8
+    w_dispersion: 0.2
+    w_redundancy: 0.5
+    w_relevance: 1.0
+    w_structural: 0.6
+  two_pass:
+    decay: 0.8
+    enabled: true
+    max_depth: 3
+    seed_k: 20
+  weights:
+    struct:
+      bonus_cap: 0.2
+      callgraph_bonus: 0.05
+      decorator_bonus: 0.05
+      entrypoint_bonus: 0.1
+    w_base: 0.4
+    w_bm25: 0.4
+    w_dense: 0.4
+    w_name: 0.2
+    w_rerank: 0.55
+    w_struct: 0.05
+retrieval:
+  adaptive_seed:
+    drop_threshold: 0.3
+    enabled: true
+    max_k: 150
+    min_k: 20
+  bm25:
+    engine: tantivy
+    top_k: 50
+  diversity_mmr:
+    enabled: false
+    lambda: 0.6
+    similarity_threshold: 0.85
+  expansion:
+    enabled: true
+    max_additions: 4
+    min_similarity: 0.25
+  granularity_boost:
+    DEBUG:
+      coarse: 1.0
+      fine: 2.5
+      medium: 1.5
+    EXPLAIN:
+      coarse: 2.0
+      fine: 1.0
+      medium: 1.5
+    IMPLEMENT:
+      coarse: 0.8
+      fine: 2.0
+      medium: 1.2
+    REFACTOR:
+      coarse: 1.0
+      fine: 1.8
+      medium: 1.5
+    SEARCH:
+      coarse: 1.0
+      fine: 1.5
+      medium: 1.8
+    enabled: true
+  granularity_mixing:
+    enabled: true
+    profiles:
+      DEBUG:
+        coarse:
+          max: 1
+          min: 0
+        fine:
+          max: 18
+          min: 10
+        medium:
+          max: 3
+          min: 1
+      EXPLAIN:
+        coarse:
+          max: 4
+          min: 1
+        fine:
+          max: 8
+          min: 3
+        medium:
+          max: 6
+          min: 2
+      IMPLEMENT:
+        coarse:
+          max: 1
+          min: 0
+        fine:
+          max: 15
+          min: 8
+        medium:
+          max: 4
+          min: 1
+      REFACTOR:
+        coarse:
+          max: 2
+          min: 1
+        fine:
+          max: 12
+          min: 6
+        medium:
+          max: 5
+          min: 2
+      SEARCH:
+        coarse:
+          max: 5
+          min: 2
+        fine:
+          max: 5
+          min: 2
+        medium:
+          max: 8
+          min: 3
+      UNKNOWN:
+        coarse:
+          max: 2
+          min: 1
+        fine:
+          max: 10
+          min: 5
+        medium:
+          max: 5
+          min: 2
+  graph_stitch:
+    enabled: true
+    graph_cache_enabled: true
+    graph_stitch_beam_high: 8
+    graph_stitch_beam_low: 3
+    max_additions: 8
+    max_depth: 2
+    min_confidence: 0.5
+    relation_priority:
+    - calls
+    - overrides
+    - imports
+    - uses
+    - inherits
+    - type_annotates
+  hybrid:
+    method: rrf
+    rrf_k: 10
+  parallel_search:
+    enabled: true
+  plan_b_enabled: true
+  post_merge_candidates: 50
+  precision_recovery:
+    bm25_top_k: 5
+    enabled: true
+    identifier_limit: 16
+    max_additions: 3
+    max_ratio: 0.2
+    min_confidence: 0.8
+    scan_candidates: 8
+    vector_top_k: 3
+  query_expansion:
+    enabled: true
+    max_terms: 6
+    min_token_length: 3
+    synonyms:
+      auth:
+      - authentication
+      - authorize
+      - authorization
+      - login
+      authentication:
+      - auth
+      - authorize
+      - authorization
+      - login
+      bug:
+      - issue
+      - error
+      - failure
+      cache:
+      - caching
+      - memoization
+      fix:
+      - repair
+      - patch
+      - resolve
+      function:
+      - method
+      - routine
+      - handler
+      import:
+      - dependency
+      - module
+      login:
+      - signin
+      - authentication
+      - auth
+      method:
+      - function
+      - routine
+      module:
+      - package
+      - file
+      - component
+      resolve:
+      - resolution
+      - lookup
+      signin:
+      - login
+      - authentication
+      - auth
+  static_ceiling_experiment:
+    branch_multiplier: 2
+    enabled: false
+    output_multiplier: 2
+    post_merge_multiplier: 2
+  vector:
+    calibration_mode: legacy
+    engine: lancedb
+    top_k: 50

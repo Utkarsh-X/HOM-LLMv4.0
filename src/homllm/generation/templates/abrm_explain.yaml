@@ -12,7 +12,8 @@ instruction: |
   Follow this evidence-tier policy in order:
   Tier 1 (Direct Evidence):
     - Answer all parts that are explicitly supported by context.
-    - Cite concrete evidence for each factual claim (file:line when available).
+    - Cite concrete evidence for each factual claim (file and symbol when available).
+    - Include line numbers only when explicitly present in provided context headers.
   Tier 2 (Bounded Inference):
     - Extend beyond direct evidence only if at least two independent context anchors support the inference.
     - Mark inferred claims inline as: "[Inferred from <anchor1> + <anchor2>]".
