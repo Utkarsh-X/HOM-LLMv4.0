@@ -451,6 +451,34 @@ class Config(BaseModel):
             sparse_backfill_max_additional_blocks=ctx_cfg.get(
                 "sparse_backfill_max_additional_blocks", 10
             ),
+            # Claim-gain epsilon swap
+            claim_gain_swap_enabled=ctx_cfg.get("claim_gain_swap_enabled", False),
+            claim_gain_swap_score_epsilon=ctx_cfg.get(
+                "claim_gain_swap_score_epsilon", 0.02
+            ),
+            claim_gain_swap_max_swaps=ctx_cfg.get("claim_gain_swap_max_swaps", 2),
+            claim_gain_swap_min_relevance_floor=ctx_cfg.get(
+                "claim_gain_swap_min_relevance_floor",
+                ctx_cfg.get("relevance_gate_threshold", 0.25),
+            ),
+            unresolved_evidence_injection_enabled=ctx_cfg.get(
+                "unresolved_evidence_injection_enabled", False
+            ),
+            unresolved_evidence_injection_max_blocks=ctx_cfg.get(
+                "unresolved_evidence_injection_max_blocks", 2
+            ),
+            unresolved_evidence_injection_min_claim_gain=ctx_cfg.get(
+                "unresolved_evidence_injection_min_claim_gain", 0.1
+            ),
+            unresolved_evidence_injection_relevance_floor=ctx_cfg.get(
+                "unresolved_evidence_injection_relevance_floor", 0.15
+            ),
+            unresolved_evidence_injection_max_token_share=ctx_cfg.get(
+                "unresolved_evidence_injection_max_token_share", 0.15
+            ),
+            unresolved_evidence_injection_replace_from_tail=ctx_cfg.get(
+                "unresolved_evidence_injection_replace_from_tail", True
+            ),
             # Tier 3B: Escape hatch
             escape_hatch_enabled=ctx_cfg.get("escape_hatch_enabled", False),
         )

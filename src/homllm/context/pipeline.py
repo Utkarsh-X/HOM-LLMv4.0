@@ -322,6 +322,46 @@ class ContextPipeline:
             stage_counts["allocated_blocks"] = len(allocated_blocks)
             stage_file_histograms["allocated"] = _file_hist([ab.block for ab in allocated_blocks])
 
+            # Claim-gain epsilon swap (post-packer, low-risk tie-break).
+            claim_gain_swap_trace = {"active": False, "reason": "disabled", "swaps_applied": 0}
+            if getattr(self.config, "claim_gain_swap_enabled", False):
+                allocated_blocks, claim_gain_swap_trace = self._apply_claim_gain_epsilon_swap(
+                    allocated_blocks=allocated_blocks,
+                    ranked_scored_blocks=unique_scored,
+                    effective_context_budget=effective_context_budget,
+                    unresolved_claim_hints=unresolved_claim_hints or [],
+                )
+                stage_counts["claim_gain_swapped_blocks"] = len(allocated_blocks)
+                stage_file_histograms["claim_gain_swapped"] = _file_hist(
+                    [ab.block for ab in allocated_blocks]
+                )
+
+            unresolved_evidence_injection_trace = {
+                "active": False,
+                "reason": "disabled",
+                "candidate_count_considered": 0,
+                "blocks_injected": 0,
+                "replaced_block_ids": [],
+                "injected_block_ids": [],
+                "tokens_before": sum(int(ab.allocated_tokens) for ab in allocated_blocks),
+                "tokens_after": sum(int(ab.allocated_tokens) for ab in allocated_blocks),
+                "claim_gain_delta_total": 0.0,
+            }
+            if getattr(self.config, "unresolved_evidence_injection_enabled", False):
+                allocated_blocks, unresolved_evidence_injection_trace = (
+                    self._apply_unresolved_evidence_injection(
+                        allocated_blocks=allocated_blocks,
+                        ranked_scored_blocks=unique_scored,
+                        effective_context_budget=effective_context_budget,
+                        unresolved_claim_hints=unresolved_claim_hints or [],
+                        query=query,
+                    )
+                )
+                stage_counts["unresolved_evidence_injected_blocks"] = len(allocated_blocks)
+                stage_file_histograms["unresolved_evidence_injected"] = _file_hist(
+                    [ab.block for ab in allocated_blocks]
+                )
+
             # Tier 3C: Conservative precision filter for explicit-identifier queries.
             precision_filter_trace = None
             if getattr(self.config, "precision_filter_enabled", False):
@@ -348,6 +388,20 @@ class ContextPipeline:
                 stage_file_histograms["sparse_backfill"] = _file_hist(
                     [ab.block for ab in allocated_blocks]
                 )
+
+            budget_guard_trace = self._apply_final_budget_guard(
+                allocated_blocks=allocated_blocks,
+                effective_context_budget=effective_context_budget,
+            )
+            if budget_guard_trace.get("active"):
+                removed_ids = set(budget_guard_trace.get("removed_block_ids", []) or [])
+                allocated_blocks = [
+                    ab for ab in allocated_blocks if ab.block.block_id not in removed_ids
+                ]
+            stage_counts["budget_guard_blocks"] = len(allocated_blocks)
+            stage_file_histograms["budget_guard"] = _file_hist(
+                [ab.block for ab in allocated_blocks]
+            )
 
             ranking_ids = [block.block_id for block in blocks]
             allocated_ids = [ab.block.block_id for ab in allocated_blocks]
@@ -494,6 +548,9 @@ class ContextPipeline:
                 "submodular_packer": submodular_telemetry,
                 "precision_filter": precision_filter_trace,
                 "sparse_backfill": sparse_backfill_trace,
+                "budget_guard": budget_guard_trace,
+                "claim_gain_swap": claim_gain_swap_trace,
+                "unresolved_evidence_injection": unresolved_evidence_injection_trace,
                 "depth_preservation_check": depth_preservation_check,
                 "utilization_diagnostic": getattr(
                     self.budget_manager, "_last_utilization_diagnostic", None
@@ -765,6 +822,427 @@ class ContextPipeline:
             "tokens_after": current_tokens,
             "blocks_after": len(merged),
         }
+
+    def _apply_claim_gain_epsilon_swap(
+        self,
+        allocated_blocks,
+        ranked_scored_blocks: list[ScoredBlock],
+        effective_context_budget: int,
+        unresolved_claim_hints: list[str],
+    ):
+        """Swap near-threshold selected blocks with higher claim-gain candidates."""
+        if not allocated_blocks:
+            return allocated_blocks, {"active": False, "reason": "no_allocated_blocks"}
+        if not unresolved_claim_hints:
+            return allocated_blocks, {"active": False, "reason": "no_unresolved_claim_hints"}
+
+        epsilon = float(getattr(self.config, "claim_gain_swap_score_epsilon", 0.02) or 0.02)
+        max_swaps = int(getattr(self.config, "claim_gain_swap_max_swaps", 2) or 2)
+        min_relevance_floor = float(
+            getattr(self.config, "claim_gain_swap_min_relevance_floor", 0.25) or 0.25
+        )
+        if max_swaps <= 0:
+            return allocated_blocks, {"active": False, "reason": "max_swaps_disabled"}
+
+        hint_terms = self._extract_hint_terms(unresolved_claim_hints)
+        if not hint_terms:
+            return allocated_blocks, {
+                "active": False,
+                "reason": "no_hint_terms",
+                "unresolved_claim_hints": list(unresolved_claim_hints),
+            }
+
+        scored_map = {sb.block.block_id: sb for sb in ranked_scored_blocks}
+        selected_ids = {ab.block.block_id for ab in allocated_blocks}
+        selected_list = [ab.block.block_id for ab in allocated_blocks]
+        excluded = [sb for sb in ranked_scored_blocks if sb.block.block_id not in selected_ids]
+        if not excluded:
+            return allocated_blocks, {"active": False, "reason": "no_excluded_candidates"}
+
+        tokens_used = sum(int(ab.allocated_tokens) for ab in allocated_blocks)
+        # Prefer swaps against lowest-ranked selected blocks first.
+        selected_list_reversed = list(reversed(selected_list))
+        swaps = []
+
+        def _score_of(block_id: str) -> float:
+            sb = scored_map.get(block_id)
+            return float(sb.final_score) if sb else 0.0
+
+        def _claim_gain(sb: ScoredBlock) -> float:
+            return self._compute_claim_gain(sb.block, hint_terms)
+
+        for selected_id in selected_list_reversed:
+            if len(swaps) >= max_swaps:
+                break
+            selected_sb = scored_map.get(selected_id)
+            if not selected_sb:
+                continue
+            selected_score = float(selected_sb.final_score)
+            selected_gain = _claim_gain(selected_sb)
+            selected_tokens = self.budget_manager._estimate_tokens(selected_sb.block.content)
+
+            best = None
+            for ex in excluded:
+                ex_id = ex.block.block_id
+                if ex_id in selected_ids:
+                    continue
+                ex_score = float(ex.final_score)
+                if ex_score < min_relevance_floor:
+                    continue
+                if abs(ex_score - selected_score) > epsilon:
+                    continue
+                ex_gain = _claim_gain(ex)
+                if ex_gain <= selected_gain:
+                    continue
+                ex_tokens = self.budget_manager._estimate_tokens(ex.block.content)
+                new_tokens = tokens_used - selected_tokens + ex_tokens
+                if new_tokens > effective_context_budget:
+                    continue
+                cand = (ex, ex_gain, ex_score, ex_tokens, new_tokens)
+                if best is None or ex_gain > best[1] or (ex_gain == best[1] and ex_score > best[2]):
+                    best = cand
+
+            if best is None:
+                continue
+
+            ex, ex_gain, ex_score, ex_tokens, new_tokens = best
+            selected_ids.remove(selected_id)
+            selected_ids.add(ex.block.block_id)
+            tokens_used = new_tokens
+            swaps.append(
+                {
+                    "out_block_id": selected_id,
+                    "in_block_id": ex.block.block_id,
+                    "out_score": selected_score,
+                    "in_score": ex_score,
+                    "score_delta": ex_score - selected_score,
+                    "out_claim_gain": selected_gain,
+                    "in_claim_gain": ex_gain,
+                    "claim_gain_delta": ex_gain - selected_gain,
+                    "out_tokens": selected_tokens,
+                    "in_tokens": ex_tokens,
+                }
+            )
+
+        if not swaps:
+            return allocated_blocks, {
+                "active": False,
+                "reason": "no_eligible_swap",
+                "epsilon": epsilon,
+                "max_swaps": max_swaps,
+                "min_relevance_floor": min_relevance_floor,
+                "hint_term_count": len(hint_terms),
+            }
+
+        # Preserve ranked order while applying swapped selected-id set.
+        from homllm.context.interfaces import AllocatedBlock
+
+        merged = []
+        for sb in ranked_scored_blocks:
+            bid = sb.block.block_id
+            if bid not in selected_ids:
+                continue
+            est_tokens = self.budget_manager._estimate_tokens(sb.block.content)
+            merged.append(
+                AllocatedBlock(
+                    block=sb.block,
+                    allocated_tokens=est_tokens,
+                    truncated_content=sb.block.content or "",
+                )
+            )
+
+        return merged, {
+            "active": True,
+            "reason": "applied",
+            "epsilon": epsilon,
+            "max_swaps": max_swaps,
+            "min_relevance_floor": min_relevance_floor,
+            "hint_term_count": len(hint_terms),
+            "swaps_applied": len(swaps),
+            "swaps": swaps,
+        }
+
+    def _apply_unresolved_evidence_injection(
+        self,
+        allocated_blocks,
+        ranked_scored_blocks: list[ScoredBlock],
+        effective_context_budget: int,
+        unresolved_claim_hints: list[str],
+        query: str,
+    ):
+        """Force small amounts of unresolved-claim evidence into final context."""
+        del query  # Reserved for future telemetry/detail without affecting determinism.
+
+        if not getattr(self.config, "unresolved_evidence_injection_enabled", False):
+            return allocated_blocks, {"active": False, "reason": "disabled"}
+        if not allocated_blocks:
+            return allocated_blocks, {"active": False, "reason": "no_allocated_blocks"}
+        if not unresolved_claim_hints:
+            return allocated_blocks, {"active": False, "reason": "no_unresolved_claim_hints"}
+
+        hint_terms = self._extract_hint_terms(unresolved_claim_hints)
+        if not hint_terms:
+            return allocated_blocks, {
+                "active": False,
+                "reason": "no_hint_terms",
+                "candidate_count_considered": 0,
+                "blocks_injected": 0,
+                "replaced_block_ids": [],
+                "injected_block_ids": [],
+                "tokens_before": sum(int(ab.allocated_tokens) for ab in allocated_blocks),
+                "tokens_after": sum(int(ab.allocated_tokens) for ab in allocated_blocks),
+                "claim_gain_delta_total": 0.0,
+            }
+
+        scored_map = {sb.block.block_id: sb for sb in ranked_scored_blocks}
+        selected_ids = {ab.block.block_id for ab in allocated_blocks}
+        excluded = [sb for sb in ranked_scored_blocks if sb.block.block_id not in selected_ids]
+        tokens_before = sum(int(ab.allocated_tokens) for ab in allocated_blocks)
+
+        if not excluded:
+            return allocated_blocks, {
+                "active": False,
+                "reason": "no_excluded_candidates",
+                "candidate_count_considered": 0,
+                "blocks_injected": 0,
+                "replaced_block_ids": [],
+                "injected_block_ids": [],
+                "tokens_before": tokens_before,
+                "tokens_after": tokens_before,
+                "claim_gain_delta_total": 0.0,
+            }
+
+        min_relevance_floor = float(
+            getattr(self.config, "unresolved_evidence_injection_relevance_floor", 0.15)
+            or 0.15
+        )
+        min_claim_gain = float(
+            getattr(self.config, "unresolved_evidence_injection_min_claim_gain", 0.1) or 0.1
+        )
+        max_blocks = int(
+            getattr(self.config, "unresolved_evidence_injection_max_blocks", 2) or 2
+        )
+        max_token_share = float(
+            getattr(self.config, "unresolved_evidence_injection_max_token_share", 0.15) or 0.15
+        )
+        replace_from_tail = bool(
+            getattr(self.config, "unresolved_evidence_injection_replace_from_tail", True)
+        )
+        if max_blocks <= 0:
+            return allocated_blocks, {
+                "active": False,
+                "reason": "disabled",
+                "candidate_count_considered": 0,
+                "blocks_injected": 0,
+                "replaced_block_ids": [],
+                "injected_block_ids": [],
+                "tokens_before": tokens_before,
+                "tokens_after": tokens_before,
+                "claim_gain_delta_total": 0.0,
+            }
+
+        eligible_candidates = []
+        for sb in excluded:
+            final_score = float(sb.final_score)
+            if final_score < min_relevance_floor:
+                continue
+            claim_gain = self._compute_claim_gain(sb.block, hint_terms)
+            if claim_gain < min_claim_gain:
+                continue
+            est_tokens = self.budget_manager._estimate_tokens(sb.block.content)
+            eligible_candidates.append((sb, claim_gain, final_score, est_tokens))
+
+        if not eligible_candidates:
+            return allocated_blocks, {
+                "active": False,
+                "reason": "no_eligible_candidates",
+                "candidate_count_considered": 0,
+                "blocks_injected": 0,
+                "replaced_block_ids": [],
+                "injected_block_ids": [],
+                "tokens_before": tokens_before,
+                "tokens_after": tokens_before,
+                "claim_gain_delta_total": 0.0,
+            }
+
+        eligible_candidates.sort(key=lambda item: (-item[1], -item[2], item[3], item[0].block.block_id))
+
+        token_cap = max(1, int(effective_context_budget * max_token_share))
+        current_tokens = tokens_before
+        injected_token_total = 0
+        injected_ids: list[str] = []
+        replaced_ids: list[str] = []
+        claim_gain_delta_total = 0.0
+
+        selected_order = [ab.block.block_id for ab in allocated_blocks]
+        if replace_from_tail:
+            selected_candidates = list(reversed(selected_order))
+        else:
+            selected_candidates = list(selected_order)
+
+        for ex, ex_gain, _ex_score, ex_tokens in eligible_candidates:
+            if len(injected_ids) >= max_blocks:
+                break
+            if ex.block.block_id in selected_ids:
+                continue
+            if injected_token_total + ex_tokens > token_cap:
+                continue
+
+            replacement_found = False
+            for selected_id in selected_candidates:
+                if selected_id not in selected_ids:
+                    continue
+                selected_sb = scored_map.get(selected_id)
+                if not selected_sb:
+                    continue
+                if self._block_is_protected(selected_sb.block):
+                    continue
+                selected_gain = self._compute_claim_gain(selected_sb.block, hint_terms)
+                selected_tokens = self.budget_manager._estimate_tokens(selected_sb.block.content)
+                new_tokens = current_tokens - selected_tokens + ex_tokens
+                if new_tokens > effective_context_budget:
+                    continue
+
+                selected_ids.remove(selected_id)
+                selected_ids.add(ex.block.block_id)
+                current_tokens = new_tokens
+                injected_token_total += ex_tokens
+                injected_ids.append(ex.block.block_id)
+                replaced_ids.append(selected_id)
+                claim_gain_delta_total += max(0.0, ex_gain - selected_gain)
+                replacement_found = True
+                break
+
+            if not replacement_found:
+                continue
+
+        if not injected_ids:
+            return allocated_blocks, {
+                "active": False,
+                "reason": "no_budget_safe_replacement",
+                "candidate_count_considered": len(eligible_candidates),
+                "blocks_injected": 0,
+                "replaced_block_ids": [],
+                "injected_block_ids": [],
+                "tokens_before": tokens_before,
+                "tokens_after": tokens_before,
+                "claim_gain_delta_total": 0.0,
+            }
+
+        from homllm.context.interfaces import AllocatedBlock
+
+        merged = []
+        for sb in ranked_scored_blocks:
+            bid = sb.block.block_id
+            if bid not in selected_ids:
+                continue
+            est_tokens = self.budget_manager._estimate_tokens(sb.block.content)
+            merged.append(
+                AllocatedBlock(
+                    block=sb.block,
+                    allocated_tokens=est_tokens,
+                    truncated_content=sb.block.content or "",
+                )
+            )
+
+        return merged, {
+            "active": True,
+            "reason": "applied",
+            "candidate_count_considered": len(eligible_candidates),
+            "blocks_injected": len(injected_ids),
+            "replaced_block_ids": replaced_ids,
+            "injected_block_ids": injected_ids,
+            "tokens_before": tokens_before,
+            "tokens_after": sum(int(ab.allocated_tokens) for ab in merged),
+            "claim_gain_delta_total": round(claim_gain_delta_total, 6),
+        }
+
+    def _apply_final_budget_guard(self, allocated_blocks, effective_context_budget: int) -> dict:
+        """Trim lowest-ranked tail blocks if post-selection stages exceed the effective budget."""
+        current_tokens = sum(int(ab.allocated_tokens) for ab in allocated_blocks)
+        if current_tokens <= effective_context_budget:
+            return {
+                "active": False,
+                "reason": "within_budget",
+                "tokens_before": current_tokens,
+                "tokens_after": current_tokens,
+                "removed_block_ids": [],
+                "blocks_removed": 0,
+            }
+
+        removed_block_ids: list[str] = []
+        trimmed_tokens = current_tokens
+        for ab in reversed(allocated_blocks):
+            if trimmed_tokens <= effective_context_budget:
+                break
+            trimmed_tokens -= int(ab.allocated_tokens)
+            removed_block_ids.append(ab.block.block_id)
+
+        if trimmed_tokens > effective_context_budget:
+            return {
+                "active": False,
+                "reason": "unable_to_trim",
+                "tokens_before": current_tokens,
+                "tokens_after": current_tokens,
+                "removed_block_ids": [],
+                "blocks_removed": 0,
+            }
+
+        return {
+            "active": True,
+            "reason": "trimmed_to_budget",
+            "tokens_before": current_tokens,
+            "tokens_after": trimmed_tokens,
+            "removed_block_ids": removed_block_ids,
+            "blocks_removed": len(removed_block_ids),
+        }
+
+    @staticmethod
+    def _block_is_protected(block) -> bool:
+        provenance = {str(p).upper() for p in tuple(getattr(block, "provenance", ()) or ())}
+        return bool(provenance.intersection({"PROTECT", "PRESERVE", "KEEP", "ANCHOR"}))
+
+    @staticmethod
+    def _extract_hint_terms(unresolved_claim_hints: list[str]) -> set[str]:
+        """Extract normalized terms from unresolved claim hints."""
+        stop_words = {
+            "the", "and", "for", "with", "from", "that", "this", "when", "how",
+            "does", "into", "across", "between", "using", "about", "query",
+            "claim", "required", "context", "code", "method", "class",
+        }
+        terms: set[str] = set()
+        for hint in unresolved_claim_hints:
+            for tok in re.findall(r"[A-Za-z_][A-Za-z0-9_]+", str(hint or "").lower()):
+                if len(tok) < 3:
+                    continue
+                if tok in stop_words:
+                    continue
+                terms.add(tok)
+        return terms
+
+    @staticmethod
+    def _compute_claim_gain(block, hint_terms: set[str]) -> float:
+        """Compute lightweight claim gain from hint-term overlap."""
+        if not hint_terms:
+            return 0.0
+        file_sym_hay = " ".join(
+            [
+                str(getattr(block, "file", "") or ""),
+                str(getattr(block, "symbol_name", "") or ""),
+                str(getattr(block, "symbol_id", "") or ""),
+            ]
+        ).lower()
+        content_hay = str(getattr(block, "content", "") or "")[:1600].lower()
+        file_sym_hits = 0
+        content_hits = 0
+        for term in hint_terms:
+            if term in file_sym_hay:
+                file_sym_hits += 1
+            elif term in content_hay:
+                content_hits += 1
+        # Prioritize file/symbol alignment over broad content overlap.
+        weighted_hits = (2.0 * file_sym_hits) + (0.5 * content_hits)
+        return min(1.0, weighted_hits / float(max(1, len(hint_terms))))
 
     @staticmethod
     def _count_reorders(source_ids: list[str], target_ids: list[str]) -> int:

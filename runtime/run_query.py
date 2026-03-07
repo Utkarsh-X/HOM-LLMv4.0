@@ -14,6 +14,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 import bootstrap
 import argparse
+from dataclasses import replace
 import json
 import sys
 import time
@@ -523,6 +524,18 @@ def _write_claim_coverage_artifacts(
     if coverage_report is not None:
         with open(out_dir / "coverage_report.json", "w", encoding="utf-8") as f:
             json.dump(coverage_report, f, indent=2, ensure_ascii=False)
+        # Combined report for downstream diagnostics.
+        with open(out_dir / "claim_coverage_trace.json", "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "claim_packet": claim_packet,
+                    "coverage_report": coverage_report,
+                    "recovery_trace": recovery_trace,
+                },
+                f,
+                indent=2,
+                ensure_ascii=False,
+            )
     if recovery_trace is not None:
         with open(out_dir / "recovery_trace.json", "w", encoding="utf-8") as f:
             json.dump(recovery_trace, f, indent=2, ensure_ascii=False)
@@ -534,6 +547,111 @@ def _write_claim_coverage_artifacts(
         coverage_report=bool(coverage_report is not None),
         recovery_trace=bool(recovery_trace is not None),
     )
+
+
+def _merge_recovery_candidates(base_candidates, focused_candidates):
+    """Merge base + focused candidates and mark focused provenance."""
+    merged_map = {}
+    focused_doc_ids = set()
+    for cand in base_candidates:
+        merged_map[cand.doc_id] = cand
+    for cand in focused_candidates:
+        focused_doc_ids.add(cand.doc_id)
+        prev = merged_map.get(cand.doc_id)
+        next_cand = replace(cand, provenance=tuple(cand.provenance) + ("focused_recovery",))
+        if prev is None or float(next_cand.hybrid_score) > float(prev.hybrid_score):
+            merged_map[cand.doc_id] = next_cand
+    merged_candidates = list(merged_map.values())
+    merged_candidates.sort(key=lambda c: (-float(c.hybrid_score), str(c.doc_id)))
+    return merged_candidates, focused_doc_ids
+
+
+def _extract_recovery_context_metrics(context_artifact):
+    provenance = getattr(context_artifact, "provenance", {}) or {}
+    claim_gain_swap = provenance.get("claim_gain_swap") or {}
+    unresolved_injection = provenance.get("unresolved_evidence_injection") or {}
+    return {
+        "recovery_context_provenance_present": bool(provenance),
+        "recovery_claim_gain_swap_reason": claim_gain_swap.get("reason"),
+        "recovery_unresolved_evidence_injection_reason": unresolved_injection.get("reason"),
+        "recovery_context_block_count": len(getattr(context_artifact, "blocks", ()) or ()),
+        "recovery_context_used_tokens": int(getattr(context_artifact, "used_tokens", 0) or 0),
+        "claim_gain_swaps_applied": int(claim_gain_swap.get("swaps_applied", 0) or 0),
+        "unresolved_evidence_injection_active": bool(
+            unresolved_injection.get("active", False)
+        ),
+        "unresolved_evidence_blocks_injected": int(
+            unresolved_injection.get("blocks_injected", 0) or 0
+        ),
+        "unresolved_evidence_claim_gain_delta": float(
+            unresolved_injection.get("claim_gain_delta_total", 0.0) or 0.0
+        ),
+    }
+
+
+def _build_evidence_plan_metrics(evidence_plan) -> dict[str, object]:
+    """Build telemetry-safe evidence-plan metadata for console and JSON artifacts."""
+    if evidence_plan is None:
+        return {
+            "active": False,
+            "query_class": "",
+            "packet_types": "",
+            "packet_count": 0,
+            "support_surface_size": 0,
+            "omitted_helper_refs": 0,
+            "packet_ref_count": 0,
+        }
+    return {
+        "active": bool(getattr(evidence_plan, "active", False)),
+        "query_class": str(getattr(evidence_plan, "query_class", "") or ""),
+        "packet_types": ",".join(getattr(evidence_plan, "packet_types", ()) or ()),
+        "packet_count": len(getattr(evidence_plan, "packet_types", ()) or ()),
+        "support_surface_size": int(getattr(evidence_plan, "support_surface_size", 0) or 0),
+        "omitted_helper_refs": int(getattr(evidence_plan, "omitted_helper_refs", 0) or 0),
+        "packet_ref_count": int(getattr(evidence_plan, "packet_ref_count", 0) or 0),
+    }
+
+
+def _write_evidence_plan_artifact(run_id: str, evidence_plan) -> None:
+    """Persist full evidence-plan packets for post-run inspection."""
+    if evidence_plan is None or not bool(getattr(evidence_plan, "active", False)):
+        return
+
+    payload = {
+        "query_class": str(getattr(evidence_plan, "query_class", "") or ""),
+        "packet_types": list(getattr(evidence_plan, "packet_types", ()) or ()),
+        "omitted_helper_refs": int(getattr(evidence_plan, "omitted_helper_refs", 0) or 0),
+        "support_surface_size": int(getattr(evidence_plan, "support_surface_size", 0) or 0),
+        "packet_ref_count": int(getattr(evidence_plan, "packet_ref_count", 0) or 0),
+        "prompt_header": str(getattr(evidence_plan, "prompt_header", "") or ""),
+        "packets": [],
+    }
+
+    for packet in tuple(getattr(evidence_plan, "packets", ()) or ()):
+        payload["packets"].append(
+            {
+                "packet_type": str(getattr(packet, "packet_type", "") or ""),
+                "summary": str(getattr(packet, "summary", "") or ""),
+                "support_refs": [
+                    {
+                        "file": str(getattr(ref, "file", "") or ""),
+                        "symbol_name": getattr(ref, "symbol_name", None),
+                        "doc_id": str(getattr(ref, "doc_id", "") or ""),
+                        "snippet": str(getattr(ref, "snippet", "") or ""),
+                        "role": str(getattr(ref, "role", "") or ""),
+                        "source_surface": str(getattr(ref, "source_surface", "") or ""),
+                    }
+                    for ref in tuple(getattr(packet, "support_refs", ()) or ())
+                ],
+            }
+        )
+
+    out_path = Path("artifacts") / "runs" / run_id / "evidence_plan.json"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+
+    print_telemetry("EVIDENCE_PLAN_ARTIFACT", saved=str(out_path))
 
 
 def _run_and_save_diagnostic_layers(
@@ -832,6 +950,9 @@ def main():
         generation_config = config.get_generation_config()
         intelligence_cfg_raw = getattr(config, "intelligence", {}) or {}
         claim_cov_cfg_raw = intelligence_cfg_raw.get("claim_coverage", {}) or {}
+        claim_contract_prompt_enabled = bool(
+            claim_cov_cfg_raw.get("prompt_contract_enabled", False)
+        )
         from homllm.claim_coverage.interfaces import ClaimCoverageConfig
 
         claim_coverage_config = ClaimCoverageConfig(
@@ -1074,6 +1195,7 @@ def main():
             stitching=context_artifact.provenance.get("stitching"),
             # Tier 3B: submodular packer telemetry
             submodular_packer=context_artifact.provenance.get("submodular_packer"),
+            claim_gain_swap=context_artifact.provenance.get("claim_gain_swap"),
             depth_preservation_check=context_artifact.provenance.get("depth_preservation_check"),
             # Tier 3A: token utilization diagnostic
             utilization_diagnostic=context_artifact.provenance.get("utilization_diagnostic"),
@@ -1113,6 +1235,20 @@ def main():
             recovery_triggered = False
             coverage_before_recovery = float(coverage_report_obj.coverage_ratio)
             coverage_after_recovery = float(coverage_report_obj.coverage_ratio)
+            gate_action_before_recovery = (
+                claim_gate_decision.action.value if claim_gate_decision else None
+            )
+            gate_action_after_recovery = gate_action_before_recovery
+            recovery_added_candidates = 0
+            claim_gain_swaps_applied = 0
+            unresolved_evidence_injection_active = False
+            unresolved_evidence_blocks_injected = 0
+            unresolved_evidence_claim_gain_delta = 0.0
+            recovery_context_provenance_present = False
+            recovery_claim_gain_swap_reason = None
+            recovery_unresolved_evidence_injection_reason = None
+            recovery_context_block_count = len(context_artifact.blocks)
+            recovery_context_used_tokens = int(context_artifact.used_tokens or 0)
 
             if (
                 claim_gate_decision.action.value == "SOFT_RECOVERY"
@@ -1120,6 +1256,15 @@ def main():
                 and claim_coverage_config.max_recovery_passes > 0
             ):
                 recovery_triggered = True
+                claim_map = {c.claim_id: c for c in claim_packet_obj.required_claims}
+                unresolved_hint_payload = []
+                for cid in coverage_report_obj.unresolved_claim_ids:
+                    c = claim_map.get(cid)
+                    if not c:
+                        continue
+                    unresolved_hint_payload.append(
+                        f"claim:{cid} text:{c.text} terms:{' '.join(c.terms[:12])} ids:{' '.join(c.identifier_hints[:6])}"
+                    )
                 focused_queries = build_unresolved_claim_queries(
                     claim_packet_obj,
                     coverage_report_obj,
@@ -1132,14 +1277,21 @@ def main():
                     top_k=claim_coverage_config.recovery_top_k,
                 )
 
-                # Merge baseline retrieval + focused candidates (best hybrid score per doc_id).
-                merged_map = {}
-                for cand in retrieval_result.candidates + focused_candidates:
-                    prev = merged_map.get(cand.doc_id)
-                    if prev is None or float(cand.hybrid_score) > float(prev.hybrid_score):
-                        merged_map[cand.doc_id] = cand
-                merged_candidates = list(merged_map.values())
-                merged_candidates.sort(key=lambda c: (-float(c.hybrid_score), str(c.doc_id)))
+                merged_candidates, focused_doc_ids = _merge_recovery_candidates(
+                    retrieval_result.candidates,
+                    focused_candidates,
+                )
+                recovery_added_candidates = max(
+                    0,
+                    len(
+                        [
+                            c
+                            for c in merged_candidates
+                            if "focused_recovery" in tuple(getattr(c, "provenance", ()))
+                            and c.doc_id in focused_doc_ids
+                        ]
+                    ),
+                )
 
                 ranking_input = RankingInput(
                     query=args.query,
@@ -1147,11 +1299,64 @@ def main():
                     config=ranking_config,
                 )
                 ranking_output = ranking_pipeline.rank(ranking_input)
+                recovery_context_start = time.perf_counter()
                 context_artifact = context_pipeline.assemble(
                     ranking_output=ranking_output,
                     query=args.query,
                     query_id=retrieval_result.query_id,
-                    unresolved_claim_hints=list(coverage_report_obj.unresolved_claim_ids),
+                    unresolved_claim_hints=list(unresolved_hint_payload) + list(focused_queries),
+                )
+                recovery_context_end = time.perf_counter()
+                recovery_context_metrics = _extract_recovery_context_metrics(context_artifact)
+                recovery_context_provenance_present = recovery_context_metrics[
+                    "recovery_context_provenance_present"
+                ]
+                recovery_claim_gain_swap_reason = recovery_context_metrics[
+                    "recovery_claim_gain_swap_reason"
+                ]
+                recovery_unresolved_evidence_injection_reason = recovery_context_metrics[
+                    "recovery_unresolved_evidence_injection_reason"
+                ]
+                recovery_context_block_count = recovery_context_metrics[
+                    "recovery_context_block_count"
+                ]
+                recovery_context_used_tokens = recovery_context_metrics[
+                    "recovery_context_used_tokens"
+                ]
+                claim_gain_swaps_applied = recovery_context_metrics[
+                    "claim_gain_swaps_applied"
+                ]
+                unresolved_evidence_injection_active = recovery_context_metrics[
+                    "unresolved_evidence_injection_active"
+                ]
+                unresolved_evidence_blocks_injected = recovery_context_metrics[
+                    "unresolved_evidence_blocks_injected"
+                ]
+                unresolved_evidence_claim_gain_delta = recovery_context_metrics[
+                    "unresolved_evidence_claim_gain_delta"
+                ]
+                telemetry.record_phase(
+                    "RECOVERY_CONTEXT",
+                    recovery_context_start,
+                    recovery_context_end,
+                    provenance_present=recovery_context_provenance_present,
+                    blocks=recovery_context_block_count,
+                    tokens=recovery_context_used_tokens,
+                    token_budget=int(getattr(context_artifact, "token_budget", 0) or 0),
+                    claim_gain_swap_reason=recovery_claim_gain_swap_reason,
+                    unresolved_evidence_injection_reason=(
+                        recovery_unresolved_evidence_injection_reason
+                    ),
+                    claim_gain_swaps_applied=claim_gain_swaps_applied,
+                    unresolved_evidence_injection_active=(
+                        unresolved_evidence_injection_active
+                    ),
+                    unresolved_evidence_blocks_injected=(
+                        unresolved_evidence_blocks_injected
+                    ),
+                    unresolved_evidence_claim_gain_delta=(
+                        unresolved_evidence_claim_gain_delta
+                    ),
                 )
 
                 # Recompute coverage after single recovery pass.
@@ -1166,12 +1371,30 @@ def main():
                     recovery_attempted=True,
                     coverage_before_recovery=coverage_before_recovery,
                 )
+                gate_action_after_recovery = (
+                    claim_gate_decision.action.value if claim_gate_decision else None
+                )
                 claim_recovery_trace = {
                     "focused_queries": focused_queries,
                     "focused_candidate_count": len(focused_candidates),
                     "merged_candidate_count": len(merged_candidates),
+                    "recovery_added_candidates": recovery_added_candidates,
                     "coverage_before_recovery": coverage_before_recovery,
                     "coverage_after_recovery": coverage_after_recovery,
+                    "coverage_gain_from_recovery": (
+                        coverage_after_recovery - coverage_before_recovery
+                    ),
+                    "claim_gain_swaps_applied": claim_gain_swaps_applied,
+                    "unresolved_evidence_injection_active": unresolved_evidence_injection_active,
+                    "unresolved_evidence_blocks_injected": unresolved_evidence_blocks_injected,
+                    "unresolved_evidence_claim_gain_delta": unresolved_evidence_claim_gain_delta,
+                    "recovery_context_provenance_present": recovery_context_provenance_present,
+                    "recovery_claim_gain_swap_reason": recovery_claim_gain_swap_reason,
+                    "recovery_unresolved_evidence_injection_reason": (
+                        recovery_unresolved_evidence_injection_reason
+                    ),
+                    "recovery_context_block_count": recovery_context_block_count,
+                    "recovery_context_used_tokens": recovery_context_used_tokens,
                 }
 
             cc_end = time.perf_counter()
@@ -1179,14 +1402,32 @@ def main():
                 "CLAIM_COVERAGE",
                 cc_start,
                 cc_end,
+                enabled_effective=True,
                 required_claim_count=coverage_report_obj.required_claim_count,
                 covered_claim_count=coverage_report_obj.covered_required_claim_count,
                 coverage_ratio=coverage_report_obj.coverage_ratio,
                 recovery_triggered=recovery_triggered,
                 coverage_before_recovery=coverage_before_recovery,
                 coverage_after_recovery=coverage_after_recovery,
+                coverage_gain_from_recovery=(
+                    coverage_after_recovery - coverage_before_recovery
+                ),
                 gate_action=claim_gate_decision.action.value if claim_gate_decision else None,
+                gate_action_before_recovery=gate_action_before_recovery,
+                gate_action_after_recovery=gate_action_after_recovery,
                 unresolved_claim_count=len(coverage_report_obj.unresolved_claim_ids),
+                recovery_added_candidates=recovery_added_candidates,
+                claim_gain_swaps_applied=claim_gain_swaps_applied,
+                unresolved_evidence_injection_active=unresolved_evidence_injection_active,
+                unresolved_evidence_blocks_injected=unresolved_evidence_blocks_injected,
+                unresolved_evidence_claim_gain_delta=unresolved_evidence_claim_gain_delta,
+                recovery_context_provenance_present=recovery_context_provenance_present,
+                recovery_claim_gain_swap_reason=recovery_claim_gain_swap_reason,
+                recovery_unresolved_evidence_injection_reason=(
+                    recovery_unresolved_evidence_injection_reason
+                ),
+                recovery_context_block_count=recovery_context_block_count,
+                recovery_context_used_tokens=recovery_context_used_tokens,
             )
 
         # CQI_4 Monitoring + Gate
@@ -1664,6 +1905,24 @@ def main():
         enforcement_prompt = ""
         structure_prompt = ""
         completion_guard_prompt = ""
+        answer_shape_contract = None
+        evidence_plan = None
+        if claim_coverage_config.enabled:
+            from homllm.intelligence.answer_contracts import build_answer_shape_contract
+            from homllm.intelligence.evidence_planner import build_evidence_plan
+
+            answer_shape_contract = build_answer_shape_contract(
+                query=args.query,
+                context_artifact=context_artifact,
+                coverage_report=coverage_report_obj,
+                claim_packet=claim_packet_obj,
+            )
+            evidence_plan = build_evidence_plan(
+                query=args.query,
+                ranking_output=ranking_output,
+                context_artifact=context_artifact,
+                claim_packet=claim_packet_obj,
+            )
         
         if reasoning_contract and reasoning_contract.has_requirements:
             from homllm.intelligence.reasoning_contracts import (
@@ -1685,6 +1944,28 @@ def main():
             completion_guard = create_completion_guard()
             completion_guard_prompt = completion_guard.render(reasoning_contract)
             logger.debug(f"Phase-3C: Completion guard injected: {len(completion_guard_prompt)} chars")
+
+        if answer_shape_contract and answer_shape_contract.active:
+            enforcement_prompt = (
+                (enforcement_prompt + "\n\n" + answer_shape_contract.enforcement_prompt).strip()
+                if enforcement_prompt
+                else answer_shape_contract.enforcement_prompt
+            )
+            structure_prompt = (
+                (structure_prompt + "\n\n" + answer_shape_contract.structure_prompt).strip()
+                if structure_prompt
+                else answer_shape_contract.structure_prompt
+            )
+            completion_guard_prompt = (
+                (completion_guard_prompt + "\n\n" + answer_shape_contract.completion_prompt).strip()
+                if completion_guard_prompt
+                else answer_shape_contract.completion_prompt
+            )
+            logger.debug(
+                "Answer shape contract injected: class=%s absent_code=%s",
+                answer_shape_contract.query_class,
+                answer_shape_contract.absent_code_mode,
+            )
         
         # Phase-3C: Assemble template variables with guaranteed integrity
         # All required variables MUST exist before this point
@@ -1719,6 +2000,9 @@ def main():
         template_variables["mechanical_fix_notice"] = mechanical_fix_notice
         template_variables["query"] = args.query
         template_variables["context"] = context_artifact.context_text
+        template_variables["evidence_plan_header"] = (
+            evidence_plan.prompt_header if evidence_plan and evidence_plan.active else ""
+        )
         if claim_coverage_config.enabled and claim_packet_obj and coverage_report_obj:
             template_variables["required_claims"] = packet_to_prompt_text(claim_packet_obj)
             template_variables["claim_evidence_map"] = evidence_map_to_prompt_text(
@@ -1727,17 +2011,21 @@ def main():
             template_variables["claim_coverage_summary"] = coverage_summary_to_prompt_text(
                 coverage_report_obj
             )
-            template_variables["claim_contract_header"] = (
-                "Required Claims Checklist:\n"
-                f"{template_variables['required_claims']}\n\n"
-                "Evidence Map:\n"
-                f"{template_variables['claim_evidence_map']}\n\n"
-                "Claim Coverage Summary:\n"
-                f"{template_variables['claim_coverage_summary']}"
-            )
-            template_variables["claim_contract_rules"] = (
-                "- Answer claim-by-claim with explicit labels: SUPPORTED, INFERRED, or UNRESOLVED."
-            )
+            if claim_contract_prompt_enabled:
+                template_variables["claim_contract_header"] = (
+                    "Required Claims Checklist:\n"
+                    f"{template_variables['required_claims']}\n\n"
+                    "Evidence Map:\n"
+                    f"{template_variables['claim_evidence_map']}\n\n"
+                    "Claim Coverage Summary:\n"
+                    f"{template_variables['claim_coverage_summary']}"
+                )
+                template_variables["claim_contract_rules"] = (
+                    "- Answer claim-by-claim with explicit labels: SUPPORTED, INFERRED, or UNRESOLVED."
+                )
+            else:
+                template_variables["claim_contract_header"] = ""
+                template_variables["claim_contract_rules"] = ""
         else:
             template_variables["required_claims"] = ""
             template_variables["claim_evidence_map"] = ""
@@ -1753,9 +2041,16 @@ def main():
             "- If asked behavior is not implemented in the asked component, state it as unresolved there; do not substitute behavior from unrelated components.\n"
             "- If the query asks multiple parts, answer each asked part explicitly (bullets are allowed).\n"
             "- Prioritize direct, evidence-backed statements from the provided context.\n"
+            "- Completeness-first for asked scope: include mechanism steps, key conditions/branching, and concrete in-code effects when present.\n"
+            "- Include relevant operational details when present (constants/thresholds, error handling, retries/fallbacks, cache/eviction behavior, metrics/timing).\n"
+            "- For comparative or combination questions, include practical differences and interactions, not only independent summaries.\n"
+            "- When context provides enough detail, include one concrete evidence-backed example flow.\n"
             "- For compare/contrast questions, include concrete differences and practical implications when evidence exists.\n"
             "- For each key method/rule mentioned, include its concrete in-code behavior (transform, return, and relevant error/fallback handling if shown).\n"
             "- For interaction/conflict questions, explain mechanism (why outcome occurs), not only execution order.\n"
+            "- Do not import retry/fallback/error behavior from unrelated components unless the query explicitly asks for cross-component comparison.\n"
+            "- Do not add implementation specifics (heuristics, thresholds, reordering rules, hidden branches) unless directly evidenced in the provided context.\n"
+            "- If unsure between two interpretations, choose the narrower claim and label uncertainty inline instead of asserting specifics.\n"
             "- Bounded inference is allowed only with at least two concrete anchors; "
             "mark inline as '[Inferred from <A> + <B>]'.\n"
             "- Do not assert internal ordering heuristics, hidden class/method existence, or algorithmic details unless explicitly shown in cited code.\n"
@@ -1765,7 +2060,11 @@ def main():
             "- Never invent function names, class names, file paths, APIs, or control flow.\n"
             "- If context is partial, provide supported parts first; then note limitations only for unresolved asked parts.\n"
             "- Avoid dedicated unresolved/gap sections unless explicitly requested.\n"
-            "- Prefer completeness for the asked scope; keep concise by excluding unrelated detail.\n"
+            "- Do not omit relevant in-context implementation details merely to stay brief.\n"
+            "- Prefer completeness for asked scope; keep concise only by removing unrelated detail.\n"
+            "- Prefer file and symbol citations over dense line-by-line citation lists.\n"
+            "- Do not add unsupported numeric selectivity, cost, or threshold claims unless explicitly shown in the provided context.\n"
+            "- Do not speculate about missing integration gaps unless directly evidenced and necessary to answer the asked scope.\n"
         )
         template_variables["reasoning_enforcement"] = (
             template_variables.get("reasoning_enforcement", "") + hallucination_guard
@@ -1780,6 +2079,15 @@ def main():
             provenance_parts.append(f"Fix: {fixer_result.action.value}")
         template_variables["provenance_summary"] = "; ".join(provenance_parts) if provenance_parts else "Standard retrieval"
         template_variables["fix_summary"] = mechanical_fix_notice or "None"
+
+        evidence_plan_metrics = _build_evidence_plan_metrics(evidence_plan)
+        telemetry.record_phase(
+            "EVIDENCE_PLAN",
+            generation_start,
+            generation_start,
+            **evidence_plan_metrics,
+        )
+        _write_evidence_plan_artifact(telemetry.run_id, evidence_plan)
 
         logger.debug(f"Plan C: template={selected_template}, abrm_active={abrm_active}")
 

@@ -37,6 +37,9 @@ context_header: |
 claim_header: |
   {claim_contract_header}
 
+evidence_header: |
+  {evidence_plan_header}
+
 provenance_header: |
   Context provenance: {provenance_summary}
   Mechanical fixes applied: {mechanical_fix_notice}
@@ -61,6 +64,8 @@ template: |
 
   {claim_header}
 
+  {evidence_header}
+
   {context_header}
 
   {structure}
@@ -81,6 +86,7 @@ variables:
   - completion_guard
   - claim_contract_header
   - claim_contract_rules
+  - evidence_plan_header
 
 metadata:
   name: abrm_explain

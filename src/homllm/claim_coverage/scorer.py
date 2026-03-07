@@ -86,11 +86,20 @@ def _score_single_claim(
     # 1) Weighted score gate (default behavior).
     # 2) Strong lexical evidence fallback for natural-language queries where symbol signals are sparse.
     # 3) Symbol+lexical joint gate for identifier-centric claims.
+    # 4) Anchored medium-lexical fallback when multiple anchors consistently support the claim.
     threshold = float(config.claim_cover_threshold)
     strong_lexical = best_lex >= 0.75
     symbol_lexical_joint = best_sym >= 0.5 and best_lex >= 0.4
+    anchored_medium_lexical = (
+        len(anchors) >= 3
+        and best_lex >= 0.33
+        and (anchors[0].score if anchors else 0.0) >= max(0.20, threshold * 0.35)
+    )
     covered = bool(anchors) and (
-        best_score >= threshold or strong_lexical or symbol_lexical_joint
+        best_score >= threshold
+        or strong_lexical
+        or symbol_lexical_joint
+        or anchored_medium_lexical
     )
     return ClaimCoverage(
         claim_id=claim.claim_id,

@@ -1,7 +1,7 @@
 # Prompt template for code explanation
 # Version: 2.0
 # Template variables: {query}, {context}, {reasoning_enforcement}, {structure_requirements}, {completion_guard},
-# {claim_contract_header}, {claim_contract_rules}
+# {claim_contract_header}, {claim_contract_rules}, {evidence_plan_header}
 
 version: "2.0"
 template: |
@@ -12,6 +12,8 @@ template: |
   User Query: {query}
 
   {claim_contract_header}
+
+  {evidence_plan_header}
 
   Context:
   {context}

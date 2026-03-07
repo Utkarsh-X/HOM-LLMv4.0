@@ -73,8 +73,29 @@ def build_unresolved_claim_queries(
     max_queries: int = 4,
 ) -> list[str]:
     """Build focused retrieval queries for unresolved claims."""
+    limit = max(1, int(max_queries))
     claim_map = {c.claim_id: c for c in packet.required_claims}
     out: list[str] = []
+    seen: set[str] = set()
+
+    def _add(query_text: str) -> None:
+        q = " ".join((query_text or "").split()).strip()
+        if not q:
+            return
+        k = q.lower()
+        if k in seen:
+            return
+        seen.add(k)
+        out.append(q)
+
+    unresolved_claims = [
+        claim_map[cid] for cid in report.unresolved_claim_ids if cid in claim_map
+    ]
+    if unresolved_claims:
+        # Global unresolved focus keeps broad context that per-claim segmentation can lose.
+        unresolved_text = " ; ".join(c.text.strip() for c in unresolved_claims if c.text.strip())
+        _add(f"{packet.query.strip()} | unresolved focus: {unresolved_text}")
+
     for claim_id in report.unresolved_claim_ids:
         claim = claim_map.get(claim_id)
         if not claim:
@@ -86,10 +107,47 @@ def build_unresolved_claim_queries(
             parts.append(hints)
         if terms:
             parts.append(terms)
-        out.append(" | ".join(parts))
-        if len(out) >= max(1, int(max_queries)):
+        _add(" | ".join(parts))
+
+        # Intent-aware auxiliary query to improve recovery recall for broad behavioral claims.
+        intent_terms = _intent_expansion_terms(claim)
+        if intent_terms:
+            aux_parts = [claim.text.strip(), " ".join(intent_terms)]
+            if hints:
+                aux_parts.append(hints)
+            _add(" | ".join(p for p in aux_parts if p))
+
+        if len(out) >= limit:
             break
-    return out
+    return out[:limit]
+
+
+def _intent_expansion_terms(claim) -> tuple[str, ...]:
+    """Deterministic intent-aware expansion terms (query-agnostic)."""
+    from homllm.claim_coverage.interfaces import ClaimIntent
+
+    mapping = {
+        ClaimIntent.TRACE: ("execution", "flow", "sequence", "step"),
+        ClaimIntent.COMPARE: ("difference", "tradeoff", "comparison", "when"),
+        ClaimIntent.HOW_IT_WORKS: ("implementation", "logic", "behavior", "path"),
+        ClaimIntent.ERROR_FALLBACK: ("error", "fallback", "retry", "failure"),
+        ClaimIntent.ORDER_PRIORITY: ("priority", "order", "precedence", "before", "after"),
+        ClaimIntent.BEHAVIOR_EXISTS: ("implementation", "code", "behavior"),
+    }
+    base = list(mapping.get(claim.intent, ()))
+    # Add top claim terms (already normalized) to retain local semantics.
+    for t in claim.terms[:6]:
+        if t not in base:
+            base.append(t)
+    dedup: list[str] = []
+    seen: set[str] = set()
+    for t in base:
+        k = str(t).strip().lower()
+        if not k or k in seen:
+            continue
+        seen.add(k)
+        dedup.append(str(t).strip())
+    return tuple(dedup[:12])
 
 
 def packet_to_prompt_text(packet: ClaimPacket) -> str:

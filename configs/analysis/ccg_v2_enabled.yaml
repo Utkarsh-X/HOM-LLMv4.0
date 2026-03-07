@@ -109,7 +109,7 @@ ranking:
     w_name: 0.2
 
 context:
-  max_tokens: 4400
+  max_tokens: 5200
   generation_reserve_tokens: 800
   budget_mode: adaptive
   summarization_enabled: false
@@ -121,6 +121,16 @@ context:
     min_density_epsilon: 0.0003
   relevance_gate_enabled: true
   relevance_gate_threshold: 0.25
+  claim_gain_swap_enabled: true
+  claim_gain_swap_score_epsilon: 0.08
+  claim_gain_swap_max_swaps: 4
+  claim_gain_swap_min_relevance_floor: 0.15
+  unresolved_evidence_injection_enabled: true
+  unresolved_evidence_injection_max_blocks: 2
+  unresolved_evidence_injection_min_claim_gain: 0.1
+  unresolved_evidence_injection_relevance_floor: 0.15
+  unresolved_evidence_injection_max_token_share: 0.15
+  unresolved_evidence_injection_replace_from_tail: true
 
 intelligence:
   enabled: true
@@ -132,6 +142,7 @@ intelligence:
   p2_budget_increase_pct: 40
   claim_coverage:
     enabled: true
+    prompt_contract_enabled: false
     required_coverage_threshold: 0.70
     claim_cover_threshold: 0.55
     soft_recovery_enabled: true

@@ -119,6 +119,18 @@ class ContextConfig:
     sparse_backfill_min_utilization: float = 0.45
     sparse_backfill_min_blocks: int = 18
     sparse_backfill_max_additional_blocks: int = 10
+    # Claim-gain epsilon swap (post-packer, low-risk tie-break)
+    claim_gain_swap_enabled: bool = False
+    claim_gain_swap_score_epsilon: float = 0.02
+    claim_gain_swap_max_swaps: int = 2
+    claim_gain_swap_min_relevance_floor: float = 0.25
+    # Unresolved-evidence injection (post-selection, budget-safe override)
+    unresolved_evidence_injection_enabled: bool = False
+    unresolved_evidence_injection_max_blocks: int = 2
+    unresolved_evidence_injection_min_claim_gain: float = 0.1
+    unresolved_evidence_injection_relevance_floor: float = 0.15
+    unresolved_evidence_injection_max_token_share: float = 0.15
+    unresolved_evidence_injection_replace_from_tail: bool = True
     # Tier 3B: Sufficiency escape hatch
     escape_hatch_enabled: bool = False
 
