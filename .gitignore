@@ -55,6 +55,7 @@ Thumbs.db
 # keys / secrets
 eval/judge_config.json
 configs/secrets.yaml
+configs/key_usage_state.json
 
 # Local Gemini smoke test (contains API key in-file)
 gemini_smoketest.py

@@ -387,6 +387,50 @@ def ensure_cerebras_client(cfg: JudgeConfig):
         raise
 
 
+# ------------------------------- RETRY WRAPPER -------------------------------
+# Delays: 1st try (0s), 2nd try (1s), 3rd try (1s), 4th try (3s), 5th try (5s)
+_JUDGE_RETRY_DELAYS = [0, 1, 1, 3, 5]  # delay BEFORE each attempt
+
+
+def _is_retryable_judge_error(exc: Exception) -> bool:
+    """Check if an exception is a transient error worth retrying."""
+    msg = str(exc).lower()
+    retry_tokens = (
+        "429", "rate limit", "resource exhausted", "quota",
+        "temporarily unavailable", "unavailable",
+        "deadline exceeded", "timeout", "timed out",
+        "internal error", "500", "503",
+        "connection reset", "connection error",
+        "server error", "service unavailable",
+        "empty content",
+    )
+    return any(tok in msg for tok in retry_tokens)
+
+
+def _retry_judge_call(fn, *args, **kwargs):
+    """
+    Retry a judge API call up to 5 times with escalating delays.
+
+    Schedule: try1(0s) -> try2(1s) -> try3(1s) -> try4(3s) -> try5(5s)
+    Only retries transient errors. Auth/config errors propagate immediately.
+    """
+    last_exc = None
+    for attempt, delay in enumerate(_JUDGE_RETRY_DELAYS, 1):
+        if delay > 0:
+            time.sleep(delay)
+        try:
+            return fn(*args, **kwargs)
+        except Exception as exc:
+            last_exc = exc
+            if not _is_retryable_judge_error(exc) or attempt >= len(_JUDGE_RETRY_DELAYS):
+                raise
+            sys.stderr.write(
+                f"[JUDGE_RETRY] Attempt {attempt}/{len(_JUDGE_RETRY_DELAYS)} failed "
+                f"(next retry in {_JUDGE_RETRY_DELAYS[attempt]}s): {exc}\n"
+            )
+    raise last_exc  # Should never reach here
+
+
 def _extract_balanced_json_object(text: str) -> Optional[str]:
     """Extract the first balanced JSON object from free-form text."""
     start = text.find("{")
@@ -467,6 +511,20 @@ def _parse_judge_json(content: str) -> Dict:
     ) from last_error
 
 
+def _call_openai_api(client, cfg: JudgeConfig, kwargs: Dict[str, Any]):
+    """Raw OpenAI API call (wrapped by retry logic)."""
+    try:
+        return client.chat.completions.create(**kwargs)
+    except TypeError as exc:
+        if "extra_body" in kwargs:
+            sys.stderr.write(
+                "[WARN] OpenAI client does not accept extra_body; retrying without it.\n"
+            )
+            kwargs.pop("extra_body", None)
+            return client.chat.completions.create(**kwargs)
+        raise
+
+
 def call_judge_openai(client, cfg: JudgeConfig, messages: List[Dict[str, str]]) -> Tuple[Dict, str]:
     kwargs: Dict[str, Any] = {
         "model": cfg.model,
@@ -476,21 +534,9 @@ def call_judge_openai(client, cfg: JudgeConfig, messages: List[Dict[str, str]]) 
         "response_format": {"type": "json_object"},
     }
     if cfg.extra_body:
-        # OpenAI-compatible servers (and some OpenAI SDK versions) support `extra_body`.
         kwargs["extra_body"] = cfg.extra_body
 
-    try:
-        completion = client.chat.completions.create(**kwargs)
-    except TypeError as exc:
-        # Fallback for OpenAI SDK versions that don't accept extra_body.
-        if "extra_body" in kwargs:
-            sys.stderr.write(
-                "[WARN] OpenAI client does not accept extra_body; retrying without it.\n"
-            )
-            kwargs.pop("extra_body", None)
-            completion = client.chat.completions.create(**kwargs)
-        else:
-            raise
+    completion = _retry_judge_call(_call_openai_api, client, cfg, kwargs)
     content = completion.choices[0].message.content
     if not content:
         raise RuntimeError("Judge model returned empty content.")
@@ -498,11 +544,8 @@ def call_judge_openai(client, cfg: JudgeConfig, messages: List[Dict[str, str]]) 
     return _parse_judge_json(content), str(used_model)
 
 
-def call_judge_gemini(client, cfg: JudgeConfig, messages: List[Dict[str, str]]) -> Tuple[Dict, str]:
-    system_msg = next((m["content"] for m in messages if m["role"] == "system"), "")
-    user_msg = next((m["content"] for m in messages if m["role"] == "user"), "")
-    prompt = f"{system_msg}\n\n{user_msg}" if system_msg else user_msg
-
+def _call_gemini_api(client, cfg: JudgeConfig, prompt: str):
+    """Raw Gemini API call (wrapped by retry logic)."""
     response = client.models.generate_content(
         model=cfg.model,
         contents=prompt,
@@ -512,10 +555,18 @@ def call_judge_gemini(client, cfg: JudgeConfig, messages: List[Dict[str, str]]) 
             "response_mime_type": "application/json",
         },
     )
-
     content = response.text if response.text else ""
     if not content:
         raise RuntimeError("Gemini judge returned empty content.")
+    return response, content
+
+
+def call_judge_gemini(client, cfg: JudgeConfig, messages: List[Dict[str, str]]) -> Tuple[Dict, str]:
+    system_msg = next((m["content"] for m in messages if m["role"] == "system"), "")
+    user_msg = next((m["content"] for m in messages if m["role"] == "user"), "")
+    prompt = f"{system_msg}\n\n{user_msg}" if system_msg else user_msg
+
+    response, content = _retry_judge_call(_call_gemini_api, client, cfg, prompt)
     used_model = (
         getattr(response, "model", None)
         or getattr(response, "model_version", None)
@@ -531,24 +582,42 @@ def call_judge_gemini(client, cfg: JudgeConfig, messages: List[Dict[str, str]]) 
             "IMPORTANT: Return exactly one valid JSON object only. "
             "No markdown, no code fences, no comments, no trailing commas."
         )
-        retry = client.models.generate_content(
-            model=cfg.model,
-            contents=retry_prompt,
-            config={
-                "temperature": float(cfg.temperature),
-                "max_output_tokens": 4000,
-                "response_mime_type": "application/json",
-            },
-        )
-        retry_text = retry.text if retry.text else ""
-        if not retry_text:
-            raise RuntimeError("Gemini judge returned empty content on retry.")
+        retry_resp, retry_text = _retry_judge_call(_call_gemini_api, client, cfg, retry_prompt)
         retry_used_model = (
-            getattr(retry, "model", None)
-            or getattr(retry, "model_version", None)
+            getattr(retry_resp, "model", None)
+            or getattr(retry_resp, "model_version", None)
             or cfg.model
         )
         return _parse_judge_json(retry_text), str(retry_used_model)
+
+
+def _call_cerebras_api(client, cfg: JudgeConfig, kwargs: Dict[str, Any]):
+    """Raw Cerebras API call (wrapped by retry logic)."""
+    content: Optional[str] = None
+    used_model: Optional[str] = None
+    if cfg.stream:
+        kwargs["stream"] = True
+        stream = client.chat.completions.create(**kwargs)
+        chunks: List[str] = []
+        for chunk in stream:
+            if not used_model:
+                used_model = getattr(chunk, "model", None)
+            try:
+                delta = chunk.choices[0].delta.content
+                if delta:
+                    chunks.append(delta)
+            except Exception:
+                continue
+        content = "".join(chunks).strip()
+    else:
+        kwargs["stream"] = False
+        completion = client.chat.completions.create(**kwargs)
+        used_model = getattr(completion, "model", None)
+        content = completion.choices[0].message.content if completion.choices else None
+
+    if not content:
+        raise RuntimeError("Cerebras judge returned empty content.")
+    return content, used_model
 
 
 def call_judge_cerebras(client, cfg: JudgeConfig, messages: List[Dict[str, str]]) -> Tuple[Dict, str]:
@@ -564,31 +633,7 @@ def call_judge_cerebras(client, cfg: JudgeConfig, messages: List[Dict[str, str]]
     if cfg.reasoning_effort:
         kwargs["reasoning_effort"] = cfg.reasoning_effort
 
-    content: Optional[str] = None
-    used_model: Optional[str] = None
-    if cfg.stream:
-        kwargs["stream"] = True
-        stream = client.chat.completions.create(**kwargs)
-        chunks: List[str] = []
-        for chunk in stream:
-            if not used_model:
-                used_model = getattr(chunk, "model", None)
-            try:
-                delta = chunk.choices[0].delta.content
-                if delta:
-                    chunks.append(delta)
-            except Exception:
-                # Keep streaming robust against provider-specific chunk schema variance.
-                continue
-        content = "".join(chunks).strip()
-    else:
-        kwargs["stream"] = False
-        completion = client.chat.completions.create(**kwargs)
-        used_model = getattr(completion, "model", None)
-        content = completion.choices[0].message.content if completion.choices else None
-
-    if not content:
-        raise RuntimeError("Cerebras judge returned empty content.")
+    content, used_model = _retry_judge_call(_call_cerebras_api, client, cfg, kwargs)
     return _parse_judge_json(content), str(used_model or cfg.model)
 
 

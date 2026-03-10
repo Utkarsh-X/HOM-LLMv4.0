@@ -144,3 +144,5 @@ generation:
   default_model: "gemini-2.5-flash"
   temperature: 0.15
   max_output_tokens: 12000
+
+evaluation: {}

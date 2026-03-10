@@ -40,20 +40,35 @@ def _load_api_key_from_config(provider_name: str = "gemini") -> Optional[str]:
     """
     Load API key from configs/secrets.yaml.
     
+    If a gemini_pool is configured, uses the KeyRotationManager to get
+    the current active key (with automatic rotation after limit).
+    Otherwise falls back to the single api_keys.gemini value.
+    
     Args:
         provider_name: Key name under api_keys section (e.g., 'gemini', 'openai')
     
     Returns:
         API key string if found, None otherwise
     """
+    # Try pool-based rotation first (only for Gemini)
+    if provider_name == "gemini":
+        try:
+            from homllm.common.key_rotation import KeyRotationManager
+            mgr = KeyRotationManager.instance()
+            if mgr._pool_mode:
+                key = mgr.get_key()
+                logger.debug("Loaded Gemini API key from rotation pool (slot %d)", mgr._current_index)
+                return key
+        except Exception as e:
+            logger.debug("Key rotation pool not available, falling back to single key: %s", e)
+
+    # Fallback: single key from secrets.yaml
     try:
         import yaml
     except ImportError:
         logger.debug("PyYAML not installed; cannot read secrets.yaml")
         return None
     
-    # Search for secrets.yaml relative to project root
-    # Try multiple possible locations
     search_paths = [
         Path(__file__).resolve().parent.parent.parent.parent.parent / "configs" / "secrets.yaml",
         Path.cwd() / "configs" / "secrets.yaml",
@@ -90,14 +105,15 @@ class GeminiProvider(ProviderConnector):
         """
         self._client: Optional[object] = None
         self._available = False
+        self._active_pool_key: Optional[str] = None  # Track current pool key
 
         if genai is not None:
             try:
-                # Priority: explicit param > config file > env var
+                # Priority: explicit param > config file (pool or single) > env var
                 resolved_key = api_key
                 
                 if not resolved_key:
-                    # Try loading from config file
+                    # Try loading from config file (pool-aware)
                     resolved_key = _load_api_key_from_config("gemini")
                     if resolved_key:
                         logger.info("Using Gemini API key from configs/secrets.yaml")
@@ -105,6 +121,7 @@ class GeminiProvider(ProviderConnector):
                 # Create client (will fall back to GEMINI_API_KEY env var if no key provided)
                 if resolved_key:
                     self._client = genai.Client(api_key=resolved_key)
+                    self._active_pool_key = resolved_key
                 else:
                     # Let SDK try environment variable
                     self._client = genai.Client()
@@ -118,6 +135,9 @@ class GeminiProvider(ProviderConnector):
         """Synchronous invocation."""
         if not self._available or self._client is None:
             raise RuntimeError("Gemini provider not available")
+
+        # --- Key rotation: re-check active key before each call ---
+        self._maybe_rotate_key()
 
         try:
             # Build generation config using new SDK types
@@ -178,6 +198,9 @@ class GeminiProvider(ProviderConnector):
                 if finish_reason not in ("stop", "finish_reason_stop"):
                     logger.warning(f"Gemini finish_reason: {finish_reason} (tokens_out={tokens_out})")
 
+            # --- Key rotation: record successful usage ---
+            self._record_key_usage()
+
             return ProviderResponse(
                 text=text,
                 tokens_in=tokens_in,
@@ -191,8 +214,37 @@ class GeminiProvider(ProviderConnector):
             logger.error(f"Gemini provider invocation failed: {e}")
             raise
 
+    def _maybe_rotate_key(self) -> None:
+        """Check if the current key is exhausted and re-init client with next key."""
+        try:
+            from homllm.common.key_rotation import KeyRotationManager
+            mgr = KeyRotationManager.instance()
+            if not mgr._pool_mode:
+                return
+            new_key = mgr.get_key()
+            # If the key changed, re-initialize the Gemini client
+            if new_key != self._active_pool_key:
+                logger.info(
+                    "[KEY_ROTATION] Switching Gemini client to new key (slot %d)",
+                    mgr._current_index,
+                )
+                self._active_pool_key = new_key
+                self._client = genai.Client(api_key=new_key)
+        except Exception as e:
+            logger.debug("Key rotation check skipped: %s", e)
+
+    def _record_key_usage(self) -> None:
+        """Record a successful API call against the current key."""
+        try:
+            from homllm.common.key_rotation import KeyRotationManager
+            mgr = KeyRotationManager.instance()
+            if mgr._pool_mode:
+                mgr.record_usage()
+        except Exception as e:
+            logger.debug("Key rotation usage recording skipped: %s", e)
+
     def _invoke_with_retry(self, model: str, prompt: str, config_dict: dict):
-        max_attempts = 3
+        max_attempts = 4
         for attempt in range(1, max_attempts + 1):
             try:
                 return self._client.models.generate_content(
@@ -238,7 +290,8 @@ class GeminiProvider(ProviderConnector):
     def _retry_delay_seconds(exc: Exception, attempt: int) -> float:
         """
         Prefer provider-suggested retry delay when available.
-        Fallback to bounded linear backoff.
+        Fallback: attempts 1-3 use short linear backoff (1.5s, 3s, 4.5s).
+        Attempt 4 uses a longer 5s cooldown for better recovery.
         """
         msg = str(exc)
         lower = msg.lower()
@@ -250,6 +303,9 @@ class GeminiProvider(ProviderConnector):
                 return max(1.0, min(60.0, suggested + 0.5))
             except Exception:
                 pass
+        # Attempt 4 gets a longer gap (5s) for better recovery
+        if attempt >= 4:
+            return 5.0
         return min(15.0, 1.5 * attempt)
 
     def invoke_stream(
