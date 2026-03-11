@@ -370,7 +370,7 @@ class GeminiProvider(ProviderConnector):
         """Returns provider capabilities."""
         return ProviderCapabilities(
             streaming=True,
-            max_tokens=8192,  # Varies by model
+            max_tokens=1040000,  # Gemini 1.5/2.5 Flash context limit with safety buffer
             rate_limits={"requests_per_minute": 60, "tokens_per_minute": 1000000},
             supports_seed=True,  # New SDK supports seed
             supports_json_mode=True,  # New SDK supports JSON mode

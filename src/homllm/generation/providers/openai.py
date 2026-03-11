@@ -213,7 +213,7 @@ class OpenAIProvider(ProviderConnector):
         """Returns provider capabilities."""
         return ProviderCapabilities(
             streaming=True,
-            max_tokens=4096,  # Varies by model
+            max_tokens=100000,  # Varies by model
             rate_limits={"requests_per_minute": 60, "tokens_per_minute": 90000},
             supports_seed=True,
             supports_json_mode=True,

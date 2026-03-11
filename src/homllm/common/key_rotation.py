@@ -95,6 +95,7 @@ class KeyRotationManager:
         self._usage_counts: list[int] = []
         self._daily_reset_hour: Optional[int] = None  # None = no auto-reset
         self._last_reset_date: Optional[str] = None    # ISO date of last reset
+        self._rotation_enabled: bool = True             # False = frozen on current key
 
         # Whether pool mode is active (vs single-key fallback)
         self._pool_mode: bool = False
@@ -111,7 +112,9 @@ class KeyRotationManager:
         """
         Return the current active API key.
 
-        If the current key has reached its limit, advance to the next key.
+        If rotation is enabled and the current key has reached its limit,
+        advance to the next key. If rotation is frozen, always return
+        the current key regardless of usage count.
         Raises AllKeysExhaustedError if no keys remain.
         """
         with self._mutex:
@@ -123,6 +126,12 @@ class KeyRotationManager:
                 if self._keys:
                     return self._keys[0]
                 raise AllKeysExhaustedError("No Gemini API keys configured.")
+
+            # If rotation is frozen, always return the current key
+            if not self._rotation_enabled:
+                if self._current_index < len(self._keys):
+                    return self._keys[self._current_index]
+                raise AllKeysExhaustedError("Current key index out of range.")
 
             # Find a key that hasn't hit its limit
             while self._current_index < len(self._keys):
@@ -222,6 +231,7 @@ class KeyRotationManager:
 
             status = {
                 "pool_mode": True,
+                "rotation_enabled": self._rotation_enabled,
                 "current_slot": self._current_index,
                 "current_name": self._names[self._current_index] if self._current_index < len(self._names) else "N/A",
                 "total_keys": len(self._keys),
@@ -258,6 +268,86 @@ class KeyRotationManager:
             self._last_reset_date = datetime.now().strftime("%Y-%m-%d")
             self._save_state()
             logger.info("[KEY_ROTATION] All counters reset to zero.")
+
+    def select_key(self, identifier: str) -> dict:
+        """
+        Manually select a key by name or slot number.
+
+        Args:
+            identifier: Key name (partial match) or slot number as string.
+
+        Returns:
+            Status dict with the selected key info.
+        """
+        with self._mutex:
+            if not self._pool_mode or not self._keys:
+                return {"error": "Pool mode not active"}
+
+            target_idx = None
+
+            # Try as slot number first
+            try:
+                slot = int(identifier)
+                if 0 <= slot < len(self._keys):
+                    target_idx = slot
+            except ValueError:
+                pass
+
+            # Try as name match (case-insensitive, partial)
+            if target_idx is None:
+                needle = identifier.lower()
+                for i, name in enumerate(self._names):
+                    if needle in name.lower():
+                        target_idx = i
+                        break
+
+            if target_idx is None:
+                return {"error": f"No key found matching '{identifier}'"}
+
+            old_idx = self._current_index
+            old_name = self._names[old_idx] if old_idx < len(self._names) else "?"
+            self._current_index = target_idx
+            new_name = self._names[target_idx]
+            self._save_state()
+
+            logger.info(
+                "[KEY_ROTATION] Manual selection: '%s' (slot %d) -> '%s' (slot %d)",
+                old_name, old_idx, new_name, target_idx,
+            )
+
+            return {
+                "selected_slot": target_idx,
+                "selected_name": new_name,
+                "previous_slot": old_idx,
+                "previous_name": old_name,
+                "rotation_enabled": self._rotation_enabled,
+            }
+
+    def set_rotation_enabled(self, enabled: bool) -> dict:
+        """
+        Enable or disable automatic rotation (freeze/unfreeze).
+
+        When frozen, get_key() always returns the current key regardless
+        of usage count. Usage is still tracked.
+        """
+        with self._mutex:
+            old = self._rotation_enabled
+            self._rotation_enabled = enabled
+            self._save_state()
+
+            action = "UNFROZEN (rotation ON)" if enabled else "FROZEN (rotation OFF)"
+            current_name = self._names[self._current_index] if self._current_index < len(self._names) else "?"
+            logger.info(
+                "[KEY_ROTATION] %s — active key: '%s' (slot %d)",
+                action, current_name, self._current_index,
+            )
+
+            return {
+                "rotation_enabled": self._rotation_enabled,
+                "was_enabled": old,
+                "current_slot": self._current_index,
+                "current_name": current_name,
+            }
 
     # ------------------------------------------------------------------
     # Singleton access
@@ -446,6 +536,8 @@ class KeyRotationManager:
         saved_counts = state.get("usage_counts", [])
         saved_key_count = state.get("key_count", 0)
         self._last_reset_date = state.get("last_reset_date")
+        # Restore rotation_enabled flag (default True if not in state)
+        self._rotation_enabled = state.get("rotation_enabled", True)
 
         # Only restore state if the key count matches (keys weren't added/removed)
         if saved_key_count == len(self._keys) and len(saved_counts) == len(self._keys):
@@ -478,6 +570,7 @@ class KeyRotationManager:
             "key_names": self._names,
             "limit_per_key": self._limit,
             "last_reset_date": self._last_reset_date,
+            "rotation_enabled": self._rotation_enabled,
         }
         try:
             with open(self._state_path, "w", encoding="utf-8") as f:

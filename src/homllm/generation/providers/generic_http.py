@@ -183,7 +183,7 @@ class GenericHTTPProvider(ProviderConnector):
         """Returns provider capabilities."""
         return ProviderCapabilities(
             streaming=True,
-            max_tokens=4096,  # Default, may vary
+            max_tokens=100000,  # Default, may vary
             rate_limits={},
             supports_seed=True,  # Assume yes for OpenAI-compatible
             supports_json_mode=False,  # Unknown
