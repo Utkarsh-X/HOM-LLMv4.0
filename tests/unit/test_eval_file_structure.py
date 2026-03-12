@@ -106,3 +106,29 @@ def test_multiple_queries_in_same_run():
         expected_names = {"query_01.txt", "query_02.txt", "query_03.txt"}
         actual_names = {f.name for f in answer_files}
         assert actual_names == expected_names, f"Expected {expected_names}, got {actual_names}"
+
+
+def test_write_run_info_includes_coverage_metadata():
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
+    from eval.run_experiment import write_run_info
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        run_dir = Path(tmpdir) / "run_meta"
+        run_dir.mkdir(parents=True)
+
+        args = MagicMock()
+        args.config = Path("configs/default.yaml")
+        args.provider = None
+        args.model = None
+        args.intent = None
+        args.diagnostics_only = False
+
+        write_run_info(run_dir, args, [1, 2, 3])
+
+        data = json.loads((run_dir / "run_info.json").read_text(encoding="utf-8"))
+        assert data["selection_count"] == 3
+        assert data["total_queries"] >= 20
+        assert 0 < data["coverage_fraction"] < 1
+        assert data["full_coverage"] is False

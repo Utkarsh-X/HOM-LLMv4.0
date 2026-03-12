@@ -87,6 +87,26 @@ def _block_has_direct_overlap(block, query_terms: set[str]) -> bool:
     return total_hits >= 2
 
 
+def _block_has_identifier_overlap(block, identifier_hints: tuple[str, ...]) -> bool:
+    if not identifier_hints:
+        return False
+    file_hay = str(getattr(block, "file", "") or "").lower()
+    symbol_hay = " ".join(
+        [
+            str(getattr(block, "symbol_name", "") or ""),
+            str(getattr(block, "symbol_id", "") or ""),
+        ]
+    ).lower()
+    content_hay = str(getattr(block, "content", "") or "")[:600].lower()
+    for hint in identifier_hints:
+        needle = str(hint).strip().lower()
+        if not needle:
+            continue
+        if needle in symbol_hay or needle in file_hay or needle in content_hay:
+            return True
+    return False
+
+
 def _claim_intents(claim_packet) -> set[ClaimIntent]:
     if claim_packet is None:
         return set()
@@ -252,7 +272,7 @@ def should_use_absent_code_mode(query: str, context_artifact, coverage_report, c
                 ClaimIntent.ORDER_PRIORITY,
             }
         )
-    ) or any(q.startswith(prefix) for prefix in ("how does", "how do", "what happens", "trace"))
+    ) or any(q.startswith(prefix) for prefix in ("how does", "how do", "how should", "what happens", "trace", "describe"))
     if not mechanistic:
         return False
 
@@ -263,8 +283,18 @@ def should_use_absent_code_mode(query: str, context_artifact, coverage_report, c
     if coverage_ratio >= 0.55:
         return False
 
-    query_terms = _query_terms(query)
     blocks = tuple(getattr(context_artifact, "blocks", ()) or ())
+    identifier_hints = _query_identifier_hints(query, claim_packet=claim_packet)
+    if identifier_hints and not any(_block_has_identifier_overlap(block, identifier_hints) for block in blocks):
+        return True
+
+    if "fallback chain" in q and not _context_mentions_any(context_artifact, ("fallback", "fallbacks")):
+        return True
+
+    if q.startswith("how should"):
+        return True
+
+    query_terms = _query_terms(query)
     if any(_block_has_direct_overlap(block, query_terms) for block in blocks):
         return False
 
@@ -296,7 +326,13 @@ def build_answer_shape_contract(
     query_requests_configuration = _query_requests_configuration(query)
     query_requests_examples = _query_requests_examples(query)
 
-    enforcement_parts: list[str] = []
+    enforcement_parts: list[str] = [
+        "EVIDENCE ANCHOR RULE:\n"
+        "- Mention file names, symbols, decorators, enums, states, helper names, and module names only when they are directly shown in the provided context.\n"
+        "- If a code-specific name is not directly shown, describe the behavior generically instead of naming it.\n"
+        "- Do not infer sibling decorators, neighboring modules, or adjacent implementation details from naming patterns alone.\n"
+        "- Do not add file/symbol references or line-specific claims unless they are directly supported by the provided context.\n"
+    ]
     structure_sections: list[str] = []
 
     if absent_code_mode:
@@ -445,9 +481,6 @@ def build_answer_shape_contract(
                 "## Compact Example",
             ]
         )
-
-    if not enforcement_parts and not structure_sections:
-        return AnswerShapeContract(query_class=query_class, absent_code_mode=absent_code_mode)
 
     unique_sections: list[str] = []
     seen = set()

@@ -51,6 +51,18 @@ METRIC_ORDER = [
 SUPPORTED_PROVIDERS = {"openai", "gemini", "cerebras_sdk", "cerebras"}
 
 
+def configure_console_encoding() -> None:
+    """Prefer UTF-8 console output on Windows to avoid print crashes."""
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
+
 def normalize_provider_name(name: Optional[str]) -> str:
     value = (name or "").strip().lower()
     if value == "cerebras":
@@ -389,7 +401,7 @@ def ensure_cerebras_client(cfg: JudgeConfig):
 
 # ------------------------------- RETRY WRAPPER -------------------------------
 # Delays: 1st try (0s), 2nd try (1s), 3rd try (1s), 4th try (3s), 5th try (5s)
-_JUDGE_RETRY_DELAYS = [0, 1, 1, 3, 5]  # delay BEFORE each attempt
+_JUDGE_RETRY_DELAYS = [0, 5, 5, 10, 10]  # delay BEFORE each attempt
 
 
 def _is_retryable_judge_error(exc: Exception) -> bool:
@@ -931,6 +943,7 @@ def print_final_summary(records: List[Dict]):
 
 # ------------------------------- MAIN -------------------------------
 def main() -> None:
+    configure_console_encoding()
     parser = argparse.ArgumentParser(description="LLM judge for HOM-LLM vs Cursor baseline.")
     parser.add_argument("--responses", type=Path, required=True, help="Path to responses JSONL from run_experiment")
     parser.add_argument("--baseline", type=Path, required=True, help="Path to cursor_baseline.json")

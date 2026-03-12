@@ -405,6 +405,7 @@ def write_jsonl(path: Path, records: Iterable[Dict]) -> None:
 
 
 def write_run_info(path: Path, args: argparse.Namespace, selected: List[int]) -> None:
+    total_queries = len(load_queries())
     info = {
         "run_name": path.name,
         "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
@@ -414,6 +415,10 @@ def write_run_info(path: Path, args: argparse.Namespace, selected: List[int]) ->
         "intent": args.intent,
         "diagnostics_only": bool(args.diagnostics_only),
         "selection": selected,
+        "selection_count": len(selected),
+        "total_queries": total_queries,
+        "coverage_fraction": round(len(selected) / total_queries, 4) if total_queries else 0.0,
+        "full_coverage": len(selected) == total_queries,
     }
     with open(path / "run_info.json", "w", encoding="utf-8") as f:
         json.dump(info, f, indent=2)
@@ -491,6 +496,12 @@ def main() -> None:
     if not selected_queries:
         sys.stderr.write("No queries selected.\n")
         sys.exit(1)
+
+    if len(selected_ids) < len(queries):
+        sys.stderr.write(
+            f"[WARN] Partial coverage run: selected {len(selected_ids)}/{len(queries)} queries "
+            f"({len(selected_ids)/len(queries):.0%}). Do not use this alone for promotion.\n"
+        )
 
     run_name = args.run_name or f"run_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
     run_dir = args.output_dir / run_name

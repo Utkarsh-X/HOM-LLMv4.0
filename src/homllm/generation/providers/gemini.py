@@ -253,6 +253,8 @@ class GeminiProvider(ProviderConnector):
                     config=config_dict,
                 )
             except Exception as e:
+                if self._is_quota_exhaustion_exception(e):
+                    self._handle_quota_exhaustion()
                 if attempt >= max_attempts or not self._is_retryable_exception(e):
                     raise
                 sleep_s = self._retry_delay_seconds(e, attempt)
@@ -283,6 +285,14 @@ class GeminiProvider(ProviderConnector):
             "500",
             "503",
             "connection reset",
+            "getaddrinfo failed",
+            "name resolution",
+            "temporary failure in name resolution",
+            "failed to establish a new connection",
+            "connection aborted",
+            "connection refused",
+            "connection error",
+            "network is unreachable",
         )
         return any(tok in msg for tok in retry_tokens)
 
@@ -307,6 +317,36 @@ class GeminiProvider(ProviderConnector):
         if attempt >= 4:
             return 5.0
         return min(15.0, 1.5 * attempt)
+
+    @staticmethod
+    def _is_quota_exhaustion_exception(exc: Exception) -> bool:
+        msg = str(exc).lower()
+        quota_tokens = (
+            "resource_exhausted",
+            "quota exceeded",
+            "generate_content_free_tier_requests",
+            "please check your plan and billing details",
+        )
+        return any(tok in msg for tok in quota_tokens)
+
+    def _handle_quota_exhaustion(self) -> None:
+        try:
+            from homllm.common.key_rotation import KeyRotationManager
+
+            mgr = KeyRotationManager.instance()
+            if not mgr._pool_mode:
+                return
+            status = mgr.mark_current_key_exhausted()
+            new_key = mgr.get_key()
+            if new_key != self._active_pool_key:
+                logger.warning(
+                    "[KEY_ROTATION] Reinitializing Gemini client after quota exhaustion: %s",
+                    status,
+                )
+                self._active_pool_key = new_key
+                self._client = genai.Client(api_key=new_key)
+        except Exception as e:
+            logger.debug("Quota-exhaustion rotation handling skipped: %s", e)
 
     def invoke_stream(
         self, request: ProviderRequest, on_chunk: Callable[[str], None]

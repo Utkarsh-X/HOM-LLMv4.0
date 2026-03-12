@@ -260,6 +260,51 @@ class KeyRotationManager:
 
             return status
 
+    def mark_current_key_exhausted(self) -> dict:
+        """
+        Mark the current key as exhausted and advance rotation.
+
+        This is used when the provider returns a hard quota exhaustion error
+        before a successful call can be recorded.
+        """
+        with self._mutex:
+            if not self._pool_mode or not self._keys:
+                return {"pool_mode": False}
+
+            idx = self._current_index
+            if idx >= len(self._keys):
+                return {"pool_mode": True, "error": "index_out_of_range"}
+
+            self._usage_counts[idx] = max(self._usage_counts[idx], self._limit)
+            exhausted_name = self._names[idx]
+            next_idx = idx + 1
+            if next_idx < len(self._keys):
+                self._current_index = next_idx
+                next_name = self._names[next_idx]
+                logger.warning(
+                    "[KEY_ROTATION] Marking '%s' (slot %d) exhausted from provider quota error. "
+                    "Advancing to '%s' (slot %d).",
+                    exhausted_name,
+                    idx,
+                    next_name,
+                    next_idx,
+                )
+            else:
+                logger.warning(
+                    "[KEY_ROTATION] Marking '%s' (slot %d) exhausted from provider quota error. "
+                    "No keys remain after this slot.",
+                    exhausted_name,
+                    idx,
+                )
+            self._save_state()
+            return {
+                "pool_mode": True,
+                "marked_slot": idx,
+                "marked_name": exhausted_name,
+                "next_slot": self._current_index,
+                "next_name": self._names[self._current_index] if self._current_index < len(self._names) else None,
+            }
+
     def reset(self) -> None:
         """Reset all usage counters to zero. Use after quota resets."""
         with self._mutex:
