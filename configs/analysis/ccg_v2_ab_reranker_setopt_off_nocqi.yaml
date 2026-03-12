@@ -1,38 +1,37 @@
 indexer:
   languages:
-    - python
-    - javascript
-    - typescript
+  - python
+  - javascript
+  - typescript
   ignore_patterns:
-    - ".git"
-    - "node_modules"
-    - "__pycache__"
-    - "*.pyc"
-    - ".venv"
-    - "tests/**"
-    - "**/tests/**"
-    - "**/test_*.py"
-    - "tmp_*"
-    - "**/tmp_*"
-    - "**/tmp_*.py"
-    - "diagnose_*"
-    - "**/diagnose_*"
-    - "debug_*"
-    - "**/debug_*"
-    - "diagnostics/**"
-    - "**/diagnostics/**"
-    - "scripts/diagnose_*"
+  - .git
+  - node_modules
+  - __pycache__
+  - '*.pyc'
+  - .venv
+  - tests/**
+  - '**/tests/**'
+  - '**/test_*.py'
+  - tmp_*
+  - '**/tmp_*'
+  - '**/tmp_*.py'
+  - diagnose_*
+  - '**/diagnose_*'
+  - debug_*
+  - '**/debug_*'
+  - diagnostics/**
+  - '**/diagnostics/**'
+  - scripts/diagnose_*
   chunk_max_lines: 100
-  embedding_model: "Qwen/Qwen3-Embedding-0.6B"
+  embedding_model: Qwen/Qwen3-Embedding-0.6B
   embedding_dimension: 1024
   embedding_max_tokens: 1024
-  embedding_device: "auto"
+  embedding_device: auto
   storage:
-    duckdb_path: "indexes/metadata.duckdb"
-    tantivy_path: "indexes/bm25.index"
-    lancedb_path: "indexes/vectors.lance"
-    artifacts_path: "indexes"
-
+    duckdb_path: indexes/metadata.duckdb
+    tantivy_path: indexes/bm25.index
+    lancedb_path: indexes/vectors.lance
+    artifacts_path: indexes
 retrieval:
   bm25:
     engine: tantivy
@@ -55,7 +54,7 @@ retrieval:
     enabled: true
     min_k: 20
     max_k: 150
-    drop_threshold: 0.30
+    drop_threshold: 0.3
   plan_b_enabled: true
   diversity_mmr:
     enabled: false
@@ -65,7 +64,6 @@ retrieval:
     enabled: true
   graph_stitch:
     enabled: true
-
 ranking:
   concentration_top_k: 10
   dedup:
@@ -83,7 +81,7 @@ ranking:
     top_n: 50
     lambda: 0.85
   set_optimization:
-    enabled: true
+    enabled: false
     token_budget: 8000
     max_rounds: 100
     w_relevance: 1.0
@@ -92,9 +90,9 @@ ranking:
     w_redundancy: 0.5
     w_dispersion: 0.2
   reranker:
-    enabled: true
-    model: "tomaarsen/Qwen3-Reranker-0.6B-seq-cls"
-    device: "auto"
+    enabled: false
+    model: tomaarsen/Qwen3-Reranker-0.6B-seq-cls
+    device: auto
     top_m: 35
     bm25_rescue_top_k: 15
   geometry:
@@ -102,18 +100,17 @@ ranking:
     struct_gamma: 0.05
   weights:
     w_base: 1.0
-    w_rerank: 0.32
+    w_rerank: 0.0
     w_struct: 0.05
     w_bm25: 0.4
     w_dense: 0.4
     w_name: 0.2
-
 context:
   max_tokens: 6000
   generation_reserve_tokens: 800
   budget_mode: adaptive
   summarization_enabled: false
-  ordering: "structural_first"
+  ordering: structural_first
   ranking_surface_lock_enabled: true
   coherence_enabled: true
   submodular_packer_enabled: true
@@ -131,7 +128,6 @@ context:
   unresolved_evidence_injection_relevance_floor: 0.15
   unresolved_evidence_injection_max_token_share: 0.15
   unresolved_evidence_injection_replace_from_tail: true
-
 intelligence:
   enabled: true
   level1_enabled: true
@@ -143,17 +139,16 @@ intelligence:
   claim_coverage:
     enabled: true
     prompt_contract_enabled: false
-    required_coverage_threshold: 0.70
+    required_coverage_threshold: 0.7
     claim_cover_threshold: 0.55
     soft_recovery_enabled: true
     max_recovery_passes: 1
     max_required_claims: 8
     recovery_top_k: 20
-
 generation:
   default_provider: gemini
-  default_model: "gemini-2.5-flash"
+  default_model: gemini-2.5-flash
   temperature: 0.15
   max_output_tokens: 12000
-
-evaluation: {}
+evaluation:
+  cqi_hard_gate_enabled: false

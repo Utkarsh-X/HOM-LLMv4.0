@@ -25,6 +25,7 @@ from homllm.retrieval.deduplication import deduplicate_hierarchical
 from homllm.retrieval.expander import StructuralExpanderImpl
 from homllm.retrieval.granularity_strategy import apply_granularity_mix
 from homllm.retrieval.hybrid import RRFHybridMerger
+from homllm.retrieval.intent_adapter import infer_retrieval_intent
 from homllm.retrieval.interfaces import (
     RetrievalConfig,
     RetrievalResult,
@@ -194,6 +195,14 @@ class RetrievalPipeline:
 
         try:
             t0 = time.perf_counter()
+            resolved_intent = intent
+            intent_source = "caller"
+            intent_rule = "provided"
+            if resolved_intent == Intent.UNKNOWN:
+                inferred_intent = infer_retrieval_intent(query)
+                resolved_intent = inferred_intent.intent
+                intent_source = inferred_intent.source
+                intent_rule = inferred_intent.matched_rule
             # =================================================================
             # Plan B: Step 1 — Legacy Index Detection
             # =================================================================
@@ -210,7 +219,7 @@ class RetrievalPipeline:
             
             # 1. Prepare query
             prep_start = time.perf_counter()
-            prepared = self.preparer.prepare(query, intent)
+            prepared = self.preparer.prepare(query, resolved_intent)
             prep_ms = (time.perf_counter() - prep_start) * 1000
             if prepared.lexical_expansion_terms:
                 logger.info(
@@ -328,7 +337,7 @@ class RetrievalPipeline:
 
             # Hierarchical deduplication AFTER MMR
             if plan_b_active and self.config.hierarchical_dedup_enabled:
-                merged = deduplicate_hierarchical(merged, intent=intent)
+                merged = deduplicate_hierarchical(merged, intent=resolved_intent)
             count_after_dedup = len(merged)
             
             # =================================================================
@@ -336,7 +345,7 @@ class RetrievalPipeline:
             # =================================================================
             if plan_b_active and self.config.granularity_boost_enabled:
                 gran_start = time.perf_counter()
-                merged = self._apply_granularity_boost(merged, intent)
+                merged = self._apply_granularity_boost(merged, resolved_intent)
                 granularity_ms = (time.perf_counter() - gran_start) * 1000
             else:
                 granularity_ms = 0.0
@@ -345,7 +354,7 @@ class RetrievalPipeline:
             if plan_b_active and self.config.granularity_mixing_enabled:
                 merged = apply_granularity_mix(
                     merged,
-                    intent,
+                    resolved_intent,
                     self.config.granularity_mixing_profiles,
                 )
             count_after_granularity = len(merged)
@@ -457,6 +466,9 @@ class RetrievalPipeline:
                     "effective_post_merge_candidates": effective_post_merge_candidates,
                     "effective_output_top_k": effective_output_top_k,
                     "adaptive_k": requested_k,
+                    "resolved_intent": resolved_intent.value,
+                    "intent_source": intent_source,
+                    "intent_rule": intent_rule,
                     "query_expansion_enabled": self.config.query_expansion_enabled,
                     "query_expansion_terms": list(prepared.lexical_expansion_terms),
                     "query_expansion_term_count": len(prepared.lexical_expansion_terms),

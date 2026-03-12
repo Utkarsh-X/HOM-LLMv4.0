@@ -407,6 +407,12 @@ class ContextPipeline:
             allocated_ids = [ab.block.block_id for ab in allocated_blocks]
             context_reorder_count = self._count_reorders(ranking_ids, allocated_ids)
             ranking_order_preserved = context_reorder_count == 0
+            original_reorder_count = context_reorder_count
+            ranking_authority_fallback_trace = {
+                "active": False,
+                "reason": None,
+                "original_reorder_count": original_reorder_count,
+            }
 
             coherence_active = getattr(self.config, "coherence_enabled", False)
             if ranking_surface_lock_enabled and not ranking_order_preserved:
@@ -420,20 +426,50 @@ class ContextPipeline:
                     ]
                     top_reorders = self._count_reorders(top_ranking_ids, top_allocated_ids)
                     if top_reorders > 0:
-                        raise RuntimeError(
-                            "RANKING_AUTHORITY_LOCK_VIOLATION (top-N):"
-                            f"top_{top_n}_reorder_count={top_reorders}"
+                        logger.warning(
+                            "[CONTEXT] ranking authority violation on top-%d (reorders=%d); "
+                            "falling back to strict rank-ordered budget allocation",
+                            top_n,
+                            top_reorders,
                         )
+                        allocated_blocks = self._fallback_rank_locked_allocation(
+                            ranked_scored_blocks=unique_scored,
+                            effective_context_budget=effective_context_budget,
+                            query=query,
+                        )
+                        allocated_ids = [ab.block.block_id for ab in allocated_blocks]
+                        context_reorder_count = self._count_reorders(ranking_ids, allocated_ids)
+                        ranking_order_preserved = context_reorder_count == 0
+                        ranking_authority_fallback_trace = {
+                            "active": True,
+                            "reason": f"top_{top_n}_reorder_count={top_reorders}",
+                            "original_reorder_count": original_reorder_count,
+                        }
                     # Log coherence-driven reorders (allowed)
-                    logger.info(
-                        "[CONTEXT] coherence mid-range reorders=%d (allowed, top-%d protected)",
-                        context_reorder_count, top_n,
-                    )
+                    if not ranking_authority_fallback_trace["active"]:
+                        logger.info(
+                            "[CONTEXT] coherence mid-range reorders=%d (allowed, top-%d protected)",
+                            context_reorder_count, top_n,
+                        )
                 else:
-                    raise RuntimeError(
-                        "RANKING_AUTHORITY_LOCK_VIOLATION:"
-                        f"context_reorder_count={context_reorder_count}"
+                    logger.warning(
+                        "[CONTEXT] ranking authority violation (reorders=%d); "
+                        "falling back to strict rank-ordered budget allocation",
+                        context_reorder_count,
                     )
+                    allocated_blocks = self._fallback_rank_locked_allocation(
+                        ranked_scored_blocks=unique_scored,
+                        effective_context_budget=effective_context_budget,
+                        query=query,
+                    )
+                    allocated_ids = [ab.block.block_id for ab in allocated_blocks]
+                    context_reorder_count = self._count_reorders(ranking_ids, allocated_ids)
+                    ranking_order_preserved = context_reorder_count == 0
+                    ranking_authority_fallback_trace = {
+                        "active": True,
+                        "reason": "context_reorder_count_violation",
+                        "original_reorder_count": original_reorder_count,
+                    }
 
             # 5. Stitch final context
             context_text = self.stitcher.stitch(
@@ -539,6 +575,7 @@ class ContextPipeline:
                 "ranking_surface_lock_enabled": ranking_surface_lock_enabled,
                 "ranking_order_preserved": ranking_order_preserved,
                 "context_reorder_count": context_reorder_count,
+                "ranking_authority_fallback": ranking_authority_fallback_trace,
                 "stage_counts": stage_counts,
                 "stage_file_histograms": stage_file_histograms,
                 "scored_order_top10": scored_order_top10,
@@ -605,8 +642,6 @@ class ContextPipeline:
             )
 
         except Exception as e:
-            if "RANKING_AUTHORITY_LOCK_VIOLATION" in str(e):
-                raise
             import traceback, sys; sys.stderr.write(f"[CTX_ASSEMBLY_ERROR] {e}\n"); traceback.print_exc(file=sys.stderr); sys.stderr.flush()
             logger.error(f"Context assembly failed: {e}")
             # Return empty context on error
@@ -619,6 +654,26 @@ class ContextPipeline:
                 provenance={"query": query, "query_text": query},
                 explain_trace=tuple([f"Error: {str(e)}"]),
             )
+
+    def _fallback_rank_locked_allocation(
+        self,
+        ranked_scored_blocks: list[ScoredBlock],
+        effective_context_budget: int,
+        query: str,
+    ):
+        """Budget-fit blocks in strict ranking order as a safe fallback."""
+        budget_config = BudgetConfig(
+            max_tokens=effective_context_budget,
+            budget_mode=self.config.budget_mode,
+            structural_priority_multiplier=self.config.structural_priority_multiplier,
+        )
+        return self.budget_manager.allocate(
+            ranked_scored_blocks,
+            {"query": query},
+            budget_config,
+            self.tokenizer,
+            preserve_order=True,
+        )
 
     def _build_rank_locked_scored_blocks(
         self,

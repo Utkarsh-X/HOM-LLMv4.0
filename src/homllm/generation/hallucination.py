@@ -84,10 +84,33 @@ class HallucinationDetector:
 
     def _extract_identifiers(self, text: str) -> set[str]:
         """Extract function/class names mentioned in text."""
-        # Pattern: function_name() or ClassName
-        functions = re.findall(r"([a-z_][a-z0-9_]*)\s*\(", text)
-        classes = re.findall(r"([A-Z][a-zA-Z0-9_]*)\b", text)
-        return set(functions + classes)
+        identifiers: set[str] = set()
+
+        # Function-style identifiers: snake_case(...)
+        identifiers.update(re.findall(r"\b([a-z_][a-z0-9_]*)\s*\(", text))
+
+        # Backticked code identifiers.
+        identifiers.update(
+            match
+            for match in re.findall(r"`([A-Za-z_][A-Za-z0-9_]*)`", text)
+            if self._looks_code_like(match)
+        )
+
+        # CamelCase / PascalCase identifiers.
+        identifiers.update(
+            match
+            for match in re.findall(r"\b([A-Z][a-z0-9]+(?:[A-Z][a-z0-9]+)+)\b", text)
+            if self._looks_code_like(match)
+        )
+
+        # CONSTANT_CASE identifiers.
+        identifiers.update(
+            match
+            for match in re.findall(r"\b([A-Z]{2,}(?:_[A-Z0-9]+)+)\b", text)
+            if self._looks_code_like(match)
+        )
+
+        return identifiers
 
     def _is_common_word(self, word: str) -> bool:
         """Check if word is a common English word (likely false positive)."""
@@ -96,5 +119,23 @@ class HallucinationDetector:
             "of", "with", "by", "from", "as", "is", "are", "was", "were", "be",
             "been", "being", "have", "has", "had", "do", "does", "did", "will",
             "would", "should", "could", "may", "might", "must", "can",
+            "this", "that", "these", "those", "there", "here", "if", "after",
+            "before", "when", "why", "what", "how", "where", "which", "none",
+            "true", "false", "following", "order", "example", "outcome", "core",
+            "interaction", "priority", "compact", "present", "removed", "selected",
+            "recorded", "method", "simplified", "filter", "filters",
         }
         return word.lower() in common_words
+
+    def _looks_code_like(self, value: str) -> bool:
+        if not value or self._is_common_word(value):
+            return False
+        if "_" in value:
+            return True
+        # CamelCase / PascalCase with at least one internal capital.
+        if re.match(r"^[A-Z][a-z0-9]+(?:[A-Z][a-z0-9]+)+$", value):
+            return True
+        # Lower snake-ish identifiers with enough signal.
+        if re.match(r"^[a-z_][a-z0-9_]{2,}$", value) and any(ch == "_" for ch in value):
+            return True
+        return False

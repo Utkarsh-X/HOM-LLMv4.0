@@ -33,6 +33,7 @@ from homllm.generation.interfaces import GenerationRequest, ModelConfig
 from homllm.indexer.embedder import QwenEmbedder
 from homllm.indexer.storage.filesystem_adapter import FilesystemAdapter
 from homllm.ranking.pipeline import RankingPipeline
+from homllm.retrieval.intent_adapter import infer_retrieval_intent as infer_runtime_retrieval_intent
 from homllm.retrieval.pipeline import RetrievalPipeline
 from homllm.intelligence.controller import create_intelligence_controller
 from homllm.context.applier import create_context_applier
@@ -316,23 +317,8 @@ def parse_intelligence_levels(spec: str) -> tuple[bool, bool, bool, bool]:
 
 
 def infer_retrieval_intent(query: str) -> Intent:
-    """
-    Infer retrieval intent from query text when CLI intent is not provided.
-
-    Uses the existing deterministic sufficiency intent classifier and maps:
-    - ARCHITECTURAL -> EXPLAIN
-    - IMPLEMENTATION -> IMPLEMENT
-    - BEHAVIORAL -> DEBUG
-    """
-    from homllm.sufficiency.intent import classify_intent
-
-    result = classify_intent(query)
-    mapping = {
-        "ARCHITECTURAL": Intent.EXPLAIN,
-        "IMPLEMENTATION": Intent.IMPLEMENT,
-        "BEHAVIORAL": Intent.DEBUG,
-    }
-    return mapping.get(result.intent, Intent.UNKNOWN)
+    """Infer retrieval intent from query text when CLI intent is not provided."""
+    return infer_runtime_retrieval_intent(query).intent
 
 
 class QueryTelemetry:
@@ -547,6 +533,127 @@ def _write_claim_coverage_artifacts(
         coverage_report=bool(coverage_report is not None),
         recovery_trace=bool(recovery_trace is not None),
     )
+
+
+def _write_retrieval_diagnostics_artifact(
+    run_id: str,
+    query: str,
+    retrieval_result,
+    requested_intent: Intent,
+    enabled: bool,
+) -> None:
+    """Persist retrieval diagnostics for empirical auditability."""
+    if not enabled:
+        return
+
+    metadata = dict(getattr(retrieval_result, "metadata", {}) or {})
+    payload = {
+        "run_id": run_id,
+        "query": query,
+        "requested_intent": requested_intent.value,
+        "resolved_intent": metadata.get("resolved_intent"),
+        "intent_source": metadata.get("intent_source"),
+        "intent_rule": metadata.get("intent_rule"),
+        "retrieval_stage_trace": metadata.get("retrieval_stage_trace"),
+        "knee_gate": metadata.get("knee_gate"),
+        "graph_stitch_status": metadata.get("graph_stitch_status"),
+        "graph_stitch_status_detail": metadata.get("graph_stitch_status_detail"),
+        "query_expansion_enabled": metadata.get("query_expansion_enabled"),
+        "query_expansion_terms": metadata.get("query_expansion_terms"),
+        "effective_bm25_top_k": metadata.get("effective_bm25_top_k"),
+        "effective_vector_top_k": metadata.get("effective_vector_top_k"),
+        "effective_post_merge_candidates": metadata.get("effective_post_merge_candidates"),
+        "effective_output_top_k": metadata.get("effective_output_top_k"),
+        "adaptive_k": metadata.get("adaptive_k"),
+        "candidates_top20": [
+            {
+                "doc_id": getattr(c, "doc_id", None),
+                "file": getattr(c, "file", None),
+                "symbol_id": getattr(c, "symbol_id", None),
+                "symbol_name": getattr(c, "symbol_name", None),
+                "hybrid_score": float(getattr(c, "hybrid_score", 0.0) or 0.0),
+                "provenance": list(getattr(c, "provenance", ()) or ()),
+                "granularity_level": getattr(c, "granularity_level", None),
+            }
+            for c in list(getattr(retrieval_result, "candidates", []) or [])[:20]
+        ],
+    }
+    out_path = Path("artifacts") / "runs" / run_id / "retrieval_diagnostics.json"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+
+    print_telemetry(
+        "RETRIEVAL_DIAGNOSTICS",
+        saved=str(out_path),
+        resolved_intent=payload.get("resolved_intent"),
+        candidate_count=len(payload["candidates_top20"]),
+    )
+
+
+def _write_generation_diagnostics_artifact(run_id: str, generation_result) -> None:
+    """Persist generation diagnostics for post-run auditing."""
+    payload = {
+        "status": generation_result.status,
+        "provider": generation_result.provider,
+        "model": generation_result.model,
+        "tokens_in": generation_result.tokens_in,
+        "tokens_out": generation_result.tokens_out,
+        "latency_ms": generation_result.latency_ms,
+        "finish_reason": generation_result.finish_reason,
+        "parse_warnings": list(generation_result.diagnostics.parse_warnings),
+        "hallucination_flags": list(generation_result.diagnostics.hallucination_flags),
+        "corrections_applied": list(generation_result.diagnostics.corrections_applied),
+    }
+    out_path = Path("artifacts") / "runs" / run_id / "generation_diagnostics.json"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+
+    print_telemetry(
+        "GENERATION_DIAGNOSTICS",
+        saved=str(out_path),
+        hallucination_flag_count=len(payload["hallucination_flags"]),
+        parse_warning_count=len(payload["parse_warnings"]),
+    )
+
+
+def _should_apply_cqi_gate(
+    cqi_result,
+    ranking_config,
+    ranking_output,
+    *,
+    hard_gate_enabled: bool = True,
+    gate_threshold: float = 0.40,
+) -> bool:
+    """Return True only when CQI is both low and calibrated for this run.
+
+    CQI_4 uses a ranking-confidence axis that depends on reranker influence.
+    When the reranker is disabled or not actually used for the query, the
+    calibrated threshold is not comparable and must not hard-block generation.
+    """
+    if not hard_gate_enabled:
+        return False
+    if not cqi_result:
+        return False
+    if cqi_result.get("cqi4") is None:
+        return False
+    if float(cqi_result["cqi4"]) >= gate_threshold:
+        return False
+
+    if not getattr(ranking_config, "reranker_enabled", False):
+        return False
+
+    metadata = getattr(ranking_output, "metadata", None)
+    if metadata is None:
+        return False
+
+    if not getattr(metadata, "reranker_used", False):
+        return False
+    if getattr(metadata, "reranker_unavailable", False):
+        return False
+
+    return True
 
 
 def _merge_recovery_candidates(base_candidates, focused_candidates):
@@ -1079,6 +1186,17 @@ def main():
             graph_stitch_status_detail=retrieval_result.metadata.get("graph_stitch_status_detail"),
             # Tier 3: per-stage candidate count trace
             retrieval_stage_trace=retrieval_result.metadata.get("retrieval_stage_trace"),
+            resolved_intent=retrieval_result.metadata.get("resolved_intent"),
+            intent_source=retrieval_result.metadata.get("intent_source"),
+            intent_rule=retrieval_result.metadata.get("intent_rule"),
+        )
+
+        _write_retrieval_diagnostics_artifact(
+            run_id=telemetry.run_id,
+            query=args.query,
+            retrieval_result=retrieval_result,
+            requested_intent=intent,
+            enabled=True,
         )
 
         if not retrieval_result.candidates:
@@ -1467,11 +1585,31 @@ def main():
                 )
         except Exception as e:
             logger.debug(f"CQI_4 monitoring skipped: {e}")
-
-        # ── CQI < 0.40 HARD GATE ──
-        # Zero false negatives observed. Safe to gate.
-        cqi_gate_threshold = 0.40
-        if cqi_result and cqi_result["cqi4"] < cqi_gate_threshold:
+        evaluation_config = config.evaluation if isinstance(config.evaluation, dict) else {}
+        # ── CQI < threshold HARD GATE ──
+        cqi_hard_gate_enabled = bool(evaluation_config.get("cqi_hard_gate_enabled", True))
+        cqi_gate_threshold = float(evaluation_config.get("cqi_gate_threshold", 0.40))
+        cqi_gate_applied = _should_apply_cqi_gate(
+            cqi_result,
+            ranking_config,
+            ranking_output,
+            hard_gate_enabled=cqi_hard_gate_enabled,
+            gate_threshold=cqi_gate_threshold,
+        )
+        if cqi_result:
+            telemetry.record_phase(
+                "CQI_GATE_DECISION",
+                context_end,
+                context_end,
+                gate_applied=cqi_gate_applied,
+                hard_gate_enabled=cqi_hard_gate_enabled,
+                cqi4=cqi_result.get("cqi4"),
+                gate_threshold=cqi_gate_threshold,
+                reranker_enabled=getattr(ranking_config, "reranker_enabled", False),
+                reranker_used=getattr(getattr(ranking_output, "metadata", None), "reranker_used", False),
+                reranker_unavailable=getattr(getattr(ranking_output, "metadata", None), "reranker_unavailable", False),
+            )
+        if cqi_gate_applied:
             gen_start = time.perf_counter()
             gen_end = time.perf_counter()
             telemetry.record_phase(
@@ -2124,7 +2262,11 @@ def main():
             status=generation_result.status,
             finish_reason=generation_result.finish_reason,
             cqi4=cqi_result["cqi4"] if cqi_result else None,
+            parse_warning_count=len(generation_result.diagnostics.parse_warnings),
+            hallucination_flag_count=len(generation_result.diagnostics.hallucination_flags),
+            hallucination_flags=list(generation_result.diagnostics.hallucination_flags),
         )
+        _write_generation_diagnostics_artifact(telemetry.run_id, generation_result)
 
         # Emit token attribution telemetry if flag enabled
         if args.token_attribution:
