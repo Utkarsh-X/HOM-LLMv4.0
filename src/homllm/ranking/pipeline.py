@@ -698,6 +698,9 @@ class RankingPipeline:
                     "is_entrypoint": bool(fv.is_entrypoint) if fv else False,
                     "has_decorator": bool(fv.has_decorator) if fv else False,
                     "callgraph_distance": float(fv.callgraph_distance) if fv else None,
+                    "broad_system_positive": float(fv.broad_system_positive) if fv else None,
+                    "broad_system_negative": float(fv.broad_system_negative) if fv else None,
+                    "public_symbol_hit": bool(fv.public_symbol_hit) if fv else False,
                 }
             )
             if fv is not None:
@@ -707,6 +710,12 @@ class RankingPipeline:
                         "bm25_component": float(self.config.w_bm25 * fv.bm25_percentile),
                         "dense_component": float(self.config.w_dense * fv.dense_percentile),
                         "name_component": float(self.config.w_name * fv.name_match_score),
+                        "broad_system_positive_component": float(
+                            self.config.w_broad_system_positive * fv.broad_system_positive
+                        ),
+                        "broad_system_negative_component": float(
+                            self.config.w_broad_system_negative * fv.broad_system_negative
+                        ),
                         "base_score": float(base_scores.get(candidate.doc_id, 0.0)),
                     }
                 )
@@ -805,6 +814,11 @@ class RankingPipeline:
             "adaptive_weights": adaptive_weight_trace,
             "set_optimizer_rounds": set_opt_rounds,
             "set_optimizer_summary": set_opt_metrics,
+            "broad_system_bias_config": {
+                "enabled": bool(self.config.broad_system_bias_enabled),
+                "positive_weight": float(self.config.w_broad_system_positive),
+                "negative_weight": float(self.config.w_broad_system_negative),
+            },
             "final_output_surface": [self._serialize_candidate(c) for c in ranked_candidates_final],
             "elimination_ledger": elimination_ledger,
         }
@@ -816,6 +830,17 @@ class RankingPipeline:
         for entry in elimination:
             stage = str(entry.get("first_eliminating_subcomponent", "UNKNOWN"))
             counts[stage] = counts.get(stage, 0) + 1
+        feature_rows = subtrace.get("feature_enrichment") or []
+        bias_rows = [
+            row for row in feature_rows
+            if (row.get("broad_system_positive") or 0.0) > 0.0
+            or (row.get("broad_system_negative") or 0.0) > 0.0
+        ]
+        public_symbol_hits = sum(
+            1 for row in feature_rows if bool(row.get("public_symbol_hit"))
+        )
+        bias_cfg = subtrace.get("broad_system_bias_config") or {}
+        bias_enabled = bool(bias_cfg.get("enabled"))
         return {
             "schema_version": subtrace.get("schema_version"),
             "input_candidates": len(subtrace.get("input_surface") or []),
@@ -823,6 +848,12 @@ class RankingPipeline:
             "elimination_by_subcomponent": counts,
             "dedup_decisions": len(subtrace.get("dedup_decisions") or []),
             "set_optimizer_round_events": len(subtrace.get("set_optimizer_rounds") or []),
+            "broad_system_bias": {
+                "enabled": bias_enabled,
+                "applied": bias_enabled and len(bias_rows) > 0,
+                "broad_system_bias_count": len(bias_rows),
+                "public_symbol_preference_hits": public_symbol_hits,
+            },
         }
 
     @staticmethod

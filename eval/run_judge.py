@@ -1,4 +1,4 @@
-﻿"""LLM-based judge for HOM-LLM delta evaluation.
+"""LLM-based judge for HOM-LLM delta evaluation.
 
 Compares HOM-LLM answers to the fixed Cursor baseline and emits
 per-dimension ordinal scores plus natural-language explanations.
@@ -401,7 +401,7 @@ def ensure_cerebras_client(cfg: JudgeConfig):
 
 # ------------------------------- RETRY WRAPPER -------------------------------
 # Delays: 1st try (0s), 2nd try (1s), 3rd try (1s), 4th try (3s), 5th try (5s)
-_JUDGE_RETRY_DELAYS = [0, 5, 5, 10, 10]  # delay BEFORE each attempt
+_JUDGE_RETRY_DELAYS = [0, 5, 5, 10, 10, 5, 10, 20]  # delay BEFORE each attempt
 
 
 def _is_retryable_judge_error(exc: Exception) -> bool:
@@ -558,6 +558,91 @@ def call_judge_openai(client, cfg: JudgeConfig, messages: List[Dict[str, str]]) 
 
 def _call_gemini_api(client, cfg: JudgeConfig, prompt: str):
     """Raw Gemini API call (wrapped by retry logic)."""
+    
+    paired_score_schema = {
+        "type": "object",
+        "properties": {
+            "baseline": {
+                "type": "integer", 
+                "description": "Score for the baseline answer, 1-5 (1=poor, 5=excellent)."
+            },
+            "candidate": {
+                "type": "integer", 
+                "description": "Score for the candidate answer, 1-5 (1=poor, 5=excellent)."
+            }
+        },
+        "required": ["baseline", "candidate"]
+    }
+    
+    verbosity_score_schema = {
+        "type": "object",
+        "properties": {
+            "baseline": {
+                "type": "integer", 
+                "description": "Verbosity score for baseline answer, 1-5 (lower is better: 1=concise, 5=verbose)."
+            },
+            "candidate": {
+                "type": "integer", 
+                "description": "Verbosity score for candidate answer, 1-5 (lower is better: 1=concise, 5=verbose)."
+            }
+        },
+        "required": ["baseline", "candidate"]
+    }
+    
+    hallucination_score_schema = {
+        "type": "object",
+        "properties": {
+            "baseline": {
+                "type": "integer", 
+                "description": "Safety score for baseline answer, 1-5 (higher is SAFER: 1=very risky, 5=very safe)."
+            },
+            "candidate": {
+                "type": "integer", 
+                "description": "Safety score for candidate answer, 1-5 (higher is SAFER: 1=very risky, 5=very safe)."
+            }
+        },
+        "required": ["baseline", "candidate"]
+    }
+
+    judge_schema = {
+        "type": "object",
+        "properties": {
+            "scores": {
+                "type": "object",
+                "properties": {
+                    "semantic_correctness": paired_score_schema,
+                    "factual_consistency": paired_score_schema,
+                    "completeness": paired_score_schema,
+                    "clarity": paired_score_schema,
+                    "relevance": paired_score_schema,
+                    "hallucination_risk": hallucination_score_schema,
+                    "verbosity": verbosity_score_schema,
+                    "overall_quality": paired_score_schema
+                },
+                "required": [
+                    "semantic_correctness", "factual_consistency", "completeness", 
+                    "clarity", "relevance", "hallucination_risk", "verbosity", 
+                    "overall_quality"
+                ]
+            },
+            "verdict": {
+                "type": "string", 
+                "enum": ["improved", "equal", "regressed"],
+                "description": "Final verdict comparing candidate to baseline."
+            },
+            "explanation": {
+                "type": "string",
+                "description": "1-3 sentence rationale"
+            },
+            "key_differences": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Bullet points highlighting specific differences"
+            }
+        },
+        "required": ["scores", "verdict", "explanation", "key_differences"]
+    }
+
     response = client.models.generate_content(
         model=cfg.model,
         contents=prompt,
@@ -565,6 +650,7 @@ def _call_gemini_api(client, cfg: JudgeConfig, prompt: str):
             "temperature": float(cfg.temperature),
             "max_output_tokens": 4000,
             "response_mime_type": "application/json",
+            "response_json_schema": judge_schema,
         },
     )
     content = response.text if response.text else ""

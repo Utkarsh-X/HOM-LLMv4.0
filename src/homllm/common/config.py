@@ -305,6 +305,7 @@ class Config(BaseModel):
         mmr_cfg = rank_cfg.get("mmr_selection", {})
         set_opt_cfg = rank_cfg.get("set_optimization", {})
         geometry_cfg = rank_cfg.get("geometry", {})
+        broad_system_bias_cfg = rank_cfg.get("broad_system_bias", {})
 
         struct_weights = weights_cfg.get("struct", {})
         return RankConfig(
@@ -320,6 +321,9 @@ class Config(BaseModel):
             w_bm25=weights_cfg.get("w_bm25", 0.4),
             w_dense=weights_cfg.get("w_dense", 0.4),
             w_name=weights_cfg.get("w_name", 0.2),
+            broad_system_bias_enabled=broad_system_bias_cfg.get("enabled", False),
+            w_broad_system_positive=broad_system_bias_cfg.get("positive_weight", 0.0),
+            w_broad_system_negative=broad_system_bias_cfg.get("negative_weight", 0.0),
             rerank_alpha=weights_cfg.get("w_rerank", geometry_cfg.get("rerank_alpha", 0.32)),  # alias
             struct_gamma=weights_cfg.get("w_struct", geometry_cfg.get("struct_gamma", 0.05)),  # alias
             struct_entrypoint_bonus=struct_weights.get("entrypoint_bonus", 0.1),

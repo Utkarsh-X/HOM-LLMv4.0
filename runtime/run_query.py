@@ -547,6 +547,15 @@ def _write_retrieval_diagnostics_artifact(
         return
 
     metadata = dict(getattr(retrieval_result, "metadata", {}) or {})
+    candidates_top20 = list(getattr(retrieval_result, "candidates", []) or [])[:20]
+    granularity_counts: dict[str, int] = {}
+    provenance_counts: dict[str, int] = {}
+    for candidate in candidates_top20:
+        granularity = str(getattr(candidate, "granularity_level", None) or "unknown")
+        granularity_counts[granularity] = granularity_counts.get(granularity, 0) + 1
+        for provenance in list(getattr(candidate, "provenance", ()) or ()):
+            provenance_key = str(provenance or "unknown")
+            provenance_counts[provenance_key] = provenance_counts.get(provenance_key, 0) + 1
     payload = {
         "run_id": run_id,
         "query": query,
@@ -565,6 +574,8 @@ def _write_retrieval_diagnostics_artifact(
         "effective_post_merge_candidates": metadata.get("effective_post_merge_candidates"),
         "effective_output_top_k": metadata.get("effective_output_top_k"),
         "adaptive_k": metadata.get("adaptive_k"),
+        "granularity_counts_top20": granularity_counts,
+        "provenance_counts_top20": provenance_counts,
         "candidates_top20": [
             {
                 "doc_id": getattr(c, "doc_id", None),
@@ -575,7 +586,7 @@ def _write_retrieval_diagnostics_artifact(
                 "provenance": list(getattr(c, "provenance", ()) or ()),
                 "granularity_level": getattr(c, "granularity_level", None),
             }
-            for c in list(getattr(retrieval_result, "candidates", []) or [])[:20]
+            for c in candidates_top20
         ],
     }
     out_path = Path("artifacts") / "runs" / run_id / "retrieval_diagnostics.json"

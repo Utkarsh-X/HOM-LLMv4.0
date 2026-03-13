@@ -16,6 +16,9 @@ class FeatureVector:
     is_entrypoint: bool
     has_decorator: bool
     callgraph_distance: float  # Inverse distance, 0 if not connected
+    broad_system_positive: float = 0.0
+    broad_system_negative: float = 0.0
+    public_symbol_hit: bool = False
 
 
 @dataclass(frozen=True)
@@ -79,6 +82,9 @@ class RankConfig:
     w_bm25: float
     w_dense: float
     w_name: float
+    broad_system_bias_enabled: bool = False
+    w_broad_system_positive: float = 0.0
+    w_broad_system_negative: float = 0.0
     reranker_device: str = "auto"
     # Stage 2 geometry controls (fixed, bounded, deterministic)
     rerank_alpha: float = 0.32

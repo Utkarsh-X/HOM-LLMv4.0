@@ -10,6 +10,100 @@ from homllm.retrieval.interfaces import Candidate
 
 logger = logging.getLogger(__name__)
 
+_BROAD_SCOPE_MARKERS = {
+    "system",
+    "across",
+    "lifecycle",
+    "expected",
+    "outcomes",
+    "end",
+    "stress",
+}
+_BROAD_BEHAVIOR_MARKERS = {
+    "handle",
+    "handles",
+    "happens",
+    "combine",
+    "combines",
+    "interact",
+    "interacts",
+    "fallback",
+    "fallbacks",
+    "flow",
+    "summary",
+    "summarize",
+}
+_QUERY_STOPWORDS = {
+    "the",
+    "and",
+    "when",
+    "what",
+    "how",
+    "does",
+    "with",
+    "into",
+    "from",
+    "that",
+    "this",
+    "then",
+    "they",
+    "them",
+    "their",
+    "which",
+    "where",
+    "while",
+    "under",
+    "over",
+    "more",
+    "less",
+    "than",
+    "have",
+    "has",
+    "had",
+    "are",
+    "all",
+    "can",
+    "could",
+    "should",
+    "would",
+    "your",
+}
+_ARCHITECTURE_TERMS = {
+    "adapter",
+    "adapters",
+    "engine",
+    "executor",
+    "execution",
+    "worker",
+    "processor",
+    "handler",
+    "controller",
+    "service",
+    "client",
+    "queue",
+    "pipeline",
+    "route",
+    "routes",
+    "repository",
+    "store",
+}
+_UTILITY_TERMS = {
+    "helper",
+    "internal",
+    "util",
+    "utils",
+    "config",
+    "settings",
+    "constant",
+    "constants",
+    "interface",
+    "interfaces",
+    "types",
+    "test",
+    "tests",
+    "mock",
+}
+
 
 class FeatureEnricher:
     """Computes feature vectors for candidates."""
@@ -57,6 +151,12 @@ class FeatureEnricher:
 
         # Extract robust identifier terms (camel/snake/dot/punctuation-aware).
         query_terms = self._tokenize_name_terms(query)
+        broad_system_mode = self._is_broad_system_query(query)
+        central_terms = {
+            term
+            for term in query_terms
+            if len(term) >= 4 and term not in _QUERY_STOPWORDS
+        }
 
         features: dict[str, FeatureVector] = {}
 
@@ -85,6 +185,9 @@ class FeatureEnricher:
                 else None
             )
             callgraph_dist = self.graph_proximity.distance_to_score(distance)
+            broad_positive, broad_negative, public_symbol_hit = (
+                self._compute_broad_system_bias(candidate, central_terms, broad_system_mode)
+            )
 
             features[candidate.doc_id] = FeatureVector(
                 bm25_percentile=bm25_pct,
@@ -93,6 +196,9 @@ class FeatureEnricher:
                 is_entrypoint=is_entrypoint,
                 has_decorator=has_decorator,
                 callgraph_distance=callgraph_dist,
+                broad_system_positive=broad_positive,
+                broad_system_negative=broad_negative,
+                public_symbol_hit=public_symbol_hit,
             )
 
         return features
@@ -177,6 +283,53 @@ class FeatureEnricher:
         symbol_name = candidate.symbol_id.split(":")[-1] if ":" in candidate.symbol_id else candidate.symbol_id
         entrypoint_names = {"main", "run", "start", "entry", "init"}
         return symbol_name.lower() in entrypoint_names
+
+    def _is_broad_system_query(self, query: str) -> bool:
+        query_terms = self._tokenize_name_terms(query)
+        scope_hits = len(query_terms & _BROAD_SCOPE_MARKERS)
+        behavior_hits = len(query_terms & _BROAD_BEHAVIOR_MARKERS)
+        return (scope_hits >= 1 and behavior_hits >= 1) or (
+            behavior_hits >= 2 and len(query_terms) >= 8
+        )
+
+    def _compute_broad_system_bias(
+        self,
+        candidate: Candidate,
+        central_terms: set[str],
+        broad_system_mode: bool,
+    ) -> tuple[float, float, bool]:
+        if not broad_system_mode:
+            return 0.0, 0.0, False
+
+        symbol_name = candidate.symbol_name or ""
+        file_path = candidate.file or ""
+        path_terms = self._tokenize_name_terms(f"{file_path} {symbol_name}")
+        overlap = len(path_terms & central_terms) > 0 if central_terms else False
+
+        public_symbol_hit = bool(symbol_name and not symbol_name.split(".")[-1].startswith("_"))
+        private_symbol_hit = bool(symbol_name and symbol_name.split(".")[-1].startswith("_"))
+        architecture_hit = len(path_terms & _ARCHITECTURE_TERMS) > 0
+        utility_hit = len(path_terms & _UTILITY_TERMS) > 0
+        init_only = "__init__" in file_path.replace("\\", "/").lower()
+
+        positive = 0.0
+        negative = 0.0
+
+        if public_symbol_hit:
+            positive += 0.35
+        if architecture_hit:
+            positive += 0.40
+        if overlap:
+            positive += 0.25
+
+        if private_symbol_hit:
+            negative += 0.45
+        if utility_hit and not overlap:
+            negative += 0.35
+        if init_only and not overlap:
+            negative += 0.20
+
+        return min(1.0, positive), min(1.0, negative), public_symbol_hit
 
     def _has_decorator(self, candidate: Candidate) -> bool:
         """Check if candidate has decorators."""

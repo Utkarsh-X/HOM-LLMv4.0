@@ -29,6 +29,8 @@ class ScoreFusion:
             config.w_bm25 * features.bm25_percentile
             + config.w_dense * features.dense_percentile
             + config.w_name * features.name_match_score
+            + config.w_broad_system_positive * features.broad_system_positive
+            - config.w_broad_system_negative * features.broad_system_negative
         )
 
     def compute_struct_bonus(

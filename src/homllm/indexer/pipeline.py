@@ -10,6 +10,7 @@ Extended for entity-centric indexing (Plan A) with:
 import hashlib
 import json
 import logging
+import statistics
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
@@ -543,19 +544,15 @@ class IndexerPipeline:
             chunks_data = {
                 "version": INDEX_SCHEMA_VERSION,
                 "chunks": [
-                    {
-                        "chunk_id": c.chunk_id,
-                        "file_path": c.file_path,
-                        "granularity_level": c.granularity_level,
-                        "span_start": c.span_start,
-                        "span_end": c.span_end,
-                        "entity_ids": list(c.entity_ids),
-                        # Note: content is in DuckDB, not JSON artifact
-                    }
+                    self._build_chunk_artifact_entry(c)
                     for c in chunks
                 ],
             }
             self.fs_adapter.write_json("chunks.json", chunks_data)
+            self.fs_adapter.write_json(
+                "chunk_diagnostics.json",
+                self._build_chunk_diagnostics_artifact(chunks),
+            )
 
         # Write index scope manifest for corpus-integrity diagnostics.
         scope_data = {
@@ -567,6 +564,96 @@ class IndexerPipeline:
             "path_convention": "repo_relative_posix",
         }
         self.fs_adapter.write_json("index_scope.json", scope_data)
+
+    def _build_chunk_artifact_entry(self, chunk: ChunkInfo) -> dict:
+        """Build a JSON-safe chunk artifact entry with lightweight diagnostics."""
+        line_count = max(0, int(chunk.span_end) - int(chunk.span_start) + 1)
+        token_count = None
+        tokenizer = getattr(self.embedder, "tokenizer", None)
+        if tokenizer is not None:
+            try:
+                token_count = len(tokenizer.encode(chunk.content))
+            except Exception:
+                token_count = None
+        return {
+            "chunk_id": chunk.chunk_id,
+            "file_path": chunk.file_path,
+            "granularity_level": chunk.granularity_level,
+            "span_start": chunk.span_start,
+            "span_end": chunk.span_end,
+            "line_count": line_count,
+            "token_count": token_count,
+            "entity_ids": list(chunk.entity_ids),
+            # Note: content is in DuckDB, not JSON artifact
+        }
+
+    def _build_chunk_diagnostics_artifact(self, chunks: list[ChunkInfo]) -> dict:
+        """Summarize current index representation characteristics."""
+        by_granularity: dict[str, list[ChunkInfo]] = {"fine": [], "medium": [], "coarse": []}
+        for chunk in chunks:
+            by_granularity.setdefault(str(chunk.granularity_level), []).append(chunk)
+
+        def _stats(values: list[int]) -> dict:
+            if not values:
+                return {"count": 0, "min": 0, "max": 0, "mean": 0.0, "median": 0.0}
+            return {
+                "count": len(values),
+                "min": min(values),
+                "max": max(values),
+                "mean": round(float(sum(values)) / float(len(values)), 2),
+                "median": float(statistics.median(values)),
+            }
+
+        tokenizer = getattr(self.embedder, "tokenizer", None)
+        max_input_tokens = int(getattr(self.embedder, "_effective_max_input_tokens", 0) or 0)
+        token_counts: list[int] = []
+        near_limit = 0
+        granularity_summary = {}
+
+        for granularity, granularity_chunks in by_granularity.items():
+            line_counts = [
+                max(0, int(chunk.span_end) - int(chunk.span_start) + 1)
+                for chunk in granularity_chunks
+            ]
+            local_token_counts: list[int] = []
+            if tokenizer is not None:
+                for chunk in granularity_chunks:
+                    try:
+                        count = len(tokenizer.encode(chunk.content))
+                    except Exception:
+                        continue
+                    local_token_counts.append(count)
+                    token_counts.append(count)
+                    if max_input_tokens and count >= int(max_input_tokens * 0.95):
+                        near_limit += 1
+
+            granularity_summary[granularity] = {
+                "line_count": _stats(line_counts),
+                "token_count": _stats(local_token_counts),
+            }
+
+        all_line_counts = [
+            max(0, int(chunk.span_end) - int(chunk.span_start) + 1)
+            for chunk in chunks
+        ]
+        return {
+            "version": INDEX_SCHEMA_VERSION,
+            "chunk_max_lines": int(self.config.chunk_max_lines),
+            "embedding_max_tokens": max_input_tokens,
+            "total_chunks": len(chunks),
+            "unique_files": len({chunk.file_path for chunk in chunks}),
+            "granularity_counts": {
+                granularity: len(granularity_chunks)
+                for granularity, granularity_chunks in granularity_summary.items()
+                for granularity_chunks in [by_granularity.get(granularity, [])]
+            },
+            "all_chunks": {
+                "line_count": _stats(all_line_counts),
+                "token_count": _stats(token_counts),
+            },
+            "granularity_summary": granularity_summary,
+            "near_embedding_limit_count": near_limit,
+        }
 
     def _compute_scope_hash(self, files: list[FileInfo]) -> str:
         """Compute deterministic hash of the indexed corpus scope."""
