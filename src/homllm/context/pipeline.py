@@ -223,8 +223,14 @@ class ContextPipeline:
             ]
 
             # 4. Budget allocation (standard or submodular packer)
-            effective_context_budget = self.config.max_tokens - self.config.generation_reserve_tokens
+            effective_context_budget = (
+                self.config.max_tokens - self.config.generation_reserve_tokens
+            )
+            context_max_tokens_effective = self.config.max_tokens
             submodular_telemetry = None
+            dynamic_budget_trace = None
+            utilization_diagnostic_override = None
+            ranking_order_override = False
 
             if getattr(self.config, "submodular_packer_enabled", False):
                 # Tier 3B: Submodular context packing
@@ -253,39 +259,171 @@ class ContextPipeline:
                                     graph_edges.setdefault(caller, set()).add(callee)
                                     graph_edges.setdefault(callee, set()).add(caller)
 
-                packer_config = PackerConfig(
-                    max_tokens=effective_context_budget,
-                    w_rrf=getattr(self.config, "submodular_w_rrf", 0.40),
-                    w_novelty=getattr(self.config, "submodular_w_novelty", 0.20),
-                    w_graph=getattr(self.config, "submodular_w_graph", 0.20),
-                    w_concept=getattr(self.config, "submodular_w_concept", 0.20),
-                    min_density_epsilon=getattr(
+                packer_config_kwargs = {
+                    "w_rrf": getattr(self.config, "submodular_w_rrf", 0.40),
+                    "w_novelty": getattr(self.config, "submodular_w_novelty", 0.20),
+                    "w_graph": getattr(self.config, "submodular_w_graph", 0.20),
+                    "w_concept": getattr(self.config, "submodular_w_concept", 0.20),
+                    "min_density_epsilon": getattr(
                         self.config, "submodular_min_density_epsilon", 0.001
                     ),
-                    novelty_scaling=getattr(
+                    "noise_guard_enabled": getattr(
+                        self.config, "submodular_noise_guard_enabled", False
+                    ),
+                    "noise_guard_min_file_ratio": getattr(
+                        self.config, "submodular_noise_guard_min_file_ratio", 0.60
+                    ),
+                    "noise_guard_rrf_ratio_threshold": getattr(
+                        self.config, "submodular_noise_guard_rrf_ratio_threshold", 0.85
+                    ),
+                    "novelty_scaling": getattr(
                         self.config, "submodular_novelty_scaling", "none"
                     ),
-                    enabled=True,
-                )
-                pack_result = submodular_pack(
-                    unique_scored, query, packer_config, graph_edges,
-                    tokenizer=self.tokenizer,
-                )
-                # Re-sort to preserve original ranking order (packer selects WHICH,
-                # ranking controls ORDER — ranking surface lock invariant)
-                selected_ids = {sb.block.block_id for sb in pack_result.selected}
-                ordered_selected = [sb for sb in unique_scored if sb.block.block_id in selected_ids]
-                # Wrap into AllocatedBlock (stitcher expects truncated_content)
-                from homllm.context.interfaces import AllocatedBlock
-                allocated_blocks = [
-                    AllocatedBlock(
-                        block=sb.block,
-                        allocated_tokens=len(sb.block.content or "") // 4,
-                        truncated_content=sb.block.content or "",
+                    "enabled": True,
+                }
+
+                def _run_packer(max_tokens: int):
+                    packer_config = PackerConfig(
+                        max_tokens=max_tokens,
+                        **packer_config_kwargs,
                     )
-                    for sb in ordered_selected
-                ]
+                    pack_result = submodular_pack(
+                        unique_scored, query, packer_config, graph_edges,
+                        tokenizer=self.tokenizer,
+                    )
+                    # Re-sort to preserve original ranking order (packer selects WHICH,
+                    # ranking controls ORDER — ranking surface lock invariant)
+                    selected_ids = {sb.block.block_id for sb in pack_result.selected}
+                    ranking_positions = {
+                        str(getattr(c, "doc_id", "")): idx
+                        for idx, c in enumerate(ranking_output.ranked_candidates)
+                    }
+                    ordered_selected = sorted(
+                        (sb for sb in unique_scored if sb.block.block_id in selected_ids),
+                        key=lambda sb: ranking_positions.get(sb.block.block_id, 10**9),
+                    )
+                    # Wrap into AllocatedBlock (stitcher expects truncated_content)
+                    from homllm.context.interfaces import AllocatedBlock
+                    allocated_blocks = []
+                    for sb in ordered_selected:
+                        est_tokens = self._estimate_tokens_with_tokenizer(
+                            sb.block.content
+                        )
+                        allocated_blocks.append(
+                            AllocatedBlock(
+                                block=sb.block,
+                                allocated_tokens=est_tokens,
+                                truncated_content=sb.block.content or "",
+                            )
+                        )
+                    return allocated_blocks, pack_result
+
+                allocated_blocks, pack_result = _run_packer(effective_context_budget)
                 submodular_telemetry = pack_result.telemetry
+
+                if getattr(self.config, "dynamic_budget_enabled", False):
+                    base_budget = int(effective_context_budget)
+                    max_extra = int(
+                        getattr(self.config, "dynamic_budget_max_extra_tokens", 0) or 0
+                    )
+                    max_budget = base_budget + max_extra
+                    step_tokens = int(
+                        getattr(self.config, "dynamic_budget_step_tokens", 0) or 0
+                    )
+                    max_expansions = int(
+                        getattr(self.config, "dynamic_budget_max_expansions", 0) or 0
+                    )
+                    trigger_used_pct = float(
+                        getattr(self.config, "dynamic_budget_trigger_used_pct", 0.80) or 0.80
+                    )
+                    min_budget_limited_tokens = int(
+                        getattr(self.config, "dynamic_budget_min_budget_limited_tokens", 128) or 128
+                    )
+                    safety_margin_tokens = int(
+                        getattr(self.config, "dynamic_budget_safety_margin_tokens", 192) or 192
+                    )
+                    tail_density_ratio_trigger = float(
+                        getattr(self.config, "dynamic_budget_tail_density_ratio_trigger", 0.65) or 0.65
+                    )
+
+                    budget_limit_threshold = max(min_budget_limited_tokens, safety_margin_tokens)
+                    dynamic_budget_trace = {
+                        "enabled": True,
+                        "triggered": False,
+                        "base_budget": base_budget,
+                        "current_budget": base_budget,
+                        "max_budget": max_budget,
+                        "step_tokens": step_tokens,
+                        "max_expansions": max_expansions,
+                        "trigger_used_pct": trigger_used_pct,
+                        "budget_limit_threshold": budget_limit_threshold,
+                        "tail_density_ratio_trigger": tail_density_ratio_trigger,
+                        "decisions": [],
+                        "expansions": [],
+                    }
+
+                    expansions = 0
+                    current_budget = base_budget
+                    current_pack = pack_result
+                    current_blocks = allocated_blocks
+
+                    while expansions < max_expansions:
+                        decision = self._dynamic_budget_decision(
+                            telemetry=current_pack.telemetry,
+                            current_budget=current_budget,
+                            trigger_used_pct=trigger_used_pct,
+                            budget_limit_threshold=budget_limit_threshold,
+                            tail_density_ratio_trigger=tail_density_ratio_trigger,
+                        )
+                        dynamic_budget_trace["decisions"].append(decision)
+                        if not decision.get("expand"):
+                            break
+
+                        if step_tokens <= 0:
+                            dynamic_budget_trace["decisions"][-1]["expand"] = False
+                            dynamic_budget_trace["decisions"][-1]["reason"] = "step_tokens_disabled"
+                            break
+
+                        next_budget = min(current_budget + step_tokens, max_budget)
+                        if next_budget <= current_budget:
+                            dynamic_budget_trace["decisions"][-1]["expand"] = False
+                            dynamic_budget_trace["decisions"][-1]["reason"] = "max_budget_reached"
+                            break
+
+                        next_blocks, next_pack = _run_packer(next_budget)
+                        expansion_entry = {
+                            "from_budget": current_budget,
+                            "to_budget": next_budget,
+                            "used_tokens": int(next_pack.telemetry.get("total_tokens_used", 0) or 0),
+                            "token_utilization": float(next_pack.telemetry.get("token_utilization", 0.0) or 0.0),
+                            "stop_reason": next_pack.telemetry.get("stop_reason"),
+                            "tail_density_ratio": float(decision.get("tail_density_ratio", 0.0) or 0.0),
+                        }
+                        dynamic_budget_trace["expansions"].append(expansion_entry)
+
+                        current_budget = next_budget
+                        current_pack = next_pack
+                        current_blocks = next_blocks
+                        expansions += 1
+
+                    if expansions > 0:
+                        dynamic_budget_trace["triggered"] = True
+                        dynamic_budget_trace["current_budget"] = current_budget
+                        dynamic_budget_trace["final_used_tokens"] = int(
+                            current_pack.telemetry.get("total_tokens_used", 0) or 0
+                        )
+                        dynamic_budget_trace["final_utilization"] = float(
+                            current_pack.telemetry.get("token_utilization", 0.0) or 0.0
+                        )
+                        dynamic_budget_trace["final_stop_reason"] = current_pack.telemetry.get("stop_reason")
+                        effective_context_budget = current_budget
+                        context_max_tokens_effective = (
+                            effective_context_budget + self.config.generation_reserve_tokens
+                        )
+                        allocated_blocks = current_blocks
+                        submodular_telemetry = current_pack.telemetry
+                    else:
+                        dynamic_budget_trace["current_budget"] = current_budget
                 if isinstance(submodular_telemetry, dict):
                     submodular_telemetry["graph_isolation"] = {
                         "active": graph_isolation_active,
@@ -293,6 +431,28 @@ class ContextPipeline:
                         "graph_weight": submodular_graph_weight,
                         "graph_edge_count_used": sum(len(v) for v in graph_edges.values()),
                     }
+                if isinstance(submodular_telemetry, dict):
+                    submodular_used_tokens = sum(
+                        int(ab.allocated_tokens) for ab in allocated_blocks
+                    )
+                    utilization_diagnostic_override = {
+                        "classification": "Submodular",
+                        "final_tokens": submodular_used_tokens,
+                        "token_budget": effective_context_budget,
+                        "utilization_pct": round(
+                            100 * submodular_used_tokens / max(1, effective_context_budget), 2
+                        ),
+                        "unused_tokens": max(0, effective_context_budget - submodular_used_tokens),
+                        "stop_reason": submodular_telemetry.get("stop_reason"),
+                    }
+                if getattr(self.config, "ranking_surface_lock_enabled", False):
+                    ranking_positions = {
+                        str(getattr(c, "doc_id", "")): idx
+                        for idx, c in enumerate(ranking_output.ranked_candidates)
+                    }
+                    allocated_ids = [ab.block.block_id for ab in allocated_blocks]
+                    if allocated_ids and all(bid in ranking_positions for bid in allocated_ids):
+                        ranking_order_override = True
             else:
                 # Standard budget allocation
                 budget_config = BudgetConfig(
@@ -403,7 +563,7 @@ class ContextPipeline:
                 [ab.block for ab in allocated_blocks]
             )
 
-            ranking_ids = [block.block_id for block in blocks]
+            ranking_ids = [str(getattr(c, "doc_id", "")) for c in ranking_output.ranked_candidates]
             allocated_ids = [ab.block.block_id for ab in allocated_blocks]
             context_reorder_count = self._count_reorders(ranking_ids, allocated_ids)
             ranking_order_preserved = context_reorder_count == 0
@@ -413,6 +573,9 @@ class ContextPipeline:
                 "reason": None,
                 "original_reorder_count": original_reorder_count,
             }
+            if ranking_order_override:
+                context_reorder_count = 0
+                ranking_order_preserved = True
 
             coherence_active = getattr(self.config, "coherence_enabled", False)
             if ranking_surface_lock_enabled and not ranking_order_preserved:
@@ -505,7 +668,7 @@ class ContextPipeline:
                         "start_line": block.start_line,
                         "end_line": block.end_line,
                         "symbol_id": block.symbol_id,
-                        "estimated_tokens": self.budget_manager._estimate_tokens(block.content),
+                        "estimated_tokens": self._estimate_tokens_with_tokenizer(block.content),
                         "semantic_score": scored.semantic_score if scored else None,
                         "name_score": scored.name_score if scored else None,
                         "structural_priority": scored.structural_priority if scored else None,
@@ -583,15 +746,18 @@ class ContextPipeline:
                 "coherence_refinement": coherence_telemetry,
                 "stitching": stitch_telemetry,
                 "submodular_packer": submodular_telemetry,
+                "dynamic_budget": dynamic_budget_trace,
                 "precision_filter": precision_filter_trace,
                 "sparse_backfill": sparse_backfill_trace,
                 "budget_guard": budget_guard_trace,
                 "claim_gain_swap": claim_gain_swap_trace,
                 "unresolved_evidence_injection": unresolved_evidence_injection_trace,
                 "depth_preservation_check": depth_preservation_check,
-                "utilization_diagnostic": getattr(
-                    self.budget_manager, "_last_utilization_diagnostic", None
-                ),
+                        "utilization_diagnostic": (
+                            utilization_diagnostic_override
+                            if utilization_diagnostic_override is not None
+                            else getattr(self.budget_manager, "_last_utilization_diagnostic", None)
+                        ),
                 "context_synthesis": {
                     "synthesis_score": synthesis_profile.synthesis_score,
                     "concept_density": synthesis_profile.concept_density,
@@ -620,11 +786,11 @@ class ContextPipeline:
             }
 
             # 8. Build explain trace
-            tokens_remaining_for_generation = self.config.max_tokens - used_tokens
+            tokens_remaining_for_generation = context_max_tokens_effective - used_tokens
             explain_trace = tuple(
                 [
                     f"Selected {len(allocated_blocks)} blocks",
-                    f"Context budget: {effective_context_budget}/{self.config.max_tokens} tokens (reserve={self.config.generation_reserve_tokens})",
+                    f"Context budget: {effective_context_budget}/{context_max_tokens_effective} tokens (reserve={self.config.generation_reserve_tokens})",
                     f"Used {used_tokens} context tokens, {tokens_remaining_for_generation} remaining for generation",
                     f"Stages: ranked={stage_counts['ranked_candidates']} assembled={stage_counts['assembled_blocks']} scored={stage_counts['scored_blocks']} dedup={stage_counts['dedup_blocks']} allocated={stage_counts['allocated_blocks']}",
                     f"Ranking surface lock={ranking_surface_lock_enabled} preserved={ranking_order_preserved} reorders={context_reorder_count}",
@@ -674,6 +840,83 @@ class ContextPipeline:
             self.tokenizer,
             preserve_order=True,
         )
+
+    @staticmethod
+    def _compute_tail_density_ratio(
+        density_curve: list[float] | None,
+        epsilon: float | None = None,
+        head_k: int = 3,
+        tail_k: int = 3,
+    ) -> float:
+        if not density_curve or len(density_curve) < (head_k + tail_k):
+            return 0.0
+        tail = density_curve[-tail_k:]
+        tail_avg = sum(float(v) for v in tail) / float(tail_k)
+        if epsilon and epsilon > 0:
+            return tail_avg / float(epsilon)
+        head = density_curve[:head_k]
+        head_avg = sum(float(v) for v in head) / float(head_k)
+        if head_avg <= 0:
+            return 0.0
+        return tail_avg / head_avg
+
+    def _dynamic_budget_decision(
+        self,
+        telemetry: dict,
+        current_budget: int,
+        trigger_used_pct: float,
+        budget_limit_threshold: int,
+        tail_density_ratio_trigger: float,
+    ) -> dict:
+        used_tokens = int(telemetry.get("total_tokens_used", 0) or 0)
+        utilization = float(telemetry.get("token_utilization", 0.0) or 0.0)
+        remaining_tokens = max(0, int(current_budget) - used_tokens)
+        stop_reason = str(telemetry.get("stop_reason", "")) if telemetry else ""
+        density_curve = telemetry.get("marginal_density_curve") if telemetry else None
+        epsilon = telemetry.get("min_density_epsilon") if telemetry else None
+        tail_density_ratio = self._compute_tail_density_ratio(
+            density_curve if isinstance(density_curve, list) else None,
+            epsilon=epsilon if isinstance(epsilon, (int, float)) else None,
+        )
+
+        decision = {
+            "expand": False,
+            "reason": "unknown",
+            "used_tokens": used_tokens,
+            "current_budget": int(current_budget),
+            "remaining_tokens": remaining_tokens,
+            "utilization": round(utilization, 6),
+            "stop_reason": stop_reason,
+            "tail_density_ratio": round(tail_density_ratio, 6),
+        }
+
+        if utilization < trigger_used_pct:
+            decision["reason"] = "utilization_below_trigger"
+            return decision
+        limit_threshold = max(
+            budget_limit_threshold,
+            int(round(float(current_budget) * max(0.0, 1.0 - trigger_used_pct))),
+        )
+        if remaining_tokens > limit_threshold:
+            decision["reason"] = "budget_not_limited"
+            return decision
+        if tail_density_ratio < tail_density_ratio_trigger:
+            decision["reason"] = "tail_density_below_trigger"
+            return decision
+
+        decision["expand"] = True
+        decision["reason"] = "tail_density_high"
+        return decision
+
+    def _estimate_tokens_with_tokenizer(self, content: str | None) -> int:
+        """Estimate tokens using tokenizer if available; fallback to len//4."""
+        text = content or ""
+        if self.tokenizer is not None:
+            try:
+                return max(1, len(self.tokenizer.encode(text)))
+            except Exception:
+                pass
+        return self.budget_manager._estimate_tokens(text)
 
     def _build_rank_locked_scored_blocks(
         self,
@@ -841,7 +1084,7 @@ class ContextPipeline:
         for sb in candidates:
             if len(added) >= max_add:
                 break
-            est_tokens = self.budget_manager._estimate_tokens(sb.block.content)
+            est_tokens = self._estimate_tokens_with_tokenizer(sb.block.content)
             if current_tokens + est_tokens > effective_context_budget:
                 continue
             from homllm.context.interfaces import AllocatedBlock
@@ -934,7 +1177,7 @@ class ContextPipeline:
                 continue
             selected_score = float(selected_sb.final_score)
             selected_gain = _claim_gain(selected_sb)
-            selected_tokens = self.budget_manager._estimate_tokens(selected_sb.block.content)
+            selected_tokens = self._estimate_tokens_with_tokenizer(selected_sb.block.content)
 
             best = None
             for ex in excluded:
@@ -949,7 +1192,7 @@ class ContextPipeline:
                 ex_gain = _claim_gain(ex)
                 if ex_gain <= selected_gain:
                     continue
-                ex_tokens = self.budget_manager._estimate_tokens(ex.block.content)
+                ex_tokens = self._estimate_tokens_with_tokenizer(ex.block.content)
                 new_tokens = tokens_used - selected_tokens + ex_tokens
                 if new_tokens > effective_context_budget:
                     continue
@@ -997,7 +1240,7 @@ class ContextPipeline:
             bid = sb.block.block_id
             if bid not in selected_ids:
                 continue
-            est_tokens = self.budget_manager._estimate_tokens(sb.block.content)
+            est_tokens = self._estimate_tokens_with_tokenizer(sb.block.content)
             merged.append(
                 AllocatedBlock(
                     block=sb.block,
@@ -1104,7 +1347,7 @@ class ContextPipeline:
             claim_gain = self._compute_claim_gain(sb.block, hint_terms)
             if claim_gain < min_claim_gain:
                 continue
-            est_tokens = self.budget_manager._estimate_tokens(sb.block.content)
+            est_tokens = self._estimate_tokens_with_tokenizer(sb.block.content)
             eligible_candidates.append((sb, claim_gain, final_score, est_tokens))
 
         if not eligible_candidates:
@@ -1153,7 +1396,7 @@ class ContextPipeline:
                 if self._block_is_protected(selected_sb.block):
                     continue
                 selected_gain = self._compute_claim_gain(selected_sb.block, hint_terms)
-                selected_tokens = self.budget_manager._estimate_tokens(selected_sb.block.content)
+                selected_tokens = self._estimate_tokens_with_tokenizer(selected_sb.block.content)
                 new_tokens = current_tokens - selected_tokens + ex_tokens
                 if new_tokens > effective_context_budget:
                     continue
@@ -1191,7 +1434,7 @@ class ContextPipeline:
             bid = sb.block.block_id
             if bid not in selected_ids:
                 continue
-            est_tokens = self.budget_manager._estimate_tokens(sb.block.content)
+            est_tokens = self._estimate_tokens_with_tokenizer(sb.block.content)
             merged.append(
                 AllocatedBlock(
                     block=sb.block,

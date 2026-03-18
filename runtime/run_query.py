@@ -569,6 +569,13 @@ def _write_retrieval_diagnostics_artifact(
         "graph_stitch_status_detail": metadata.get("graph_stitch_status_detail"),
         "query_expansion_enabled": metadata.get("query_expansion_enabled"),
         "query_expansion_terms": metadata.get("query_expansion_terms"),
+        "bm25_relaxed_used": metadata.get("bm25_relaxed_used"),
+        "bm25_relaxed_term_count": metadata.get("bm25_relaxed_term_count"),
+        "bm25_original_term_count": metadata.get("bm25_original_term_count"),
+        "coverage_recovery_added": metadata.get("coverage_recovery_added"),
+        "coverage_recovery_cap": metadata.get("coverage_recovery_cap"),
+        "coverage_recovery_missing_domains": metadata.get("coverage_recovery_missing_domains"),
+        "coverage_recovery_domains_considered": metadata.get("coverage_recovery_domains_considered"),
         "effective_bm25_top_k": metadata.get("effective_bm25_top_k"),
         "effective_vector_top_k": metadata.get("effective_vector_top_k"),
         "effective_post_merge_candidates": metadata.get("effective_post_merge_candidates"),
@@ -676,7 +683,13 @@ def _merge_recovery_candidates(base_candidates, focused_candidates):
     for cand in focused_candidates:
         focused_doc_ids.add(cand.doc_id)
         prev = merged_map.get(cand.doc_id)
-        next_cand = replace(cand, provenance=tuple(cand.provenance) + ("focused_recovery",))
+        # Modest boost so recovery candidates are not drowned out by coarse context.
+        boosted_score = float(cand.hybrid_score) * 1.15
+        next_cand = replace(
+            cand,
+            hybrid_score=boosted_score,
+            provenance=tuple(cand.provenance) + ("focused_recovery",),
+        )
         if prev is None or float(next_cand.hybrid_score) > float(prev.hybrid_score):
             merged_map[cand.doc_id] = next_cand
     merged_candidates = list(merged_map.values())
@@ -1192,6 +1205,17 @@ def main():
             query_expansion_enabled=retrieval_result.metadata.get("query_expansion_enabled"),
             query_expansion_term_count=retrieval_result.metadata.get("query_expansion_term_count"),
             query_expansion_terms=",".join(retrieval_result.metadata.get("query_expansion_terms", [])),
+            bm25_relaxed_used=retrieval_result.metadata.get("bm25_relaxed_used"),
+            bm25_relaxed_term_count=retrieval_result.metadata.get("bm25_relaxed_term_count"),
+            bm25_original_term_count=retrieval_result.metadata.get("bm25_original_term_count"),
+            coverage_recovery_added=retrieval_result.metadata.get("coverage_recovery_added"),
+            coverage_recovery_cap=retrieval_result.metadata.get("coverage_recovery_cap"),
+            coverage_recovery_missing_domains=retrieval_result.metadata.get(
+                "coverage_recovery_missing_domains"
+            ),
+            coverage_recovery_domains_considered=retrieval_result.metadata.get(
+                "coverage_recovery_domains_considered"
+            ),
             retrieval_candidate_order_top20=",".join(retrieval_candidate_order_top20),
             graph_stitch_status=retrieval_result.metadata.get("graph_stitch_status"),
             graph_stitch_status_detail=retrieval_result.metadata.get("graph_stitch_status_detail"),
@@ -1295,7 +1319,16 @@ def main():
             tokens=context_artifact.used_tokens,
             token_budget=context_artifact.token_budget,
             generation_reserve=context_config.generation_reserve_tokens,
-            tokens_remaining=context_config.max_tokens - context_artifact.used_tokens,
+            tokens_remaining=(
+                context_artifact.token_budget + context_config.generation_reserve_tokens
+            )
+            - context_artifact.used_tokens,
+            dynamic_budget_triggered=(
+                (context_artifact.provenance.get("dynamic_budget") or {}).get("triggered")
+            ),
+            dynamic_budget_current_budget=(
+                (context_artifact.provenance.get("dynamic_budget") or {}).get("current_budget")
+            ),
             ranking_surface_lock_enabled=context_artifact.provenance.get(
                 "ranking_surface_lock_enabled"
             ),
@@ -1304,6 +1337,9 @@ def main():
             ),
             context_reorder_count=context_artifact.provenance.get(
                 "context_reorder_count"
+            ),
+            ranking_authority_fallback=context_artifact.provenance.get(
+                "ranking_authority_fallback"
             ),
             stage_counts=context_artifact.provenance.get("stage_counts"),
             drop_trace=context_artifact.provenance.get("context_drop_trace"),

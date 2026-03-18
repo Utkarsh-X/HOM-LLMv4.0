@@ -234,6 +234,51 @@ def _query_requests_examples(query: str) -> bool:
     return any(marker in q for marker in ("example", "for instance", "e.g.", "when to use"))
 
 
+def _query_mentions_named_rules(query: str) -> bool:
+    q = query or ""
+    return bool(
+        re.search(r"\b[A-Z][A-Z0-9_]{2,}\b", q)
+        or re.search(r"\b[a-z]+_[a-z0-9_]+\b", q)
+    )
+
+
+def _query_requests_numeric_mechanism(query: str) -> bool:
+    q = (query or "").lower()
+    markers = (
+        "formula",
+        "score",
+        "scores",
+        "similarity",
+        "cosine",
+        "nan",
+        "percentile",
+        "percentiles",
+        "p50",
+        "p95",
+        "p99",
+        "dimension",
+        "mismatch",
+        "weights",
+    )
+    return any(marker in q for marker in markers)
+
+
+def _query_requests_interface_exactness(query: str) -> bool:
+    q = (query or "").lower()
+    exactness_markers = (
+        "serialize",
+        "deserial",
+        "json",
+        "pickle",
+        "storage",
+        "serializer",
+        "retries",
+        "retry",
+    )
+    hit_count = sum(1 for marker in exactness_markers if marker in q)
+    return hit_count >= 2
+
+
 def classify_query_shape(query: str, claim_packet=None) -> str:
     q = (query or "").strip().lower()
     if not q:
@@ -325,6 +370,9 @@ def build_answer_shape_contract(
     has_cost_evidence = _context_mentions_any(context_artifact, ("cost", "estimate", "estimated"))
     query_requests_configuration = _query_requests_configuration(query)
     query_requests_examples = _query_requests_examples(query)
+    query_mentions_named_rules = _query_mentions_named_rules(query)
+    query_requests_numeric_mechanism = _query_requests_numeric_mechanism(query)
+    query_requests_interface_exactness = _query_requests_interface_exactness(query)
 
     enforcement_parts: list[str] = [
         "EVIDENCE ANCHOR RULE:\n"
@@ -480,6 +528,32 @@ def build_answer_shape_contract(
                 "## Why That Outcome Happens",
                 "## Compact Example",
             ]
+        )
+
+    if query_mentions_named_rules:
+        enforcement_parts.append(
+            "NAMED MECHANISM EXACTNESS RULE:\n"
+            "- If the query names concrete rules, methods, or components, map each named item to the exact observed method or behavior in the retrieved context.\n"
+            "- Describe the observed transformation or ordering from code, not the generic textbook meaning of the name.\n"
+            "- If the retrieved code shows a narrower implementation than the conventional definition, answer with the narrower implementation.\n"
+            "- Do not upgrade a literal check, sort, or helper branch into a more general algorithm unless the code explicitly shows that algorithm.\n"
+        )
+
+    if query_requests_numeric_mechanism:
+        enforcement_parts.append(
+            "NUMERIC MECHANISM RULE:\n"
+            "- For numeric, scoring, or NaN-style questions, explain the underlying formula or numeric cause first when the context supports it.\n"
+            "- Then explain how the code detects, combines, filters, clamps, or reports that numeric behavior.\n"
+            "- If an exact formula is not shown, say that directly and stay with the observed code path instead of inventing one.\n"
+            "- Do not substitute only operational handling when the query explicitly asks what causes the numeric outcome.\n"
+        )
+
+    if query_requests_interface_exactness:
+        enforcement_parts.append(
+            "INTERFACE EXACTNESS RULE:\n"
+            "- For storage, serialization, or retry questions, prefer the concrete public API surface, explicit parameters, branches, and key formats shown in context.\n"
+            "- Do not invent hidden helper methods, automatic fallback layers, or internal serializer abstractions unless they are directly shown.\n"
+            "- If retries or fallback behavior are not implemented in the shown interface, say that explicitly instead of describing a typical design.\n"
         )
 
     unique_sections: list[str] = []

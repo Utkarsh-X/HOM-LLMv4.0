@@ -106,6 +106,18 @@ class ContextConfig:
     submodular_w_concept: float = 0.20
     submodular_min_density_epsilon: float = 0.001
     submodular_novelty_scaling: str = "none"  # "none" or "file_concentration"
+    submodular_noise_guard_enabled: bool = False
+    submodular_noise_guard_min_file_ratio: float = 0.60
+    submodular_noise_guard_rrf_ratio_threshold: float = 0.85
+    # Tier 3B: Dynamic budget expansion (optional)
+    dynamic_budget_enabled: bool = False
+    dynamic_budget_trigger_used_pct: float = 0.80
+    dynamic_budget_min_budget_limited_tokens: int = 128
+    dynamic_budget_safety_margin_tokens: int = 192
+    dynamic_budget_step_tokens: int = 400
+    dynamic_budget_max_expansions: int = 2
+    dynamic_budget_max_extra_tokens: int = 1200
+    dynamic_budget_tail_density_ratio_trigger: float = 0.65
     # Tier 3B: Relevance safety guard
     relevance_gate_enabled: bool = False
     relevance_gate_threshold: float = 0.25

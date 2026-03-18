@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 # Keys match Intent enum values: EXPLAIN, IMPLEMENT, REFACTOR, DEBUG, SEARCH, UNKNOWN
 DEFAULT_GRANULARITY_BOOST_TABLE: dict[str, dict[str, float]] = {
     "EXPLAIN": {
-        "coarse": 2.0,
+        "coarse": 1.5,
         "medium": 1.5,
         "fine": 1.0,
     },

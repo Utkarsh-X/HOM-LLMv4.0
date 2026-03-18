@@ -74,7 +74,23 @@ class BM25Retriever:
 
         try:
             # Search Tantivy index
+            terms = [t for t in query.split() if t]
             results = self._tantivy.search(query, top_k)
+            relaxed_used = False
+            relaxed_term_count = 0
+            if not results and query:
+                relaxed_terms = terms[:12]
+                if len(relaxed_terms) > 1:
+                    relaxed_query = " OR ".join(relaxed_terms)
+                    if relaxed_query and relaxed_query != query:
+                        results = self._tantivy.search(relaxed_query, top_k)
+                        relaxed_used = True
+                        relaxed_term_count = len(relaxed_terms)
+            self.last_search_meta = {
+                "relaxed_used": relaxed_used,
+                "relaxed_term_count": relaxed_term_count,
+                "original_term_count": len(terms),
+            }
             candidate_data_by_id: dict[str, Optional[dict]] = {}
             if self._duckdb and results:
                 try:

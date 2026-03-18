@@ -46,6 +46,10 @@ class PackerConfig:
 
     # Stopping
     min_density_epsilon: float = 0.001
+    # Experimental noise guard (off by default)
+    noise_guard_enabled: bool = False
+    noise_guard_min_file_ratio: float = 0.60
+    noise_guard_rrf_ratio_threshold: float = 0.85
 
     # Tier 3C: Novelty scaling mode
     # - "none": fixed novelty weight
@@ -160,6 +164,8 @@ def submodular_pack(
     epsilon_guard_triggered = False
     epsilon_guard_trigger_count = 0
     epsilon_guard_last_remaining_rrf_ratio = 0.0
+    noise_guard_triggered = False
+    noise_guard_trigger_count = 0
 
     total_rrf_component = 0.0
     total_novelty_component = 0.0
@@ -290,7 +296,22 @@ def submodular_pack(
         )
 
         epsilon_guard_forced_this_step = False
+        noise_guard_forced_this_step = False
         if best_density + _FP_COMPARISON_EPS < _normalize_fp(config.min_density_epsilon):
+            if (
+                config.noise_guard_enabled
+                and best_concept_gain <= 0.0
+                and best_graph_gain <= 0.0
+                and best_top_file_ratio >= config.noise_guard_min_file_ratio
+                and epsilon_guard_last_remaining_rrf_ratio < config.noise_guard_rrf_ratio_threshold
+            ):
+                noise_guard_forced_this_step = True
+                noise_guard_triggered = True
+                noise_guard_trigger_count += 1
+                stop_reason = "noise_guard"
+                epsilon_stop_step = len(selected) + 1
+                density_at_stop = best_density
+                break
             if epsilon_guard_last_remaining_rrf_ratio >= _EPSILON_GUARD_RRF_RATIO:
                 epsilon_guard_forced_this_step = True
                 epsilon_guard_triggered = True
@@ -340,6 +361,7 @@ def submodular_pack(
                 "marginal_utility": round(best_utility, 6),
                 "marginal_density": round(best_density, 6),
                 "epsilon_guard_forced": epsilon_guard_forced_this_step,
+                "noise_guard_forced": noise_guard_forced_this_step,
             }
         )
 
@@ -434,6 +456,14 @@ def submodular_pack(
             "rrf_ratio_threshold": _EPSILON_GUARD_RRF_RATIO,
             "triggered": epsilon_guard_triggered,
             "trigger_count": epsilon_guard_trigger_count,
+            "remaining_max_rrf_ratio_at_stop": round(epsilon_guard_last_remaining_rrf_ratio, 6),
+        },
+        "noise_guard": {
+            "enabled": config.noise_guard_enabled,
+            "min_file_ratio": config.noise_guard_min_file_ratio,
+            "rrf_ratio_threshold": config.noise_guard_rrf_ratio_threshold,
+            "triggered": noise_guard_triggered,
+            "trigger_count": noise_guard_trigger_count,
             "remaining_max_rrf_ratio_at_stop": round(epsilon_guard_last_remaining_rrf_ratio, 6),
         },
         "novelty_penalty_distribution": novelty_penalty_distribution,

@@ -160,6 +160,7 @@ class Config(BaseModel):
         expansion_cfg = ret_cfg.get("expansion", {})
         static_ceiling_cfg = ret_cfg.get("static_ceiling_experiment", {})
         precision_recovery_cfg = ret_cfg.get("precision_recovery", {})
+        coverage_recovery_cfg = ret_cfg.get("coverage_recovery", {})
         
         # Plan B config sections
         diversity_mmr_cfg = ret_cfg.get("diversity_mmr", {})
@@ -217,6 +218,10 @@ class Config(BaseModel):
             query_expansion_max_terms=query_expansion_cfg.get("max_terms", 6),
             query_expansion_min_token_length=query_expansion_cfg.get("min_token_length", 3),
             query_expansion_synonyms=query_expansion_cfg.get("synonyms", {}),
+            coverage_recovery_enabled=coverage_recovery_cfg.get("enabled", False),
+            coverage_recovery_max_additions=coverage_recovery_cfg.get("max_additions", 3),
+            coverage_recovery_max_ratio=coverage_recovery_cfg.get("max_ratio", 0.1),
+            coverage_recovery_bm25_top_k=coverage_recovery_cfg.get("bm25_top_k", 6),
             
             # Plan B: Retrieval Layer Activation
             plan_b_enabled=ret_cfg.get("plan_b_enabled", True),
@@ -429,8 +434,40 @@ class Config(BaseModel):
             submodular_min_density_epsilon=submodular_cfg.get(
                 "min_density_epsilon", 0.001
             ),
+            submodular_noise_guard_enabled=submodular_cfg.get(
+                "noise_guard_enabled", False
+            ),
+            submodular_noise_guard_min_file_ratio=submodular_cfg.get(
+                "noise_guard_min_file_ratio", 0.60
+            ),
+            submodular_noise_guard_rrf_ratio_threshold=submodular_cfg.get(
+                "noise_guard_rrf_ratio_threshold", 0.85
+            ),
             submodular_novelty_scaling=submodular_cfg.get(
                 "novelty_scaling", "none"
+            ),
+            # Tier 3B: Dynamic budget expansion
+            dynamic_budget_enabled=ctx_cfg.get("dynamic_budget_enabled", False),
+            dynamic_budget_trigger_used_pct=ctx_cfg.get(
+                "dynamic_budget_trigger_used_pct", 0.80
+            ),
+            dynamic_budget_min_budget_limited_tokens=ctx_cfg.get(
+                "dynamic_budget_min_budget_limited_tokens", 128
+            ),
+            dynamic_budget_safety_margin_tokens=ctx_cfg.get(
+                "dynamic_budget_safety_margin_tokens", 192
+            ),
+            dynamic_budget_step_tokens=ctx_cfg.get(
+                "dynamic_budget_step_tokens", 400
+            ),
+            dynamic_budget_max_expansions=ctx_cfg.get(
+                "dynamic_budget_max_expansions", 2
+            ),
+            dynamic_budget_max_extra_tokens=ctx_cfg.get(
+                "dynamic_budget_max_extra_tokens", 1200
+            ),
+            dynamic_budget_tail_density_ratio_trigger=ctx_cfg.get(
+                "dynamic_budget_tail_density_ratio_trigger", 0.65
             ),
             # Tier 3B: Relevance gate
             relevance_gate_enabled=ctx_cfg.get("relevance_gate_enabled", False),

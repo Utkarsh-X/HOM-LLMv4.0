@@ -299,6 +299,9 @@ context:
     w_concept: 0.15
     min_density_epsilon: 0.0003
     novelty_scaling: file_concentration
+    noise_guard_enabled: false
+    noise_guard_min_file_ratio: 0.60
+    noise_guard_rrf_ratio_threshold: 0.85
   # Tier 3B: Relevance safety guard
   relevance_gate_enabled: true
   relevance_gate_threshold: 0.25

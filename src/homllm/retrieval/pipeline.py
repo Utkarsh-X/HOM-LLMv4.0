@@ -32,6 +32,7 @@ from homllm.retrieval.interfaces import (
     StructuralExpander,
 )
 from homllm.retrieval.precision_recovery import PrecisionRecovery
+from homllm.retrieval.coverage_recovery import CoverageRecovery
 from homllm.retrieval.preparer import SimpleQueryPreparer
 from homllm.retrieval.vector import VectorRetriever
 
@@ -122,6 +123,10 @@ class RetrievalPipeline:
         
         # Initialize precision recovery
         self.precision_recovery = PrecisionRecovery(
+            self.bm25_retriever, self.vector_retriever
+        )
+        # Initialize coverage recovery
+        self.coverage_recovery = CoverageRecovery(
             self.bm25_retriever, self.vector_retriever
         )
         
@@ -253,6 +258,7 @@ class RetrievalPipeline:
             search_mode = "sequential"
             lexical_query = " ".join(prepared.lexical_terms)
 
+            bm25_runner = self.bm25_retriever
             if self.config.parallel_search_enabled:
                 bm25_runner, vector_runner, search_mode = self._resolve_parallel_search_runners()
                 with ThreadPoolExecutor(max_workers=2) as executor:
@@ -281,6 +287,7 @@ class RetrievalPipeline:
                     prepared.dense_query,
                     effective_vector_top_k,
                 )
+            bm25_meta = getattr(bm25_runner, "last_search_meta", None)
 
             # If both failed, return empty result
             if not bm25_results and not vector_results:
@@ -401,6 +408,27 @@ class RetrievalPipeline:
                     precision_metrics.get("precision_recovery_conf_mean"),
                 )
 
+            # 5B. Coverage recovery (missing domain coverage)
+            cov_start = time.perf_counter()
+            merged = self.coverage_recovery.recover(
+                merged,
+                query,
+                prepared.lexical_terms,
+                self.config,
+                max_additions=self.config.coverage_recovery_max_additions,
+            )
+            coverage_ms = (time.perf_counter() - cov_start) * 1000
+            coverage_metrics = getattr(self.coverage_recovery, "last_metrics", {})
+            count_after_coverage = len(merged)
+            if coverage_metrics.get("coverage_recovery_added", 0):
+                logger.info(
+                    "[COVERAGE_RECOVERY_QUERY] query_id=%s added=%s cap=%s missing=%s",
+                    query_id,
+                    coverage_metrics.get("coverage_recovery_added"),
+                    coverage_metrics.get("coverage_recovery_cap"),
+                    ",".join(coverage_metrics.get("coverage_recovery_missing_domains", []) or []),
+                )
+
             # 6. Budget-aware selection + top-k
             # When adaptive_seed_enabled, skip retrieval-level budget gate
             # (the submodular packer in context layer handles allocation)
@@ -431,11 +459,12 @@ class RetrievalPipeline:
                 "after_graph_stitch": count_after_graph_stitch,
                 "after_expansion": count_after_expansion,
                 "after_precision": count_after_precision,
+                "after_coverage": count_after_coverage,
                 "final_output": len(final_candidates),
             }
 
             logger.info(
-                "[RETRIEVAL_PROFILE] prep_ms=%.1f bm25_ms=%s vector_ms=%s merge_ms=%.1f mmr_ms=%.1f granularity_ms=%.1f graph_stitch_ms=%.1f expansion_ms=%.1f precision_ms=%.1f total_ms=%.1f",
+                "[RETRIEVAL_PROFILE] prep_ms=%.1f bm25_ms=%s vector_ms=%s merge_ms=%.1f mmr_ms=%.1f granularity_ms=%.1f graph_stitch_ms=%.1f expansion_ms=%.1f precision_ms=%.1f coverage_ms=%.1f total_ms=%.1f",
                 prep_ms,
                 f"{bm25_ms:.1f}" if bm25_ms is not None else "NA",
                 f"{vector_ms:.1f}" if vector_ms is not None else "NA",
@@ -445,6 +474,7 @@ class RetrievalPipeline:
                 graph_stitch_ms,
                 expansion_ms,
                 precision_ms,
+                coverage_ms,
                 total_ms,
             )
 
@@ -472,6 +502,9 @@ class RetrievalPipeline:
                     "query_expansion_enabled": self.config.query_expansion_enabled,
                     "query_expansion_terms": list(prepared.lexical_expansion_terms),
                     "query_expansion_term_count": len(prepared.lexical_expansion_terms),
+                    "bm25_relaxed_used": (bm25_meta or {}).get("relaxed_used"),
+                    "bm25_relaxed_term_count": (bm25_meta or {}).get("relaxed_term_count"),
+                    "bm25_original_term_count": (bm25_meta or {}).get("original_term_count"),
                     "prep_ms": round(prep_ms, 2),
                     "bm25_ms": round(bm25_ms, 2) if bm25_ms is not None else None,
                     "vector_ms": round(vector_ms, 2) if vector_ms is not None else None,
@@ -487,6 +520,15 @@ class RetrievalPipeline:
                     "precision_recovery_conf_min": precision_metrics.get("precision_recovery_conf_min"),
                     "precision_recovery_conf_max": precision_metrics.get("precision_recovery_conf_max"),
                     "precision_recovery_conf_mean": precision_metrics.get("precision_recovery_conf_mean"),
+                    "coverage_recovery_added": coverage_metrics.get("coverage_recovery_added"),
+                    "coverage_recovery_cap": coverage_metrics.get("coverage_recovery_cap"),
+                    "coverage_recovery_missing_domains": coverage_metrics.get(
+                        "coverage_recovery_missing_domains"
+                    ),
+                    "coverage_recovery_domains_considered": coverage_metrics.get(
+                        "coverage_recovery_domains_considered"
+                    ),
+                    "coverage_ms": round(coverage_ms, 2),
                     "total_ms": round(total_ms, 2),
                     "mmr_candidates": getattr(self.merger, "last_metrics", {}).get("mmr_candidates"),
                     "mmr_emb_ms": getattr(self.merger, "last_metrics", {}).get("mmr_emb_ms"),

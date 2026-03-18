@@ -92,14 +92,30 @@ def build_unresolved_claim_queries(
         claim_map[cid] for cid in report.unresolved_claim_ids if cid in claim_map
     ]
     if unresolved_claims:
+        # Prefer non-error intents first so recovery doesn't get dominated by error/fallback claims.
+        try:
+            from homllm.claim_coverage.interfaces import ClaimIntent
+        except Exception:
+            ClaimIntent = None  # type: ignore[assignment]
+        if ClaimIntent:
+            intent_priority = {
+                ClaimIntent.TRACE: 0,
+                ClaimIntent.HOW_IT_WORKS: 1,
+                ClaimIntent.BEHAVIOR_EXISTS: 1,
+                ClaimIntent.ORDER_PRIORITY: 2,
+                ClaimIntent.COMPARE: 2,
+                ClaimIntent.ERROR_FALLBACK: 3,
+            }
+            unresolved_claims.sort(
+                key=lambda c: (intent_priority.get(c.intent, 2), c.claim_id)
+            )
+    if unresolved_claims:
         # Global unresolved focus keeps broad context that per-claim segmentation can lose.
         unresolved_text = " ; ".join(c.text.strip() for c in unresolved_claims if c.text.strip())
         _add(f"{packet.query.strip()} | unresolved focus: {unresolved_text}")
 
-    for claim_id in report.unresolved_claim_ids:
-        claim = claim_map.get(claim_id)
-        if not claim:
-            continue
+    # First pass: ensure each unresolved claim gets one recovery query.
+    for claim in unresolved_claims:
         hints = " ".join(claim.identifier_hints[:4]).strip()
         terms = " ".join(claim.terms[:8]).strip()
         parts = [claim.text.strip()]
@@ -108,17 +124,20 @@ def build_unresolved_claim_queries(
         if terms:
             parts.append(terms)
         _add(" | ".join(parts))
+        if len(out) >= limit:
+            return out[:limit]
 
-        # Intent-aware auxiliary query to improve recovery recall for broad behavioral claims.
+    # Second pass: add intent-aware auxiliary queries only if room remains.
+    for claim in unresolved_claims:
+        if len(out) >= limit:
+            break
         intent_terms = _intent_expansion_terms(claim)
         if intent_terms:
+            hints = " ".join(claim.identifier_hints[:4]).strip()
             aux_parts = [claim.text.strip(), " ".join(intent_terms)]
             if hints:
                 aux_parts.append(hints)
             _add(" | ".join(p for p in aux_parts if p))
-
-        if len(out) >= limit:
-            break
     return out[:limit]
 
 

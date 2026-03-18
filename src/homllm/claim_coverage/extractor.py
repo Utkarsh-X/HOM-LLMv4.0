@@ -28,6 +28,14 @@ _TOKEN_RE = re.compile(r"\b[A-Za-z0-9_]+\b")
 _ID_HINT_RE = re.compile(
     r"\b[A-Z][A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)?\b|\b[A-Z][A-Z0-9_]{2,}\b|\b[a-z]+_[a-z0-9_]+\b|\b[A-Za-z0-9_]+\.py\b"
 )
+_TERM_EXPANSIONS: dict[str, tuple[str, ...]] = {
+    # Generic systems terms (kept small and broadly applicable).
+    "pool": ("connection", "connections"),
+    "latency": ("duration", "timing"),
+    "percentil": ("p50", "p95", "p99"),
+    "cache": ("hit", "miss", "eviction"),
+    "distribution": ("hit", "miss"),
+}
 
 
 def _contains_marker(text: str, marker: str) -> bool:
@@ -36,15 +44,29 @@ def _contains_marker(text: str, marker: str) -> bool:
 
 
 def _detect_intent(query_lc: str, segment_lc: str) -> ClaimIntent:
-    if any(_contains_marker(query_lc, t) for t in ("trace", "flow", "sequence", "pipeline")) or "end-to-end" in query_lc:
-        return ClaimIntent.TRACE
-    if any(_contains_marker(query_lc, t) for t in ("compare", "contrast", "vs", "difference")):
-        return ClaimIntent.COMPARE
-    if any(_contains_marker(query_lc, t) for t in ("priority", "order", "precedence")) or "resolve conflict" in query_lc:
-        return ClaimIntent.ORDER_PRIORITY
-    if any(_contains_marker(query_lc, t) for t in ("error", "fallback", "retry", "fail", "miss")):
+    # Segment-first detection to avoid query-wide error/fallback leakage.
+    if any(_contains_marker(segment_lc, t) for t in ("error", "fallback", "retry", "fail", "miss")):
         return ClaimIntent.ERROR_FALLBACK
-    if segment_lc.startswith("how ") or _contains_marker(query_lc, "how"):
+    if (
+        any(_contains_marker(segment_lc, t) for t in ("trace", "flow", "sequence", "pipeline"))
+        or "end-to-end" in segment_lc
+        or any(_contains_marker(query_lc, t) for t in ("trace", "flow", "sequence", "pipeline"))
+        or "end-to-end" in query_lc
+    ):
+        return ClaimIntent.TRACE
+    if (
+        any(_contains_marker(segment_lc, t) for t in ("compare", "contrast", "vs", "difference"))
+        or any(_contains_marker(query_lc, t) for t in ("compare", "contrast", "vs", "difference"))
+    ):
+        return ClaimIntent.COMPARE
+    if (
+        any(_contains_marker(segment_lc, t) for t in ("priority", "order", "precedence"))
+        or "resolve conflict" in segment_lc
+        or any(_contains_marker(query_lc, t) for t in ("priority", "order", "precedence"))
+        or "resolve conflict" in query_lc
+    ):
+        return ClaimIntent.ORDER_PRIORITY
+    if segment_lc.startswith("how ") or _contains_marker(segment_lc, "how") or _contains_marker(query_lc, "how"):
         return ClaimIntent.HOW_IT_WORKS
     return ClaimIntent.BEHAVIOR_EXISTS
 
@@ -59,7 +81,17 @@ def _extract_terms(text: str) -> tuple[str, ...]:
         if t not in seen:
             seen.add(t)
             out.append(t)
-    return tuple(out)
+    # Light, deterministic term expansion to improve recall on common systems terms.
+    expanded: list[str] = []
+    for term in out:
+        expanded.append(term)
+        for extra in _TERM_EXPANSIONS.get(term, ()):
+            nt = _normalize_term(extra)
+            if len(nt) < 2 or nt in _STOPWORDS or nt in seen:
+                continue
+            seen.add(nt)
+            expanded.append(nt)
+    return tuple(expanded)
 
 
 def _normalize_term(token: str) -> str:

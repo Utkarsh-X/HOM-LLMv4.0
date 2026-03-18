@@ -16,6 +16,65 @@ from homllm.context.interfaces import ContextArtifact, ContextBlock
 
 
 _WORD_RE = re.compile(r"\b[A-Za-z0-9_]+\b")
+_GENERIC_COVERAGE_TERMS = {
+    "compare",
+    "comparison",
+    "contrast",
+    "difference",
+    "differences",
+    "tradeoff",
+    "tradeoffs",
+    "interaction",
+    "interactions",
+}
+
+
+def _normalize_lexeme(token: str) -> str:
+    tok = re.sub(r"[^a-z0-9_]+", "", (token or "").lower())
+    if not tok:
+        return ""
+    tok = tok.replace("deserialise", "deserialize").replace("serialise", "serialize")
+    tok = tok.replace("deserialisation", "deserialization").replace("serialisation", "serialization")
+    if tok.startswith("deserializ"):
+        return "deserializ"
+    if tok.startswith("serializ"):
+        return "serializ"
+    if tok.endswith("ies") and len(tok) > 4:
+        tok = tok[:-3] + "y"
+    for suffix in ("ations", "ation", "ments", "ment", "ings", "ing", "ized", "izer", "izers", "ers", "er", "ed", "es", "s"):
+        if tok.endswith(suffix) and len(tok) - len(suffix) >= 4:
+            tok = tok[: -len(suffix)]
+            break
+    return tok
+
+
+def _claim_scoring_terms(claim: Claim) -> tuple[str, ...]:
+    terms: list[str] = []
+    seen: set[str] = set()
+    for term in claim.terms:
+        normalized = _normalize_lexeme(term)
+        if not normalized or normalized in _GENERIC_COVERAGE_TERMS or normalized in seen:
+            continue
+        seen.add(normalized)
+        terms.append(normalized)
+    return tuple(terms)
+
+
+def _block_lexeme_set(block: ContextBlock) -> set[str]:
+    hay = " ".join(
+        [
+            block.file or "",
+            block.symbol_id or "",
+            block.symbol_name or "",
+            block.content or "",
+        ]
+    ).lower()
+    lexemes: set[str] = set()
+    for token in _WORD_RE.findall(hay):
+        normalized = _normalize_lexeme(token)
+        if normalized:
+            lexemes.add(normalized)
+    return lexemes
 
 
 def score_claim_coverage(
@@ -113,11 +172,12 @@ def _score_single_claim(
 
 
 def _lexical_anchor_match(claim: Claim, block: ContextBlock) -> float:
-    if not claim.terms:
+    scoring_terms = _claim_scoring_terms(claim)
+    if not scoring_terms:
         return 0.0
-    text = (block.content or "").lower()
-    hits = sum(1 for t in claim.terms if t in text)
-    return min(1.0, hits / max(1, len(claim.terms)))
+    block_lexemes = _block_lexeme_set(block)
+    hits = sum(1 for term in scoring_terms if term in block_lexemes)
+    return min(1.0, hits / max(1, len(scoring_terms)))
 
 
 def _symbol_match(claim: Claim, block: ContextBlock) -> float:
@@ -137,6 +197,9 @@ def _symbol_match(claim: Claim, block: ContextBlock) -> float:
 def _structural_proximity(claim: Claim, block: ContextBlock) -> float:
     # Simple deterministic approximation:
     # reward block if claim terms appear in file path/symbol and content together.
+    scoring_terms = _claim_scoring_terms(claim)
+    if not scoring_terms:
+        return 0.0
     file_sym = " ".join(
         [
             (block.file or "").lower(),
@@ -144,13 +207,14 @@ def _structural_proximity(claim: Claim, block: ContextBlock) -> float:
             (block.symbol_name or "").lower(),
         ]
     )
-    content_terms = set(_WORD_RE.findall((block.content or "").lower()))
+    structure_lexemes = {_normalize_lexeme(tok) for tok in _WORD_RE.findall(file_sym)}
+    structure_lexemes.discard("")
+    content_terms = {_normalize_lexeme(tok) for tok in _WORD_RE.findall((block.content or "").lower())}
+    content_terms.discard("")
     overlap = 0
-    for t in claim.terms:
-        in_structure = t in file_sym
-        in_content = t in content_terms
+    for term in scoring_terms:
+        in_structure = term in structure_lexemes
+        in_content = term in content_terms
         if in_structure and in_content:
             overlap += 1
-    if not claim.terms:
-        return 0.0
-    return min(1.0, overlap / max(1, len(claim.terms)))
+    return min(1.0, overlap / max(1, len(scoring_terms)))

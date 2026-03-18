@@ -142,6 +142,11 @@ class RetrievalConfig:
     query_expansion_max_terms: int = 6
     query_expansion_min_token_length: int = 3
     query_expansion_synonyms: dict = field(default_factory=dict)
+    # Coverage recovery (missing domain coverage)
+    coverage_recovery_enabled: bool = False
+    coverage_recovery_max_additions: int = 3
+    coverage_recovery_max_ratio: float = 0.1
+    coverage_recovery_bm25_top_k: int = 6
     
     # ==========================================================================
     # Plan B: Retrieval Layer Activation
@@ -217,6 +222,9 @@ class RetrievalConfig:
         self.query_expansion_synonyms = self._normalize_query_expansion_synonyms(
             self.query_expansion_synonyms
         )
+        self.coverage_recovery_max_additions = max(0, int(self.coverage_recovery_max_additions))
+        self.coverage_recovery_max_ratio = max(0.0, min(0.2, float(self.coverage_recovery_max_ratio)))
+        self.coverage_recovery_bm25_top_k = max(1, int(self.coverage_recovery_bm25_top_k))
         self.context_budget = max(1, int(self.context_budget))
         self.budget_reserve = max(0, int(self.budget_reserve))
         if self.budget_reserve > self.context_budget:

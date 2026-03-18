@@ -126,6 +126,35 @@ def _query_requests_explicit_extraction(query: str) -> bool:
     return any(marker in q for marker in ("extract", "extraction", "header", "request"))
 
 
+def _query_requests_numeric_mechanism(query: str) -> bool:
+    q = (query or "").lower()
+    markers = (
+        "formula",
+        "score",
+        "scores",
+        "similarity",
+        "cosine",
+        "nan",
+        "percentile",
+        "percentiles",
+        "p50",
+        "p95",
+        "p99",
+        "dimension",
+        "mismatch",
+        "weights",
+    )
+    return any(marker in q for marker in markers)
+
+
+def _query_mentions_named_rules(query: str) -> bool:
+    q = query or ""
+    return bool(
+        re.search(r"\b[A-Z][A-Z0-9_]{2,}\b", q)
+        or re.search(r"\b[a-z]+_[a-z0-9_]+\b", q)
+    )
+
+
 def _query_named_symbols(query: str) -> tuple[str, ...]:
     seen: set[str] = set()
     out: list[str] = []
@@ -576,6 +605,7 @@ def build_evidence_plan(query: str, ranking_output, context_artifact, claim_pack
     claim_intents = _claim_intents(claim_packet)
     support_surface = _build_support_surface(ranking_output, context_artifact, ranked_limit=40)
     helper_exception = _query_requests_helper_detail(query)
+    skip_interaction_packet = _query_requests_numeric_mechanism(query) or _query_mentions_named_rules(query)
 
     packets: list[EvidencePacket] = []
     if query_class == "flow" or ClaimIntent.TRACE in claim_intents:
@@ -590,7 +620,7 @@ def build_evidence_plan(query: str, ranking_output, context_artifact, claim_pack
         packet = _build_system_scope_packet(query, support_surface)
         if packet:
             packets.append(packet)
-    if query_class == "interaction" or ClaimIntent.ORDER_PRIORITY in claim_intents:
+    if (query_class == "interaction" or ClaimIntent.ORDER_PRIORITY in claim_intents) and not skip_interaction_packet:
         packet = _build_interaction_packet(query, support_surface, claim_packet=claim_packet)
         if packet:
             packets.append(packet)
