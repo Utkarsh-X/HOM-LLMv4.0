@@ -373,8 +373,6 @@ def build_answer_shape_contract(
     query_mentions_named_rules = _query_mentions_named_rules(query)
     query_requests_numeric_mechanism = _query_requests_numeric_mechanism(query)
     query_requests_interface_exactness = _query_requests_interface_exactness(query)
-    coverage_ratio = float(getattr(coverage_report, "coverage_ratio", 1.0) or 0.0)
-    unresolved_ids = tuple(getattr(coverage_report, "unresolved_claim_ids", ()) or ())
 
     enforcement_parts: list[str] = [
         "EVIDENCE ANCHOR RULE:\n"
@@ -509,14 +507,6 @@ def build_answer_shape_contract(
             "- Do not use hypothetical helper return values, fabricated filter outcomes, or made-up mini-scenarios to illustrate the answer.\n"
             "- If a compact example cannot be stated directly from the observed behavior, omit the example rather than inventing one.\n"
         )
-        if coverage_ratio < 0.6 or unresolved_ids:
-            enforcement_parts.append(
-                "INTERACTION EXAMPLE GATE:\n"
-                "- The current evidence coverage is incomplete for this interaction question.\n"
-                "- Do not include any illustrative, hypothetical, or compact example.\n"
-                "- This overrides any general preference for concrete example flows.\n"
-                "- Stay with directly observed rule order, control flow, and stated evidence only.\n"
-            )
         if has_cache_evidence or has_timing_evidence or has_cost_evidence:
             evidence_bits: list[str] = []
             if has_cache_evidence:
@@ -548,8 +538,6 @@ def build_answer_shape_contract(
             "- Describe the observed transformation or ordering from code, not the generic textbook meaning of the name.\n"
             "- If the retrieved code shows a narrower implementation than the conventional definition, answer with the narrower implementation.\n"
             "- Do not upgrade a literal check, sort, or helper branch into a more general algorithm unless the code explicitly shows that algorithm.\n"
-            "- Do not invent concrete examples, operands, field names, or evaluation outcomes for named rules unless those exact example ingredients are directly shown in the retrieved context.\n"
-            "- If the answer would need a synthetic example to explain the rule, omit the example and stay with the observed control flow and rule order.\n"
         )
 
     if query_requests_numeric_mechanism:

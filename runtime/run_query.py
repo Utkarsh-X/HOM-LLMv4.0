@@ -2229,7 +2229,7 @@ def main():
             "- Completeness-first for asked scope: include mechanism steps, key conditions/branching, and concrete in-code effects when present.\n"
             "- Include relevant operational details when present (constants/thresholds, error handling, retries/fallbacks, cache/eviction behavior, metrics/timing).\n"
             "- For comparative or combination questions, include practical differences and interactions, not only independent summaries.\n"
-            "- When context provides enough detail and no answer-shape rule forbids examples, include one concrete evidence-backed example flow.\n"
+            "- When context provides enough detail, include one concrete evidence-backed example flow.\n"
             "- For compare/contrast questions, include concrete differences and practical implications when evidence exists.\n"
             "- For each key method/rule mentioned, include its concrete in-code behavior (transform, return, and relevant error/fallback handling if shown).\n"
             "- For interaction/conflict questions, explain mechanism (why outcome occurs), not only execution order.\n"
