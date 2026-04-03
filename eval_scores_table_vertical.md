@@ -1,0 +1,32 @@
+| Run | Gemini 3.0 flash Score | Gemini 3.0 flash Delta | Cerebras qwen-3-235b-a22b-instruct Score | Cerebras qwen-3-235b-a22b-instruct Delta | Gemini 3.1 flash lite Score | Gemini 3.1 flash lite Delta |
+|---|---|---|---|---|---|---|
+| Batch-01(ccg30_01_baseline) | 9.50 | +1.10 | 9.70 | +1.50 | 9.90 | +2.00 |
+| Batch-02(ccg30_02_ret_precision_add2) | 9.10 | +0.50 | 9.50 | +1.20 | 9.50 | +1.20 |
+| Batch-03(ccg30_03_ret_precision_add4) | 9.50 | +1.20 | 9.40 | +1.00 | 9.60 | +1.60 |
+| Batch-04(ccg30_04_ret_precision_scan6) | 9.50 | +1.40 | 9.50 | +1.10 | 9.50 | +1.40 |
+| Batch-05(ccg30_05_ret_precision_scan10) | 9.70 | +1.70 | 9.60 | +1.20 | 9.80 | +1.90 |
+| Batch-06(ccg30_06_ret_precision_conf075) | 9.20 | +0.50 | 9.50 | +1.10 | 9.70 | +1.70 |
+| Batch-07(ccg30_07_ret_precision_conf085) | 9.40 | +0.80 | 9.70 | +1.40 | 9.80 | +2.00 |
+| Batch-08(ccg30_08_ret_coverage_add2) | 9.30 | +0.70 | 9.60 | +1.30 | 9.80 | +1.80 |
+| Batch-09(ccg30_09_ret_coverage_add4) | 9.50 | +1.10 | 9.70 | +1.40 | 9.80 | +1.70 |
+| Batch-10(ccg30_10_ret_postmerge_40) | 9.50 | +1.20 | 9.50 | +1.10 | 9.60 | +1.40 |
+| Batch-11(ccg30_11_ret_postmerge_60) | 9.40 | +0.90 | 9.60 | +1.20 | 9.90 | +1.90 |
+| Batch-12(ccg30_12_ctx_dynstep_300) | 9.40 | +0.90 | 9.70 | +1.50 | 9.50 | +1.30 |
+| Batch-13(ccg30_13_ctx_dynstep_500) | 9.20 | +0.80 | 9.50 | +1.10 | 9.50 | +1.40 |
+| Batch-14(ccg30_14_ctx_dynexp_1) | 9.40 | +0.80 | 9.70 | +1.50 | 9.80 | +1.70 |
+| Batch-15(ccg30_15_ctx_dynexp_3) | 9.50 | +1.10 | 9.60 | +1.30 | 9.70 | +1.60 |
+| Batch-16(ccg30_16_ctx_relgate_020) | 9.30 | +0.70 | 9.50 | +1.00 | 9.70 | +1.60 |
+| Batch-17(ccg30_17_ctx_relgate_030) | 9.50 | +0.90 | 9.30 | +0.80 | 9.60 | +1.40 |
+| Batch-18(ccg30_18_ctx_graph_015) | 9.10 | +0.40 | 9.40 | +0.90 | 9.60 | +1.50 |
+| Batch-19(ccg30_19_ctx_graph_025) | 9.70 | +1.20 | 9.60 | +1.40 | 9.60 | +1.50 |
+| Batch-20(ccg30_20_ctx_unresblocks_1) | 9.20 | +0.70 | 9.20 | +0.60 | 9.70 | +1.60 |
+| Batch-21(ccg30_21_ctx_unresblocks_3) | 8.60 | -0.10 | 9.30 | +0.90 | 9.30 | +1.20 |
+| Batch-22(ccg30_22_rank_bm25rescue_10) | 9.20 | +0.80 | 9.50 | +1.10 | 9.70 | +1.50 |
+| Batch-23(ccg30_23_rank_bm25rescue_20) | 9.60 | +1.50 | 9.50 | +1.30 | 9.70 | +1.40 |
+| Batch-24(ccg30_24_rank_topm_25) | 9.80 | +1.80 | 9.40 | +0.90 | 9.70 | +1.50 |
+| Batch-25(ccg30_25_rank_topm_45) | 9.30 | +0.70 | 9.70 | +1.40 | 9.80 | +1.80 |
+| Batch-26(ccg30_26_rank_gate_margin_015) | 9.20 | +0.80 | 9.50 | +1.10 | 9.80 | +1.90 |
+| Batch-27(ccg30_27_rank_gate_margin_025) | 9.10 | +0.40 | 9.30 | +0.70 | 9.70 | +1.40 |
+| Batch-28(ccg30_28_combo_retrieval_breadth_high) | 9.30 | +0.80 | 9.50 | +1.10 | 9.90 | +2.00 |
+| Batch-29(ccg30_29_combo_context_conservative) | 9.30 | +0.70 | 9.40 | +0.90 | 9.80 | +1.80 |
+| Batch-30(ccg30_30_combo_context_aggressive) | 9.50 | +1.10 | 9.40 | +0.80 | 9.60 | +1.30 |

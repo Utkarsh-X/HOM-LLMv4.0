@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import yaml
 
 # ------------------------------- METRIC NAMES -------------------------------
 METRIC_DISPLAY_NAMES = {
@@ -80,6 +81,14 @@ def safe_filename_token(value: str) -> str:
 def read_json(path: Path) -> Dict:
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def read_yaml(path: Path) -> Dict:
+    with open(path, "r", encoding="utf-8") as f:
+        payload = yaml.safe_load(f) or {}
+    if not isinstance(payload, dict):
+        raise ValueError(f"Expected YAML object at root of {path}")
+    return payload
 
 
 def read_jsonl(path: Path) -> List[Dict]:
@@ -204,9 +213,19 @@ class RateLimiter:
 
 # ------------------------------- CONFIG -------------------------------
 @dataclass
+class GeminiKeyPoolConfig:
+    secrets_file: Path
+    pool_name: str
+    state_file: Path
+    requests_per_key: int
+    daily_reset_hour: Optional[int]
+    keys: List[Dict[str, str]] = field(default_factory=list)
+
+
+@dataclass
 class JudgeConfig:
     model: str
-    api_key: str
+    api_key: Optional[str]
     provider: str = "openai"  # "openai" | "gemini" | "cerebras_sdk"
     base_url: Optional[str] = None
     requests_per_minute: int = 60  # Default: 60 RPM (1 per second)
@@ -219,6 +238,171 @@ class JudgeConfig:
     # Example:
     #   "extra_body": {"disable_reasoning": false, "clear_thinking": false}
     extra_body: Optional[Dict[str, Any]] = None
+    api_key_pool: Optional[GeminiKeyPoolConfig] = None
+
+
+class GeminiKeyPoolManager:
+    """Persistent sequential Gemini key rotation with per-key request quotas."""
+
+    def __init__(self, cfg: GeminiKeyPoolConfig):
+        self.cfg = cfg
+        self.cfg.state_file.parent.mkdir(parents=True, exist_ok=True)
+        self.state = self._load_state()
+        self._maybe_reset()
+        self._ensure_available_key()
+
+    def _current_reset_marker(self) -> Optional[str]:
+        if self.cfg.daily_reset_hour is None:
+            return None
+        now_local = datetime.now().astimezone()
+        marker_date = now_local.date()
+        if now_local.hour < int(self.cfg.daily_reset_hour):
+            marker_date = marker_date.fromordinal(marker_date.toordinal() - 1)
+        return marker_date.isoformat()
+
+    def _default_state(self) -> Dict[str, Any]:
+        return {
+            "current_index": 0,
+            "used_counts": [0 for _ in self.cfg.keys],
+            "reset_marker": self._current_reset_marker(),
+        }
+
+    def _load_state(self) -> Dict[str, Any]:
+        if not self.cfg.state_file.exists():
+            return self._default_state()
+        try:
+            payload = json.loads(self.cfg.state_file.read_text(encoding="utf-8"))
+        except Exception:
+            return self._default_state()
+        if not isinstance(payload, dict):
+            return self._default_state()
+        counts = payload.get("used_counts")
+        if not isinstance(counts, list):
+            counts = []
+        counts = [int(v) if isinstance(v, (int, float)) else 0 for v in counts]
+        if len(counts) < len(self.cfg.keys):
+            counts.extend([0] * (len(self.cfg.keys) - len(counts)))
+        elif len(counts) > len(self.cfg.keys):
+            counts = counts[: len(self.cfg.keys)]
+        current_index = payload.get("current_index", 0)
+        if not isinstance(current_index, int):
+            current_index = 0
+        current_index = max(0, min(current_index, max(len(self.cfg.keys) - 1, 0)))
+        return {
+            "current_index": current_index,
+            "used_counts": counts,
+            "reset_marker": payload.get("reset_marker"),
+        }
+
+    def _save_state(self) -> None:
+        self.cfg.state_file.write_text(json.dumps(self.state, indent=2), encoding="utf-8")
+
+    def _maybe_reset(self) -> None:
+        marker = self._current_reset_marker()
+        if marker is None:
+            return
+        if self.state.get("reset_marker") == marker:
+            return
+        self.state = self._default_state()
+        self._save_state()
+
+    def _advance_to_available(self) -> None:
+        total = len(self.cfg.keys)
+        for offset in range(1, total + 1):
+            idx = (self.state["current_index"] + offset) % total
+            if self.state["used_counts"][idx] < self.cfg.requests_per_key:
+                self.state["current_index"] = idx
+                self._save_state()
+                return
+        raise RuntimeError("All Gemini pool keys are exhausted for the current reset window.")
+
+    def _ensure_available_key(self) -> None:
+        if self.state["used_counts"][self.state["current_index"]] >= self.cfg.requests_per_key:
+            self._advance_to_available()
+
+    def current_key(self) -> str:
+        self._maybe_reset()
+        self._ensure_available_key()
+        return str(self.cfg.keys[self.state["current_index"]]["key"])
+
+    def current_name(self) -> str:
+        self._maybe_reset()
+        self._ensure_available_key()
+        return str(self.cfg.keys[self.state["current_index"]]["name"])
+
+    def mark_success(self) -> None:
+        self._maybe_reset()
+        idx = self.state["current_index"]
+        self.state["used_counts"][idx] += 1
+        if self.state["used_counts"][idx] >= self.cfg.requests_per_key:
+            self._save_state()
+            self._advance_to_available()
+        else:
+            self._save_state()
+
+    def mark_quota_exhausted(self) -> None:
+        self._maybe_reset()
+        idx = self.state["current_index"]
+        self.state["used_counts"][idx] = self.cfg.requests_per_key
+        self._save_state()
+        self._advance_to_available()
+
+
+def _load_gemini_key_pool(pool_cfg: Dict[str, Any], config_dir: Path) -> GeminiKeyPoolConfig:
+    if not isinstance(pool_cfg, dict):
+        raise ValueError("judge_config api_key_pool must be an object.")
+
+    secrets_path = pool_cfg.get("secrets_file", "configs/secrets.yaml")
+    secrets_path = Path(secrets_path)
+    if not secrets_path.is_absolute():
+        secrets_path = (config_dir.parent / secrets_path).resolve()
+
+    secrets = read_yaml(secrets_path)
+    api_keys = secrets.get("api_keys", {})
+    if not isinstance(api_keys, dict):
+        raise ValueError(f"Missing api_keys mapping in {secrets_path}")
+
+    pool_name = str(pool_cfg.get("pool_name", "gemini_pool"))
+    raw_pool = api_keys.get(pool_name)
+    if not isinstance(raw_pool, dict):
+        raise ValueError(f"Missing api_keys.{pool_name} in {secrets_path}")
+
+    raw_keys = raw_pool.get("keys", [])
+    if not isinstance(raw_keys, list) or not raw_keys:
+        raise ValueError(f"api_keys.{pool_name}.keys must be a non-empty list")
+
+    keys: List[Dict[str, str]] = []
+    for idx, item in enumerate(raw_keys, start=1):
+        if not isinstance(item, dict):
+            raise ValueError(f"Invalid key entry at index {idx} in api_keys.{pool_name}.keys")
+        name = str(item.get("name") or f"{pool_name}_{idx}")
+        key = str(item.get("key") or "").strip()
+        if not key:
+            raise ValueError(f"Missing key value for api_keys.{pool_name}.keys[{idx}]")
+        keys.append({"name": name, "key": key})
+
+    state_path = pool_cfg.get("state_file", "logs/judge_gemini_pool_state.json")
+    state_path = Path(state_path)
+    if not state_path.is_absolute():
+        state_path = (config_dir.parent / state_path).resolve()
+
+    requests_per_key = pool_cfg.get("requests_per_key", raw_pool.get("requests_per_key", 20))
+    if not isinstance(requests_per_key, int) or requests_per_key <= 0:
+        raise ValueError("requests_per_key must be a positive integer")
+
+    daily_reset_hour = pool_cfg.get("daily_reset_hour", raw_pool.get("daily_reset_hour"))
+    if daily_reset_hour is not None:
+        if not isinstance(daily_reset_hour, int) or daily_reset_hour < 0 or daily_reset_hour > 23:
+            raise ValueError("daily_reset_hour must be null or an integer in [0, 23]")
+
+    return GeminiKeyPoolConfig(
+        secrets_file=secrets_path,
+        pool_name=pool_name,
+        state_file=state_path,
+        requests_per_key=requests_per_key,
+        daily_reset_hour=daily_reset_hour,
+        keys=keys,
+    )
 
 
 def _select_provider_cfg(raw_cfg: Dict[str, Any], provider_override: Optional[str]) -> Dict[str, Any]:
@@ -276,6 +460,7 @@ def load_judge_config(path: Path, provider_override: Optional[str] = None) -> Ju
     stream = cfg.get("stream", False)
     reasoning_effort = cfg.get("reasoning_effort")
     extra_body = cfg.get("extra_body")
+    api_key_pool_cfg = cfg.get("api_key_pool")
     if extra_body is not None and not isinstance(extra_body, dict):
         raise ValueError("judge_config.json field 'extra_body' must be an object if provided.")
     if temperature is None:
@@ -290,9 +475,17 @@ def load_judge_config(path: Path, provider_override: Optional[str] = None) -> Ju
         raise ValueError("judge_config.json field 'stream' must be boolean if provided.")
     if reasoning_effort is not None and not isinstance(reasoning_effort, str):
         raise ValueError("judge_config.json field 'reasoning_effort' must be a string if provided.")
+    gemini_pool = None
+    if provider == "gemini" and isinstance(api_key_pool_cfg, dict) and not api_key:
+        # Only load the key pool when no direct api_key is provided.
+        # To skip the pool, add "api_key": "<your-key>" to the provider block.
+        gemini_pool = _load_gemini_key_pool(api_key_pool_cfg, path.parent.resolve())
+        api_key = gemini_pool.keys[0]["key"]
+
     if not model or not api_key:
         raise ValueError(
-            f"judge_config provider section '{provider}' must include 'model' and 'api_key'"
+            f"judge_config provider section '{provider}' must include 'model' and 'api_key', "
+            "or provide a valid api_key_pool for Gemini."
         )
     return JudgeConfig(
         model=model, 
@@ -306,6 +499,7 @@ def load_judge_config(path: Path, provider_override: Optional[str] = None) -> Ju
         stream=stream,
         reasoning_effort=reasoning_effort,
         extra_body=extra_body,
+        api_key_pool=gemini_pool,
     )
 
 
@@ -419,6 +613,18 @@ def _is_retryable_judge_error(exc: Exception) -> bool:
     return any(tok in msg for tok in retry_tokens)
 
 
+def _is_quota_exhausted_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    quota_tokens = (
+        "quota exceeded",
+        "resource exhausted",
+        "generaterequestsperdayperprojectpermodel",
+        "free tier",
+        "perday",
+    )
+    return any(tok in msg for tok in quota_tokens)
+
+
 def _retry_judge_call(fn, *args, **kwargs):
     """
     Retry a judge API call up to 5 times with escalating delays.
@@ -434,6 +640,8 @@ def _retry_judge_call(fn, *args, **kwargs):
             return fn(*args, **kwargs)
         except Exception as exc:
             last_exc = exc
+            if _is_quota_exhausted_error(exc):
+                raise
             if not _is_retryable_judge_error(exc) or attempt >= len(_JUDGE_RETRY_DELAYS):
                 raise
             sys.stderr.write(
@@ -1063,6 +1271,16 @@ def main() -> None:
     cfg = load_judge_config(args.judge_config, provider_override=args.provider)
     cfg.provider = normalize_provider_name(cfg.provider)
 
+    key_pool_manager = None
+    if cfg.provider == "gemini" and cfg.api_key_pool is not None:
+        key_pool_manager = GeminiKeyPoolManager(cfg.api_key_pool)
+        cfg.api_key = key_pool_manager.current_key()
+        print(
+            f"Gemini key rotation: enabled | pool={cfg.api_key_pool.pool_name} "
+            f"| requests_per_key={cfg.api_key_pool.requests_per_key} "
+            f"| current_key={key_pool_manager.current_name()}"
+        )
+
     client = ensure_client(cfg)
 
     if args.output:
@@ -1115,29 +1333,61 @@ def main() -> None:
             query_text=resp.get("query_text", ""),
         )
 
-        try:
-            # Apply rate limiting before each LLM call
-            wait_time = rate_limiter.acquire()
-            if wait_time > 0:
-                # Show wait indicator for long waits
-                if wait_time > 1.0:
-                    print(f"(waited {wait_time:.1f}s) ", end="", flush=True)
-            
-            judged, judge_model_used = call_judge(client, cfg, messages)
-            # IMPORTANT: Compute verdict from scores, not LLM's verdict field.
-            # The LLM sometimes hallucinates the verdict, saying "improved" when
-            # the scores clearly show the candidate performed worse.
-            scores = judged.get("scores", {})
-            validate_paired_scores(scores)
-            verdict = compute_verdict_from_scores(scores)
-            llm_verdict = judged.get("verdict", "unknown")
-            if verdict != llm_verdict:
-                # Log when we override the LLM's verdict
-                sys.stderr.write(f"[WARN] Query {qid}: LLM said '{llm_verdict}' but scores show '{verdict}'\n")
-            verdict_symbol = '[+]' if verdict == 'improved' else '[-]' if verdict == 'regressed' else '[=]'
-            print(f"{verdict_symbol} {verdict}")
-        except Exception as exc:
-            sys.stderr.write(f"ERROR: {exc}\n")
+        while True:
+            try:
+                # Apply rate limiting before each LLM call
+                wait_time = rate_limiter.acquire()
+                if wait_time > 0:
+                    # Show wait indicator for long waits
+                    if wait_time > 1.0:
+                        print(f"(waited {wait_time:.1f}s) ", end="", flush=True)
+
+                judged, judge_model_used = call_judge(client, cfg, messages)
+                # IMPORTANT: Compute verdict from scores, not LLM's verdict field.
+                # The LLM sometimes hallucinates the verdict, saying "improved" when
+                # the scores clearly show the candidate performed worse.
+                scores = judged.get("scores", {})
+                validate_paired_scores(scores)
+                verdict = compute_verdict_from_scores(scores)
+                llm_verdict = judged.get("verdict", "unknown")
+                if verdict != llm_verdict:
+                    # Log when we override the LLM's verdict
+                    sys.stderr.write(f"[WARN] Query {qid}: LLM said '{llm_verdict}' but scores show '{verdict}'\n")
+                verdict_symbol = '[+]' if verdict == 'improved' else '[-]' if verdict == 'regressed' else '[=]'
+                print(f"{verdict_symbol} {verdict}")
+                if key_pool_manager is not None:
+                    previous_key_name = key_pool_manager.current_name()
+                    key_pool_manager.mark_success()
+                    next_key_name = key_pool_manager.current_name()
+                    if next_key_name != previous_key_name:
+                        sys.stderr.write(
+                            f"[KEY_ROTATION] Completed quota for '{previous_key_name}', next key is '{next_key_name}'.\n"
+                        )
+                        cfg.api_key = key_pool_manager.current_key()
+                        client = ensure_client(cfg)
+                break
+            except Exception as exc:
+                if key_pool_manager is not None and _is_quota_exhausted_error(exc):
+                    exhausted_name = key_pool_manager.current_name()
+                    try:
+                        key_pool_manager.mark_quota_exhausted()
+                        replacement_name = key_pool_manager.current_name()
+                        cfg.api_key = key_pool_manager.current_key()
+                        client = ensure_client(cfg)
+                        sys.stderr.write(
+                            f"[KEY_ROTATION] Quota exhausted for '{exhausted_name}', switched to '{replacement_name}'.\n"
+                        )
+                        continue
+                    except Exception as rotate_exc:
+                        sys.stderr.write(f"ERROR: {rotate_exc}\n")
+                        break
+
+                sys.stderr.write(f"ERROR: {exc}\n")
+                break
+        else:
+            continue
+
+        if "verdict" not in locals():
             continue
 
         record = {
