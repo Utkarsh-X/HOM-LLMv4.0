@@ -62,7 +62,7 @@ retrieval:
     vector_weight: 0.5
   parallel_search:
     enabled: true
-  post_merge_candidates: 50
+  post_merge_candidates: 60
   expansion:
     enabled: true
     max_additions: 4
@@ -107,7 +107,7 @@ retrieval:
     enabled: true
     max_additions: 3
     max_ratio: 0.2
-    scan_candidates: 8
+    scan_candidates: 10
     identifier_limit: 16
     bm25_top_k: 5
     vector_top_k: 3

@@ -1,0 +1,112 @@
+base_config: tuning/resolved_configs/ccg_v2_ab_budget5200_weights_dynamic_budget.resolved.yaml
+variants:
+- name: ccg_resolved_baseline
+  file: ccg_resolved_baseline.yaml
+  rationale: Resolved winning CCG config with all fallback defaults materialized.
+  overrides: {}
+- name: ccg_ret_precision_add2
+  file: ccg_ret_precision_add2.yaml
+  rationale: Tighten precision recovery breadth by one step.
+  overrides:
+    retrieval:
+      precision_recovery:
+        max_additions: 2
+- name: ccg_ret_precision_add4
+  file: ccg_ret_precision_add4.yaml
+  rationale: Loosen precision recovery breadth by one step.
+  overrides:
+    retrieval:
+      precision_recovery:
+        max_additions: 4
+- name: ccg_ret_coverage_add2
+  file: ccg_ret_coverage_add2.yaml
+  rationale: Reduce coverage recovery insertions.
+  overrides:
+    retrieval:
+      coverage_recovery:
+        max_additions: 2
+- name: ccg_ret_coverage_add4
+  file: ccg_ret_coverage_add4.yaml
+  rationale: Increase coverage recovery insertions.
+  overrides:
+    retrieval:
+      coverage_recovery:
+        max_additions: 4
+- name: ccg_ret_postmerge_40
+  file: ccg_ret_postmerge_40.yaml
+  rationale: Smaller post-merge candidate surface.
+  overrides:
+    retrieval:
+      post_merge_candidates: 40
+- name: ccg_ret_postmerge_60
+  file: ccg_ret_postmerge_60.yaml
+  rationale: Larger post-merge candidate surface.
+  overrides:
+    retrieval:
+      post_merge_candidates: 60
+- name: ccg_ctx_dynstep_300
+  file: ccg_ctx_dynstep_300.yaml
+  rationale: Smaller dynamic budget expansion step.
+  overrides:
+    context:
+      dynamic_budget_step_tokens: 300
+- name: ccg_ctx_dynstep_500
+  file: ccg_ctx_dynstep_500.yaml
+  rationale: Larger dynamic budget expansion step.
+  overrides:
+    context:
+      dynamic_budget_step_tokens: 500
+- name: ccg_ctx_dynexp_1
+  file: ccg_ctx_dynexp_1.yaml
+  rationale: More conservative dynamic expansion count.
+  overrides:
+    context:
+      dynamic_budget_max_expansions: 1
+- name: ccg_ctx_dynexp_3
+  file: ccg_ctx_dynexp_3.yaml
+  rationale: More aggressive dynamic expansion count.
+  overrides:
+    context:
+      dynamic_budget_max_expansions: 3
+- name: ccg_ctx_relgate_020
+  file: ccg_ctx_relgate_020.yaml
+  rationale: Loosen relevance gate to admit more blocks.
+  overrides:
+    context:
+      relevance_gate_threshold: 0.2
+- name: ccg_ctx_relgate_030
+  file: ccg_ctx_relgate_030.yaml
+  rationale: Tighten relevance gate to reject weaker blocks.
+  overrides:
+    context:
+      relevance_gate_threshold: 0.3
+- name: ccg_ctx_graph_015
+  file: ccg_ctx_graph_015.yaml
+  rationale: Reduce graph bias, return weight to RRF.
+  overrides:
+    context:
+      submodular:
+        w_rrf: 0.6
+        w_graph: 0.15
+- name: ccg_ctx_graph_025
+  file: ccg_ctx_graph_025.yaml
+  rationale: Increase graph bias, reduce RRF slightly.
+  overrides:
+    context:
+      submodular:
+        w_rrf: 0.5
+        w_graph: 0.25
+- name: ccg_rank_bm25rescue_10
+  file: ccg_rank_bm25rescue_10.yaml
+  rationale: Reduce BM25 rescue set for reranker.
+  overrides:
+    ranking:
+      reranker:
+        bm25_rescue_top_k: 10
+- name: ccg_rank_bm25rescue_20
+  file: ccg_rank_bm25rescue_20.yaml
+  rationale: Increase BM25 rescue set for reranker.
+  overrides:
+    ranking:
+      reranker:
+        bm25_rescue_top_k: 20

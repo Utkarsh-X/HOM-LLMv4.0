@@ -334,9 +334,9 @@ context:
   coherence_enabled: true
   submodular_packer_enabled: true
   submodular:
-    w_rrf: 0.55
+    w_rrf: 0.6
     w_novelty: 0.05
-    w_graph: 0.2
+    w_graph: 0.15
     w_concept: 0.2
     min_density_epsilon: 0.0003
     novelty_scaling: none

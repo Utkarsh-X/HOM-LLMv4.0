@@ -95,7 +95,7 @@ retrieval:
     graph_stitch_beam_low: 3
   coverage_recovery:
     enabled: true
-    max_additions: 3
+    max_additions: 4
     max_ratio: 0.1
     bm25_top_k: 6
   static_ceiling_experiment:
@@ -107,7 +107,7 @@ retrieval:
     enabled: true
     max_additions: 3
     max_ratio: 0.2
-    scan_candidates: 8
+    scan_candidates: 10
     identifier_limit: 16
     bm25_top_k: 5
     vector_top_k: 3
@@ -294,7 +294,7 @@ ranking:
     model: tomaarsen/Qwen3-Reranker-0.6B-seq-cls
     device: auto
     top_m: 35
-    bm25_rescue_top_k: 15
+    bm25_rescue_top_k: 20
     gating:
       enabled: true
       threshold_margin: 0.2

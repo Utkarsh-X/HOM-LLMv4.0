@@ -360,7 +360,7 @@ context:
   claim_gain_swap_max_swaps: 4
   claim_gain_swap_min_relevance_floor: 0.15
   unresolved_evidence_injection_enabled: true
-  unresolved_evidence_injection_max_blocks: 2
+  unresolved_evidence_injection_max_blocks: 3
   unresolved_evidence_injection_min_claim_gain: 0.1
   unresolved_evidence_injection_relevance_floor: 0.15
   unresolved_evidence_injection_max_token_share: 0.15

@@ -344,7 +344,7 @@ context:
     noise_guard_min_file_ratio: 0.6
     noise_guard_rrf_ratio_threshold: 0.85
   relevance_gate_enabled: true
-  relevance_gate_threshold: 0.25
+  relevance_gate_threshold: 0.3
   low_value_suppression_enabled: false
   low_value_suppression_min_keep_blocks: 18
   dynamic_budget_enabled: true

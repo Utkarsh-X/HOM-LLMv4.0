@@ -294,7 +294,7 @@ ranking:
     model: tomaarsen/Qwen3-Reranker-0.6B-seq-cls
     device: auto
     top_m: 35
-    bm25_rescue_top_k: 15
+    bm25_rescue_top_k: 10
     gating:
       enabled: true
       threshold_margin: 0.2

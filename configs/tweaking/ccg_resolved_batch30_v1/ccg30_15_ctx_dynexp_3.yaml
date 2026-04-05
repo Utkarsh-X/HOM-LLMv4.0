@@ -352,7 +352,7 @@ context:
   dynamic_budget_min_budget_limited_tokens: 128
   dynamic_budget_safety_margin_tokens: 192
   dynamic_budget_step_tokens: 400
-  dynamic_budget_max_expansions: 2
+  dynamic_budget_max_expansions: 3
   dynamic_budget_max_extra_tokens: 1200
   dynamic_budget_tail_density_ratio_trigger: 1.5
   claim_gain_swap_enabled: true

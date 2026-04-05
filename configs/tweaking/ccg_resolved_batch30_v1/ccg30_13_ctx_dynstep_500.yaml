@@ -351,7 +351,7 @@ context:
   dynamic_budget_trigger_used_pct: 0.8
   dynamic_budget_min_budget_limited_tokens: 128
   dynamic_budget_safety_margin_tokens: 192
-  dynamic_budget_step_tokens: 400
+  dynamic_budget_step_tokens: 500
   dynamic_budget_max_expansions: 2
   dynamic_budget_max_extra_tokens: 1200
   dynamic_budget_tail_density_ratio_trigger: 1.5

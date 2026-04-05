@@ -95,7 +95,7 @@ retrieval:
     graph_stitch_beam_low: 3
   coverage_recovery:
     enabled: true
-    max_additions: 3
+    max_additions: 4
     max_ratio: 0.1
     bm25_top_k: 6
   static_ceiling_experiment:

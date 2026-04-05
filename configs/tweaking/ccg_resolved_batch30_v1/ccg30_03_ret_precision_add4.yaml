@@ -105,7 +105,7 @@ retrieval:
     output_multiplier: 1
   precision_recovery:
     enabled: true
-    max_additions: 3
+    max_additions: 4
     max_ratio: 0.2
     scan_candidates: 8
     identifier_limit: 16

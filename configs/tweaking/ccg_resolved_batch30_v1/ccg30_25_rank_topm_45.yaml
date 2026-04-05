@@ -293,7 +293,7 @@ ranking:
     enabled: true
     model: tomaarsen/Qwen3-Reranker-0.6B-seq-cls
     device: auto
-    top_m: 35
+    top_m: 45
     bm25_rescue_top_k: 15
     gating:
       enabled: true
