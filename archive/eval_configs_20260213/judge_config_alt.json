@@ -1,6 +1,0 @@
-{
-  "provider": "gemini",
-  "model": "gemini-2.5-flash",
-  "api_key": "AIzaSyDw_ZFAbRVRUi7BUgJg5Lqneu7dmvsFfKA",
-  "requests_per_minute": 4
-}

@@ -1,0 +1,76 @@
+batch_name: ccg_resolved_screening_v1
+base_config: tuning/resolved_configs/ccg_v2_ab_budget5200_weights_dynamic_budget.resolved.yaml
+config_output_dir: tuning/generated_configs
+results_output_dir: tuning/results
+
+eval:
+  select: 1-20
+  generation_repeats: 1
+  generation_targets:
+    - name: gemini_flash
+      provider: gemini
+      model: gemini-2.5-flash
+
+judge:
+  baseline: eval/cursor_baseline.json
+  judge_config: eval/judge_config.json
+  repeats: 2
+  extra_repeat_on_any_query_disagreement: true
+  judge_targets:
+    - name: gemini_judge
+      provider: gemini
+
+experiments:
+  - name: baseline_resolved
+    group: control
+    rationale: Resolved winning CCG profile with runtime fallback defaults made explicit.
+    overrides: {}
+
+parameter_catalog:
+  - key: retrieval.precision_recovery.max_additions
+    subsystem: retrieval
+    priority: high
+    interaction_group: retrieval_recovery
+    current_value_source: resolved_config
+    candidate_values: [2, 3, 4]
+    notes: Precision recovery may change breadth/precision tradeoffs.
+
+  - key: retrieval.coverage_recovery.max_additions
+    subsystem: retrieval
+    priority: high
+    interaction_group: retrieval_recovery
+    current_value_source: resolved_config
+    candidate_values: [2, 3, 4]
+    notes: Closely coupled with coverage recovery itself and post-merge surface size.
+
+  - key: context.dynamic_budget_step_tokens
+    subsystem: context
+    priority: high
+    interaction_group: context_budgeting
+    current_value_source: resolved_config
+    candidate_values: [300, 400, 500]
+    notes: Budget expansion step size; likely interacts with max expansions and tail-density trigger.
+
+  - key: context.dynamic_budget_max_expansions
+    subsystem: context
+    priority: high
+    interaction_group: context_budgeting
+    current_value_source: resolved_config
+    candidate_values: [1, 2, 3]
+    notes: Controls how aggressively budget grows on hard queries.
+
+  - key: context.submodular.w_graph
+    subsystem: context
+    priority: medium
+    interaction_group: context_packing
+    current_value_source: resolved_config
+    candidate_values: [0.15, 0.20, 0.25]
+    notes: Should usually be considered together with w_rrf and w_concept.
+
+  - key: ranking.reranker.bm25_rescue_top_k
+    subsystem: ranking
+    priority: medium
+    interaction_group: reranker_rescue
+    current_value_source: resolved_config
+    candidate_values: [10, 15, 20]
+    notes: Impacts how many lexical outliers still get reranked.

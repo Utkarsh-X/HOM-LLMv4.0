@@ -1,0 +1,7 @@
+interface:
+  display_name: "Production Improvement Focus"
+  short_description: "Accuracy-first production change guardrails"
+  default_prompt: "Use $production-improvement-focus to evaluate or plan a broad production-quality improvement in HOM-LLM(v2.0)."
+
+policy:
+  allow_implicit_invocation: true
