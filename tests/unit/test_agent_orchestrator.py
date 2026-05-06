@@ -77,7 +77,11 @@ class DummyProviderRequest:
 
 
 class DummyJSONParser:
+    parsed_by_text = {}
+
     def parse(self, text: str):
+        if text in self.parsed_by_text:
+            return self.parsed_by_text[text], []
         return None, []
 
 
@@ -89,6 +93,7 @@ def stub_generation_contracts(monkeypatch):
     interfaces_module.ModelConfig = DummyModelConfig
     interfaces_module.ProviderRequest = DummyProviderRequest
     parser_module.ResilientJSONParser = DummyJSONParser
+    DummyJSONParser.parsed_by_text = {}
 
     monkeypatch.setitem(sys.modules, "homllm.generation", generation_module)
     monkeypatch.setitem(sys.modules, "homllm.generation.interfaces", interfaces_module)
@@ -285,3 +290,73 @@ def test_invoke_read_only_planner_provider_exception_returns_answer():
     assert decision.reason.startswith("planner_error:")
     assert decision.overrides == {}
     assert decision.parse_ok is False
+
+
+def test_invoke_read_only_planner_valid_retrieve_preserves_reason_and_sanitizes_overrides():
+    DummyJSONParser.parsed_by_text["valid retrieve"] = {
+        "action": "retrieve_context",
+        "reason": "need broader evidence",
+        "overrides": {
+            "bm25_top_k": "999",
+            "vector_top_k": 0,
+            "unknown": 123,
+        },
+    }
+
+    decision = invoke_read_only_planner(
+        provider=DummyPlannerProvider("valid retrieve"),
+        model_name="dummy",
+        query="Need more context",
+        iteration=1,
+        max_iterations=3,
+        last_snapshot=make_snapshot(),
+    )
+
+    assert decision.action == "retrieve_context"
+    assert decision.reason == "need broader evidence"
+    assert decision.overrides == {"bm25_top_k": 500, "vector_top_k": 1}
+    assert decision.parse_ok is True
+
+
+def test_invoke_read_only_planner_valid_answer_drops_overrides():
+    DummyJSONParser.parsed_by_text["valid answer"] = {
+        "action": "answer",
+        "reason": "context is enough",
+        "overrides": {"bm25_top_k": 250},
+    }
+
+    decision = invoke_read_only_planner(
+        provider=DummyPlannerProvider("valid answer"),
+        model_name="dummy",
+        query="Need more context",
+        iteration=1,
+        max_iterations=3,
+        last_snapshot=make_snapshot(),
+    )
+
+    assert decision.action == "answer"
+    assert decision.reason == "context is enough"
+    assert decision.overrides == {}
+    assert decision.parse_ok is True
+
+
+def test_invoke_read_only_planner_valid_retrieve_forced_to_answer_at_max():
+    DummyJSONParser.parsed_by_text["valid retrieve at max"] = {
+        "action": "retrieve_context",
+        "reason": "need broader evidence",
+        "overrides": {"bm25_top_k": 250},
+    }
+
+    decision = invoke_read_only_planner(
+        provider=DummyPlannerProvider("valid retrieve at max"),
+        model_name="dummy",
+        query="Need more context",
+        iteration=3,
+        max_iterations=3,
+        last_snapshot=make_snapshot(),
+    )
+
+    assert decision.action == "answer"
+    assert decision.reason == "need broader evidence"
+    assert decision.overrides == {}
+    assert decision.parse_ok is True
