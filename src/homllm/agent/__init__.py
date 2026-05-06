@@ -7,6 +7,17 @@ from homllm.agent.contracts import (
     VerificationGateResult,
 )
 from homllm.agent.manifests import SubagentManifest, SubagentStatus
+from homllm.agent.orchestrator import (
+    AgenticIterationSnapshot,
+    ReadOnlyPlannerDecision,
+    agentic_pass_signature,
+    apply_read_only_iteration_retrieval_config,
+    build_read_only_planner_prompt,
+    default_followup_overrides,
+    invoke_read_only_planner,
+    normalize_planner_action,
+    sanitize_planner_overrides,
+)
 from homllm.agent.permissions import PermissionDecision, PermissionMode, ToolPermissionSpec
 from homllm.agent.router import (
     RouteDecision,
@@ -33,6 +44,15 @@ __all__ = [
     "VerificationGateResult",
     "SubagentManifest",
     "SubagentStatus",
+    "AgenticIterationSnapshot",
+    "ReadOnlyPlannerDecision",
+    "agentic_pass_signature",
+    "apply_read_only_iteration_retrieval_config",
+    "build_read_only_planner_prompt",
+    "default_followup_overrides",
+    "invoke_read_only_planner",
+    "normalize_planner_action",
+    "sanitize_planner_overrides",
     "PermissionDecision",
     "PermissionMode",
     "ToolPermissionSpec",
