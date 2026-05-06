@@ -14,17 +14,34 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 import bootstrap
 import argparse
-from dataclasses import replace
+from dataclasses import asdict, replace
 import json
 import sys
 import time
 import uuid
 from pathlib import Path
 import logging
+from enum import Enum
 
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from homllm.agent import (
+    AgenticIterationSnapshot,
+    AgenticMode,
+    EvidenceAttempt,
+    EvidenceState,
+    LoopBudget,
+    ReadOnlyPlannerDecision,
+    RepetitionGuard,
+    StopReason,
+    TaskState,
+    agentic_pass_signature,
+    apply_read_only_iteration_retrieval_config,
+    default_followup_overrides,
+    invoke_read_only_planner,
+    route_agentic_mode,
+)
 from homllm.common.config import Config
 from homllm.common.types import Intent
 from homllm.context.pipeline import ContextPipeline
@@ -319,6 +336,77 @@ def parse_intelligence_levels(spec: str) -> tuple[bool, bool, bool, bool]:
 def infer_retrieval_intent(query: str) -> Intent:
     """Infer retrieval intent from query text when CLI intent is not provided."""
     return infer_runtime_retrieval_intent(query).intent
+
+
+def _create_generation_provider(provider_name: str):
+    """Create generation provider from configured provider name."""
+    if provider_name == "gemini":
+        from homllm.generation.providers import GeminiProvider
+
+        return GeminiProvider()
+    if provider_name == "openai":
+        from homllm.generation.providers import OpenAIProvider
+
+        return OpenAIProvider()
+    if provider_name == "local":
+        from homllm.generation.providers import LocalProvider
+
+        return LocalProvider()
+    raise ValueError(f"Unknown provider: {provider_name}")
+
+
+def _load_callgraph(artifacts_path: Path) -> dict:
+    """Load callgraph from artifacts directory."""
+    callgraph = {}
+    fs_adapter = FilesystemAdapter(artifacts_path)
+    if fs_adapter.exists("callgraph.json"):
+        callgraph_data = fs_adapter.read_json("callgraph.json")
+        for edge in callgraph_data.get("edges", []):
+            caller_id = edge.get("caller_id")
+            callee_id = edge.get("callee_id")
+            if caller_id and callee_id:
+                if caller_id not in callgraph:
+                    callgraph[caller_id] = []
+                callgraph[caller_id].append(callee_id)
+    return callgraph
+
+
+def _write_agentic_trace_artifact(
+    run_id: str,
+    task_state: TaskState,
+    snapshots: list[AgenticIterationSnapshot],
+    stop_reason: StopReason,
+    enabled: bool,
+) -> None:
+    """Persist read-only agentic loop trace for auditability."""
+    if not enabled:
+        return
+
+    def _to_jsonable(value):
+        if isinstance(value, Enum):
+            return value.value
+        if isinstance(value, dict):
+            return {k: _to_jsonable(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [_to_jsonable(v) for v in value]
+        return value
+
+    out_path = Path("artifacts") / "runs" / run_id / "agentic_read_only_trace.json"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "task_state": _to_jsonable(asdict(task_state)),
+        "stop_reason": _to_jsonable(stop_reason),
+        "iterations": [_to_jsonable(asdict(item)) for item in snapshots],
+        "iteration_count": len(snapshots),
+    }
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+    print_telemetry(
+        "AGENTIC_TRACE",
+        saved=str(out_path),
+        iterations=len(snapshots),
+        stop_reason=stop_reason.value,
+    )
 
 
 class QueryTelemetry:
@@ -1078,6 +1166,7 @@ def main():
         ranking_config = config.get_ranking_config()
         context_config = config.get_context_config()
         intelligence_config = config.get_intelligence_config()
+        agentic_config = config.get_agentic_config()
         generation_config = config.get_generation_config()
         intelligence_cfg_raw = getattr(config, "intelligence", {}) or {}
         claim_cov_cfg_raw = intelligence_cfg_raw.get("claim_coverage", {}) or {}
@@ -1155,76 +1244,468 @@ def main():
             max_input_tokens=indexer_config.embedding_max_tokens,
         )
 
-        # Phase 1: Retrieval
-        retrieval_start = time.perf_counter()
-        retrieval_pipeline = RetrievalPipeline(
-            config=retrieval_config,
-            bm25_index_path=indexer_config.storage.tantivy_path,
-            vector_db_path=indexer_config.storage.lancedb_path,
-            duckdb_path=indexer_config.storage.duckdb_path,
-            artifacts_path=indexer_config.storage.artifacts_path,
+        callgraph = _load_callgraph(indexer_config.storage.artifacts_path)
+        ranking_pipeline = RankingPipeline(
+            config=ranking_config,
+            callgraph=callgraph,
+        )
+        context_pipeline = ContextPipeline(
+            config=context_config,
             embedder=embedder,
+            callgraph=callgraph,
         )
 
-        retrieval_result = retrieval_pipeline.retrieve(args.query, intent=intent)
-        retrieval_end = time.perf_counter()
-        retrieval_candidate_order_top20 = [
-            str(getattr(c, "doc_id", "")) for c in retrieval_result.candidates[:20]
-        ]
+        from homllm.ranking.interfaces import RankingInput
 
-        telemetry.record_phase(
-            "RETRIEVAL",
-            retrieval_start,
-            retrieval_end,
-            candidates=len(retrieval_result.candidates),
-            bm25_count=retrieval_result.metadata.get("bm25_count", 0),
-            vector_count=retrieval_result.metadata.get("vector_count", 0),
-            merged_count=retrieval_result.metadata.get("merged_count", 0),
-            prep_ms=retrieval_result.metadata.get("prep_ms"),
-            bm25_ms=retrieval_result.metadata.get("bm25_ms"),
-            vector_ms=retrieval_result.metadata.get("vector_ms"),
-            merge_ms=retrieval_result.metadata.get("merge_ms"),
-            mmr_ms_merger=retrieval_result.metadata.get("mmr_ms_merger"),
-            granularity_ms=retrieval_result.metadata.get("granularity_ms"),
-            graph_stitch_ms=retrieval_result.metadata.get("graph_stitch_ms"),
-            expansion_ms=retrieval_result.metadata.get("expansion_ms"),
-            precision_ms=retrieval_result.metadata.get("precision_ms"),
-            precision_recovery_added=retrieval_result.metadata.get("precision_recovery_added"),
-            precision_recovery_cap=retrieval_result.metadata.get("precision_recovery_cap"),
-            precision_recovery_conf_mean=retrieval_result.metadata.get("precision_recovery_conf_mean"),
-            total_ms=retrieval_result.metadata.get("total_ms"),
-            plan_b_active=retrieval_result.metadata.get("plan_b_active"),
-            is_legacy_index=retrieval_result.metadata.get("is_legacy_index"),
-            search_mode=retrieval_result.metadata.get("search_mode"),
-            vector_calibration_mode=retrieval_result.metadata.get("vector_calibration_mode"),
-            static_ceiling_mode=retrieval_result.metadata.get("static_ceiling_mode"),
-            effective_bm25_top_k=retrieval_result.metadata.get("effective_bm25_top_k"),
-            effective_vector_top_k=retrieval_result.metadata.get("effective_vector_top_k"),
-            effective_post_merge_candidates=retrieval_result.metadata.get("effective_post_merge_candidates"),
-            effective_output_top_k=retrieval_result.metadata.get("effective_output_top_k"),
-            query_expansion_enabled=retrieval_result.metadata.get("query_expansion_enabled"),
-            query_expansion_term_count=retrieval_result.metadata.get("query_expansion_term_count"),
-            query_expansion_terms=",".join(retrieval_result.metadata.get("query_expansion_terms", [])),
-            bm25_relaxed_used=retrieval_result.metadata.get("bm25_relaxed_used"),
-            bm25_relaxed_term_count=retrieval_result.metadata.get("bm25_relaxed_term_count"),
-            bm25_original_term_count=retrieval_result.metadata.get("bm25_original_term_count"),
-            coverage_recovery_added=retrieval_result.metadata.get("coverage_recovery_added"),
-            coverage_recovery_cap=retrieval_result.metadata.get("coverage_recovery_cap"),
-            coverage_recovery_missing_domains=retrieval_result.metadata.get(
-                "coverage_recovery_missing_domains"
-            ),
-            coverage_recovery_domains_considered=retrieval_result.metadata.get(
-                "coverage_recovery_domains_considered"
-            ),
-            retrieval_candidate_order_top20=",".join(retrieval_candidate_order_top20),
-            graph_stitch_status=retrieval_result.metadata.get("graph_stitch_status"),
-            graph_stitch_status_detail=retrieval_result.metadata.get("graph_stitch_status_detail"),
-            # Tier 3: per-stage candidate count trace
-            retrieval_stage_trace=retrieval_result.metadata.get("retrieval_stage_trace"),
-            resolved_intent=retrieval_result.metadata.get("resolved_intent"),
-            intent_source=retrieval_result.metadata.get("intent_source"),
-            intent_rule=retrieval_result.metadata.get("intent_rule"),
+        def run_rrc_iteration(iteration_index: int, retrieval_cfg):
+            # Phase 1: Retrieval
+            retrieval_start = time.perf_counter()
+            current_retrieval_pipeline = RetrievalPipeline(
+                config=retrieval_cfg,
+                bm25_index_path=indexer_config.storage.tantivy_path,
+                vector_db_path=indexer_config.storage.lancedb_path,
+                duckdb_path=indexer_config.storage.duckdb_path,
+                artifacts_path=indexer_config.storage.artifacts_path,
+                embedder=embedder,
+            )
+            current_retrieval_result = current_retrieval_pipeline.retrieve(
+                args.query, intent=intent
+            )
+            retrieval_end = time.perf_counter()
+            retrieval_candidate_order_top20 = [
+                str(getattr(c, "doc_id", ""))
+                for c in current_retrieval_result.candidates[:20]
+            ]
+            telemetry.record_phase(
+                "RETRIEVAL",
+                retrieval_start,
+                retrieval_end,
+                iteration=iteration_index,
+                candidates=len(current_retrieval_result.candidates),
+                bm25_count=current_retrieval_result.metadata.get("bm25_count", 0),
+                vector_count=current_retrieval_result.metadata.get("vector_count", 0),
+                merged_count=current_retrieval_result.metadata.get("merged_count", 0),
+                prep_ms=current_retrieval_result.metadata.get("prep_ms"),
+                bm25_ms=current_retrieval_result.metadata.get("bm25_ms"),
+                vector_ms=current_retrieval_result.metadata.get("vector_ms"),
+                merge_ms=current_retrieval_result.metadata.get("merge_ms"),
+                mmr_ms_merger=current_retrieval_result.metadata.get("mmr_ms_merger"),
+                granularity_ms=current_retrieval_result.metadata.get("granularity_ms"),
+                graph_stitch_ms=current_retrieval_result.metadata.get("graph_stitch_ms"),
+                expansion_ms=current_retrieval_result.metadata.get("expansion_ms"),
+                precision_ms=current_retrieval_result.metadata.get("precision_ms"),
+                precision_recovery_added=current_retrieval_result.metadata.get("precision_recovery_added"),
+                precision_recovery_cap=current_retrieval_result.metadata.get("precision_recovery_cap"),
+                precision_recovery_conf_mean=current_retrieval_result.metadata.get("precision_recovery_conf_mean"),
+                total_ms=current_retrieval_result.metadata.get("total_ms"),
+                plan_b_active=current_retrieval_result.metadata.get("plan_b_active"),
+                is_legacy_index=current_retrieval_result.metadata.get("is_legacy_index"),
+                search_mode=current_retrieval_result.metadata.get("search_mode"),
+                vector_calibration_mode=current_retrieval_result.metadata.get("vector_calibration_mode"),
+                static_ceiling_mode=current_retrieval_result.metadata.get("static_ceiling_mode"),
+                effective_bm25_top_k=current_retrieval_result.metadata.get("effective_bm25_top_k"),
+                effective_vector_top_k=current_retrieval_result.metadata.get("effective_vector_top_k"),
+                effective_post_merge_candidates=current_retrieval_result.metadata.get("effective_post_merge_candidates"),
+                effective_output_top_k=current_retrieval_result.metadata.get("effective_output_top_k"),
+                query_expansion_enabled=current_retrieval_result.metadata.get("query_expansion_enabled"),
+                query_expansion_term_count=current_retrieval_result.metadata.get("query_expansion_term_count"),
+                query_expansion_terms=",".join(current_retrieval_result.metadata.get("query_expansion_terms", [])),
+                bm25_relaxed_used=current_retrieval_result.metadata.get("bm25_relaxed_used"),
+                bm25_relaxed_term_count=current_retrieval_result.metadata.get("bm25_relaxed_term_count"),
+                bm25_original_term_count=current_retrieval_result.metadata.get("bm25_original_term_count"),
+                coverage_recovery_added=current_retrieval_result.metadata.get("coverage_recovery_added"),
+                coverage_recovery_cap=current_retrieval_result.metadata.get("coverage_recovery_cap"),
+                coverage_recovery_missing_domains=current_retrieval_result.metadata.get(
+                    "coverage_recovery_missing_domains"
+                ),
+                coverage_recovery_domains_considered=current_retrieval_result.metadata.get(
+                    "coverage_recovery_domains_considered"
+                ),
+                retrieval_candidate_order_top20=",".join(retrieval_candidate_order_top20),
+                graph_stitch_status=current_retrieval_result.metadata.get("graph_stitch_status"),
+                graph_stitch_status_detail=current_retrieval_result.metadata.get("graph_stitch_status_detail"),
+                retrieval_stage_trace=current_retrieval_result.metadata.get("retrieval_stage_trace"),
+                resolved_intent=current_retrieval_result.metadata.get("resolved_intent"),
+                intent_source=current_retrieval_result.metadata.get("intent_source"),
+                intent_rule=current_retrieval_result.metadata.get("intent_rule"),
+            )
+
+            if not current_retrieval_result.candidates:
+                return current_retrieval_pipeline, current_retrieval_result, None, None, None
+
+            # Phase 2: Ranking
+            ranking_start = time.perf_counter()
+            ranking_input = RankingInput(
+                query=args.query,
+                candidates=tuple(current_retrieval_result.candidates),
+                config=ranking_config,
+            )
+            current_ranking_output = ranking_pipeline.rank(ranking_input)
+            ranking_end = time.perf_counter()
+            ranking_candidate_order_top20 = [
+                str(getattr(c, "doc_id", ""))
+                for c in current_ranking_output.ranked_candidates[:20]
+            ]
+            telemetry.record_phase(
+                "RANKING",
+                ranking_start,
+                ranking_end,
+                iteration=iteration_index,
+                candidates=len(current_ranking_output.ranked_candidates),
+                reranker=current_ranking_output.metadata.reranker_used,
+                reranker_unavailable=current_ranking_output.metadata.reranker_unavailable,
+                set_optimization=current_ranking_output.metadata.set_optimization,
+                signal_profile=current_ranking_output.metadata.signal_profile,
+                ranking_concentration=current_ranking_output.metadata.ranking_concentration,
+                ranking_geometry=current_ranking_output.metadata.ranking_geometry,
+                ranking_subtrace_summary=current_ranking_output.metadata.ranking_subtrace_summary,
+                ranking_candidate_order_top20=",".join(ranking_candidate_order_top20),
+            )
+
+            # Phase 3: Context Assembly
+            context_start = time.perf_counter()
+            current_context_artifact = context_pipeline.assemble(
+                ranking_output=current_ranking_output,
+                query=args.query,
+                query_id=current_retrieval_result.query_id,
+            )
+            context_end = time.perf_counter()
+            telemetry.record_phase(
+                "CONTEXT",
+                context_start,
+                context_end,
+                iteration=iteration_index,
+                blocks=len(current_context_artifact.blocks),
+                tokens=current_context_artifact.used_tokens,
+                token_budget=current_context_artifact.token_budget,
+                generation_reserve=context_config.generation_reserve_tokens,
+                tokens_remaining=(
+                    current_context_artifact.token_budget
+                    + context_config.generation_reserve_tokens
+                )
+                - current_context_artifact.used_tokens,
+                dynamic_budget_triggered=(
+                    (current_context_artifact.provenance.get("dynamic_budget") or {}).get("triggered")
+                ),
+                dynamic_budget_current_budget=(
+                    (current_context_artifact.provenance.get("dynamic_budget") or {}).get("current_budget")
+                ),
+                ranking_surface_lock_enabled=current_context_artifact.provenance.get(
+                    "ranking_surface_lock_enabled"
+                ),
+                ranking_order_preserved=current_context_artifact.provenance.get(
+                    "ranking_order_preserved"
+                ),
+                context_reorder_count=current_context_artifact.provenance.get(
+                    "context_reorder_count"
+                ),
+                ranking_authority_fallback=current_context_artifact.provenance.get(
+                    "ranking_authority_fallback"
+                ),
+                stage_counts=current_context_artifact.provenance.get("stage_counts"),
+                drop_trace=current_context_artifact.provenance.get("context_drop_trace"),
+                context_synthesis=current_context_artifact.provenance.get("context_synthesis"),
+                context_integration=current_context_artifact.provenance.get("context_integration"),
+                stage_file_histograms=(
+                    current_context_artifact.provenance.get("stage_file_histograms")
+                    if diagnostics_enabled
+                    else None
+                ),
+                scored_order_top10=(
+                    current_context_artifact.provenance.get("scored_order_top10")
+                    if diagnostics_enabled
+                    else None
+                ),
+                coherence_refinement=current_context_artifact.provenance.get("coherence_refinement"),
+                stitching=current_context_artifact.provenance.get("stitching"),
+                submodular_packer=current_context_artifact.provenance.get("submodular_packer"),
+                claim_gain_swap=current_context_artifact.provenance.get("claim_gain_swap"),
+                depth_preservation_check=current_context_artifact.provenance.get("depth_preservation_check"),
+                utilization_diagnostic=current_context_artifact.provenance.get("utilization_diagnostic"),
+            )
+            return (
+                current_retrieval_pipeline,
+                current_retrieval_result,
+                current_ranking_output,
+                current_context_artifact,
+                context_end,
+            )
+
+        route_decision = route_agentic_mode(
+            agentic_config=agentic_config,
+            intent=intent,
+            query=args.query,
         )
+        agentic_mode = route_decision.mode
+        read_only_agentic_enabled = bool(
+            agentic_config.enabled and agentic_mode == AgenticMode.READ_ONLY_AGENTIC
+        )
+        max_iterations = (
+            max(1, int(agentic_config.loop.read_only_max_iterations))
+            if read_only_agentic_enabled
+            else 1
+        )
+        loop_budget = LoopBudget(
+            max_iterations=max_iterations,
+            max_repeated_signature=max(
+                1, int(agentic_config.loop.max_repeated_signature)
+            ),
+            max_command_failures=max(0, int(agentic_config.loop.max_command_failures)),
+        )
+        repetition_guard = RepetitionGuard(
+            max_repeated_signature=loop_budget.max_repeated_signature
+        )
+        provider_name = args.provider or generation_config.default_provider
+        model_name = args.model or generation_config.default_model
+        provider = None
+        task_state = TaskState(
+            task_id=telemetry.run_id,
+            query=args.query,
+            mode=(
+                AgenticMode.READ_ONLY_AGENTIC
+                if read_only_agentic_enabled
+                else AgenticMode.SINGLE_PASS
+            ),
+            task_class=route_decision.task_class,
+            iteration=0,
+            max_iterations=loop_budget.max_iterations,
+        )
+        agentic_snapshots: list[AgenticIterationSnapshot] = []
+        agentic_stop_reason = StopReason.COMPLETED
+
+        retrieval_pipeline = None
+        retrieval_result = None
+        ranking_output = None
+        context_artifact = None
+        context_end = None
+        pending_retrieval_overrides: dict = {}
+
+        for iteration in range(1, loop_budget.max_iterations + 1):
+            if read_only_agentic_enabled:
+                iteration_retrieval_config, iteration_overrides = (
+                    apply_read_only_iteration_retrieval_config(
+                        retrieval_config, pending_retrieval_overrides
+                    )
+                )
+            else:
+                iteration_retrieval_config, iteration_overrides = retrieval_config, {}
+
+            (
+                iteration_pipeline,
+                iteration_retrieval_result,
+                iteration_ranking_output,
+                iteration_context_artifact,
+                iteration_context_end,
+            ) = run_rrc_iteration(iteration, iteration_retrieval_config)
+
+            retrieval_pipeline = iteration_pipeline
+            retrieval_result = iteration_retrieval_result
+            if iteration_ranking_output is not None and iteration_context_artifact is not None:
+                ranking_output = iteration_ranking_output
+                context_artifact = iteration_context_artifact
+                context_end = iteration_context_end
+
+            signature = agentic_pass_signature(
+                iteration_retrieval_result,
+                iteration_ranking_output,
+                iteration_context_artifact,
+            )
+            repeated_count = repetition_guard.register(signature)
+            repetition_stop = read_only_agentic_enabled and repetition_guard.should_stop(signature)
+
+            planner_decision = ReadOnlyPlannerDecision.answer("single_pass_mode")
+            needs_more_context = False
+            if read_only_agentic_enabled:
+                if repetition_stop:
+                    planner_decision = ReadOnlyPlannerDecision.answer(
+                        "repeated_no_progress"
+                    )
+                elif iteration_ranking_output is None or iteration_context_artifact is None:
+                    if iteration < loop_budget.max_iterations:
+                        planner_decision = ReadOnlyPlannerDecision.retrieve_context(
+                            "missing_ranking_or_context_artifact"
+                        )
+                        needs_more_context = True
+                    else:
+                        planner_decision = ReadOnlyPlannerDecision.answer(
+                            "max_iterations_reached_without_complete_artifacts"
+                        )
+                elif iteration >= loop_budget.max_iterations:
+                    planner_decision = ReadOnlyPlannerDecision.answer(
+                        "max_iterations_reached"
+                    )
+                else:
+                    if provider is None:
+                        try:
+                            provider = _create_generation_provider(provider_name)
+                        except Exception as provider_error:
+                            logger.error(f"Error: {provider_error}")
+                            sys.exit(1)
+                    planner_decision = invoke_read_only_planner(
+                        provider=provider,
+                        model_name=model_name,
+                        query=args.query,
+                        iteration=iteration,
+                        max_iterations=loop_budget.max_iterations,
+                        last_snapshot=AgenticIterationSnapshot(
+                            iteration=iteration,
+                            retrieval_overrides=iteration_overrides,
+                            retrieval_candidates=len(iteration_retrieval_result.candidates),
+                            ranking_candidates=(
+                                len(iteration_ranking_output.ranked_candidates)
+                                if iteration_ranking_output is not None
+                                else 0
+                            ),
+                            context_blocks=(
+                                len(iteration_context_artifact.blocks)
+                                if iteration_context_artifact is not None
+                                else 0
+                            ),
+                            context_tokens=int(
+                                iteration_context_artifact.used_tokens
+                                if iteration_context_artifact is not None
+                                else 0
+                            ),
+                            context_budget=int(
+                                iteration_context_artifact.token_budget
+                                if iteration_context_artifact is not None
+                                else 0
+                            ),
+                            insufficiency_detected=False,
+                            planner_action="",
+                            planner_reason="",
+                            planner_parse_ok=True,
+                            planner_raw_text="",
+                            repeated_signature_count=repeated_count,
+                            signature=signature,
+                        ),
+                    )
+                    task_state = replace(
+                        task_state,
+                        llm_call_count=task_state.llm_call_count + 1,
+                    )
+                    needs_more_context = planner_decision.action == "retrieve_context"
+
+            snapshot = AgenticIterationSnapshot(
+                iteration=iteration,
+                retrieval_overrides=iteration_overrides,
+                retrieval_candidates=len(iteration_retrieval_result.candidates),
+                ranking_candidates=len(iteration_ranking_output.ranked_candidates)
+                if iteration_ranking_output is not None
+                else 0,
+                context_blocks=len(iteration_context_artifact.blocks)
+                if iteration_context_artifact is not None
+                else 0,
+                context_tokens=int(
+                    iteration_context_artifact.used_tokens
+                    if iteration_context_artifact is not None
+                    else 0
+                ),
+                context_budget=int(
+                    iteration_context_artifact.token_budget
+                    if iteration_context_artifact is not None
+                    else 0
+                ),
+                insufficiency_detected=needs_more_context,
+                planner_action=planner_decision.action,
+                planner_reason=planner_decision.reason,
+                planner_parse_ok=planner_decision.parse_ok,
+                planner_raw_text=(planner_decision.raw_text or "")[:1200],
+                repeated_signature_count=repeated_count,
+                signature=signature,
+            )
+            agentic_snapshots.append(snapshot)
+            task_state = replace(
+                task_state,
+                iteration=iteration,
+                tool_call_count=iteration,
+                evidence=EvidenceState(
+                    attempts=task_state.evidence.attempts
+                    + (
+                        EvidenceAttempt(
+                            query=args.query,
+                            retrieved_count=snapshot.retrieval_candidates,
+                            ranked_count=snapshot.ranking_candidates,
+                            context_tokens=snapshot.context_tokens,
+                            insufficiency_detected=snapshot.insufficiency_detected,
+                        ),
+                    ),
+                    selected_doc_ids=tuple(
+                        str(getattr(c, "doc_id", ""))
+                        for c in (iteration_ranking_output.ranked_candidates[:20] if iteration_ranking_output else ())
+                    ),
+                    context_artifact_id=(
+                        str(getattr(iteration_context_artifact, "query_id", ""))
+                        if iteration_context_artifact is not None
+                        else None
+                    ),
+                ),
+            )
+            print_telemetry(
+                "AGENTIC_ITERATION",
+                enabled=read_only_agentic_enabled,
+                iteration=iteration,
+                max_iterations=loop_budget.max_iterations,
+                overrides=iteration_overrides,
+                retrieval_candidates=snapshot.retrieval_candidates,
+                context_blocks=snapshot.context_blocks,
+                context_tokens=snapshot.context_tokens,
+                insufficiency_detected=needs_more_context,
+                planner_action=planner_decision.action,
+                planner_reason=planner_decision.reason,
+                planner_parse_ok=planner_decision.parse_ok,
+                repeated_signature_count=repeated_count,
+                route_reason=route_decision.reason,
+            )
+
+            if not read_only_agentic_enabled:
+                agentic_stop_reason = StopReason.COMPLETED
+                break
+            if repetition_stop:
+                agentic_stop_reason = StopReason.REPEATED_NO_PROGRESS
+                break
+            if ranking_output is None or context_artifact is None:
+                if iteration >= loop_budget.max_iterations:
+                    agentic_stop_reason = StopReason.MAX_ITERATIONS
+                    break
+                pending_retrieval_overrides = (
+                    planner_decision.overrides
+                    or default_followup_overrides(retrieval_config, iteration)
+                )
+                continue
+            if planner_decision.action == "retrieve_context":
+                if iteration >= loop_budget.max_iterations:
+                    agentic_stop_reason = StopReason.MAX_ITERATIONS
+                    break
+                pending_retrieval_overrides = (
+                    planner_decision.overrides
+                    or default_followup_overrides(retrieval_config, iteration)
+                )
+                continue
+            if planner_decision.action == "answer":
+                agentic_stop_reason = StopReason.COMPLETED
+                break
+            if iteration >= loop_budget.max_iterations:
+                agentic_stop_reason = StopReason.MAX_ITERATIONS
+                break
+
+        task_state = replace(task_state, stop_reason=agentic_stop_reason.value)
+        _write_agentic_trace_artifact(
+            run_id=telemetry.run_id,
+            task_state=task_state,
+            snapshots=agentic_snapshots,
+            stop_reason=agentic_stop_reason,
+            enabled=read_only_agentic_enabled,
+        )
+
+        if retrieval_result is None or not retrieval_result.candidates:
+            logger.warning("No candidates retrieved")
+            return
+        if ranking_output is None or context_artifact is None:
+            logger.warning("Unable to produce ranking/context output")
+            return
+        if context_end is None:
+            context_end = time.perf_counter()
 
         _write_retrieval_diagnostics_artifact(
             run_id=telemetry.run_id,
@@ -1233,137 +1714,11 @@ def main():
             requested_intent=intent,
             enabled=True,
         )
-
-        if not retrieval_result.candidates:
-            logger.warning("No candidates retrieved")
-            return
-
-        # Phase 2: Ranking
-        ranking_start = time.perf_counter()
-
-        # Load callgraph for ranking
-        callgraph = {}
-        fs_adapter = FilesystemAdapter(indexer_config.storage.artifacts_path)
-        if fs_adapter.exists("callgraph.json"):
-            callgraph_data = fs_adapter.read_json("callgraph.json")
-            for edge in callgraph_data.get("edges", []):
-                caller_id = edge.get("caller_id")
-                callee_id = edge.get("callee_id")
-                if caller_id and callee_id:
-                    if caller_id not in callgraph:
-                        callgraph[caller_id] = []
-                    callgraph[caller_id].append(callee_id)
-
-        ranking_pipeline = RankingPipeline(
-            config=ranking_config,
-            callgraph=callgraph,
-        )
-
-        from homllm.ranking.interfaces import RankingInput
-
-        ranking_input = RankingInput(
-            query=args.query,
-            candidates=tuple(retrieval_result.candidates),
-            config=ranking_config,
-        )
-
-        ranking_output = ranking_pipeline.rank(ranking_input)
-        ranking_end = time.perf_counter()
-        ranking_candidate_order_top20 = [
-            str(getattr(c, "doc_id", "")) for c in ranking_output.ranked_candidates[:20]
-        ]
-
-        telemetry.record_phase(
-            "RANKING",
-            ranking_start,
-            ranking_end,
-            candidates=len(ranking_output.ranked_candidates),
-            reranker=ranking_output.metadata.reranker_used,
-            reranker_unavailable=ranking_output.metadata.reranker_unavailable,
-            set_optimization=ranking_output.metadata.set_optimization,
-            signal_profile=ranking_output.metadata.signal_profile,
-            ranking_concentration=ranking_output.metadata.ranking_concentration,
-            ranking_geometry=ranking_output.metadata.ranking_geometry,
-            ranking_subtrace_summary=ranking_output.metadata.ranking_subtrace_summary,
-            ranking_candidate_order_top20=",".join(ranking_candidate_order_top20),
-        )
-
-        # Diagnostic-only candidate dump (no behavior changes).
         _dump_candidate_diagnostics(
             run_id=telemetry.run_id,
             retrieval_candidates=retrieval_result.candidates,
             ranking_output=ranking_output,
             enabled=bool(args.diagnostic_layers) or bool(args.context_diagnostics),
-        )
-
-        # Phase 3: Context Assembly
-        context_start = time.perf_counter()
-        context_pipeline = ContextPipeline(
-            config=context_config,
-            embedder=embedder,
-            callgraph=callgraph,
-        )
-
-        context_artifact = context_pipeline.assemble(
-            ranking_output=ranking_output,
-            query=args.query,
-            query_id=retrieval_result.query_id,
-        )
-        context_end = time.perf_counter()
-
-        telemetry.record_phase(
-            "CONTEXT",
-            context_start,
-            context_end,
-            blocks=len(context_artifact.blocks),
-            tokens=context_artifact.used_tokens,
-            token_budget=context_artifact.token_budget,
-            generation_reserve=context_config.generation_reserve_tokens,
-            tokens_remaining=(
-                context_artifact.token_budget + context_config.generation_reserve_tokens
-            )
-            - context_artifact.used_tokens,
-            dynamic_budget_triggered=(
-                (context_artifact.provenance.get("dynamic_budget") or {}).get("triggered")
-            ),
-            dynamic_budget_current_budget=(
-                (context_artifact.provenance.get("dynamic_budget") or {}).get("current_budget")
-            ),
-            ranking_surface_lock_enabled=context_artifact.provenance.get(
-                "ranking_surface_lock_enabled"
-            ),
-            ranking_order_preserved=context_artifact.provenance.get(
-                "ranking_order_preserved"
-            ),
-            context_reorder_count=context_artifact.provenance.get(
-                "context_reorder_count"
-            ),
-            ranking_authority_fallback=context_artifact.provenance.get(
-                "ranking_authority_fallback"
-            ),
-            stage_counts=context_artifact.provenance.get("stage_counts"),
-            drop_trace=context_artifact.provenance.get("context_drop_trace"),
-            context_synthesis=context_artifact.provenance.get("context_synthesis"),
-            context_integration=context_artifact.provenance.get("context_integration"),
-            stage_file_histograms=(
-                context_artifact.provenance.get("stage_file_histograms")
-                if diagnostics_enabled
-                else None
-            ),
-            scored_order_top10=(
-                context_artifact.provenance.get("scored_order_top10")
-                if diagnostics_enabled
-                else None
-            ),
-            # Tier 2: coherence refinement + stitching telemetry
-            coherence_refinement=context_artifact.provenance.get("coherence_refinement"),
-            stitching=context_artifact.provenance.get("stitching"),
-            # Tier 3B: submodular packer telemetry
-            submodular_packer=context_artifact.provenance.get("submodular_packer"),
-            claim_gain_swap=context_artifact.provenance.get("claim_gain_swap"),
-            depth_preservation_check=context_artifact.provenance.get("depth_preservation_check"),
-            # Tier 3A: token utilization diagnostic
-            utilization_diagnostic=context_artifact.provenance.get("utilization_diagnostic"),
         )
         _write_ranking_subtrace(
             run_id=telemetry.run_id,
@@ -1847,7 +2202,6 @@ def main():
         # P2 Remediation: TOKEN_BUDGET_INCREASE (execute, then reassemble)
         # -----------------------------------------------------------------
         try:
-            from dataclasses import replace
             from homllm.sufficiency import run_sufficiency
             from homllm.remediation import run_remediation_from_sufficiency
 
@@ -2046,25 +2400,14 @@ def main():
         # Phase 5: Generation
         generation_start = time.perf_counter()
 
-        # Select provider
-        provider_name = args.provider or generation_config.default_provider
-        if provider_name == "gemini":
-            from homllm.generation.providers import GeminiProvider
+        # Select provider (reuse planner provider if already initialized)
+        if provider is None:
+            try:
+                provider = _create_generation_provider(provider_name)
+            except Exception as provider_error:
+                logger.error(f"Error: {provider_error}")
+                sys.exit(1)
 
-            provider = GeminiProvider()
-        elif provider_name == "openai":
-            from homllm.generation.providers import OpenAIProvider
-
-            provider = OpenAIProvider()
-        elif provider_name == "local":
-            from homllm.generation.providers import LocalProvider
-
-            provider = LocalProvider()
-        else:
-            logger.error(f"Error: Unknown provider: {provider_name}")
-            sys.exit(1)
-
-        model_name = args.model or generation_config.default_model
         generation_adapter = GenerationAdapter(
             provider=provider,
             default_model=model_name,
