@@ -9,11 +9,12 @@ This runbook validates that read-only agentic orchestration is clean, measured, 
 Run:
 
 ```powershell
-python -m pytest tests/unit/test_agent_router.py tests/unit/test_agent_orchestrator.py -q
+python -m pytest tests/unit/test_agentic_config.py tests/unit/test_agent_router.py tests/unit/test_agent_orchestrator.py -q
 ```
 
 Expected:
 
+- agentic config parsing tests pass
 - all router tests pass
 - all orchestrator helper tests pass
 - no provider API keys are required
