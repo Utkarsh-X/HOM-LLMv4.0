@@ -87,6 +87,38 @@ class IntelligenceConfig:
     level3_enabled: bool = True
 
 
+@dataclass
+class AgenticLoopConfig:
+    """Loop budget configuration for agentic orchestration."""
+
+    single_pass_max_iterations: int = 1
+    read_only_max_iterations: int = 4
+    verification_max_iterations: int = 3
+    execution_max_iterations: int = 3
+    patch_max_iterations: int = 2
+    max_repeated_signature: int = 2
+    max_command_failures: int = 2
+
+
+@dataclass
+class AgenticConfig:
+    """Agentic orchestration configuration."""
+
+    enabled: bool = False
+    default_mode: str = "single_pass"
+    router_enabled: bool = False
+    subagents_enabled: bool = False
+    verification_gates_enabled: bool = False
+    execution_enabled: bool = False
+    patch_enabled: bool = False
+    default_permission_mode: str = "read_only"
+    loop: AgenticLoopConfig = None
+
+    def __post_init__(self):
+        if self.loop is None:
+            self.loop = AgenticLoopConfig()
+
+
 class Config(BaseModel):
     """Root configuration."""
 
@@ -95,6 +127,7 @@ class Config(BaseModel):
     ranking: dict
     context: dict
     intelligence: dict = {}
+    agentic: dict = {}
     generation: dict
     evaluation: dict
 
@@ -547,5 +580,38 @@ class Config(BaseModel):
             level1_enabled=int_cfg.get("level1_enabled", True),
             level2_enabled=int_cfg.get("level2_enabled", True),
             level3_enabled=int_cfg.get("level3_enabled", True),
+        )
+
+    def get_agentic_config(self) -> AgenticConfig:
+        """Extract AgenticConfig from root config."""
+        agentic_cfg = self.agentic or {}
+        loop_cfg = agentic_cfg.get("loop", {})
+
+        return AgenticConfig(
+            enabled=agentic_cfg.get("enabled", False),
+            default_mode=agentic_cfg.get("default_mode", "single_pass"),
+            router_enabled=agentic_cfg.get("router_enabled", False),
+            subagents_enabled=agentic_cfg.get("subagents_enabled", False),
+            verification_gates_enabled=agentic_cfg.get(
+                "verification_gates_enabled", False
+            ),
+            execution_enabled=agentic_cfg.get("execution_enabled", False),
+            patch_enabled=agentic_cfg.get("patch_enabled", False),
+            default_permission_mode=agentic_cfg.get(
+                "default_permission_mode", "read_only"
+            ),
+            loop=AgenticLoopConfig(
+                single_pass_max_iterations=loop_cfg.get(
+                    "single_pass_max_iterations", 1
+                ),
+                read_only_max_iterations=loop_cfg.get("read_only_max_iterations", 4),
+                verification_max_iterations=loop_cfg.get(
+                    "verification_max_iterations", 3
+                ),
+                execution_max_iterations=loop_cfg.get("execution_max_iterations", 3),
+                patch_max_iterations=loop_cfg.get("patch_max_iterations", 2),
+                max_repeated_signature=loop_cfg.get("max_repeated_signature", 2),
+                max_command_failures=loop_cfg.get("max_command_failures", 2),
+            ),
         )
 
