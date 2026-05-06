@@ -1,4 +1,8 @@
+import sys
 from dataclasses import dataclass
+from types import ModuleType
+
+import pytest
 
 from homllm.agent.orchestrator import (
     AgenticIterationSnapshot,
@@ -7,6 +11,7 @@ from homllm.agent.orchestrator import (
     apply_read_only_iteration_retrieval_config,
     build_read_only_planner_prompt,
     default_followup_overrides,
+    invoke_read_only_planner,
     normalize_planner_action,
     sanitize_planner_overrides,
 )
@@ -37,6 +42,76 @@ class DummyContextArtifact:
     def __init__(self, blocks: int, used_tokens: int):
         self.blocks = [object() for _ in range(blocks)]
         self.used_tokens = used_tokens
+
+
+class DummyPlannerResponse:
+    def __init__(self, text: str):
+        self.text = text
+
+
+class DummyPlannerProvider:
+    def __init__(self, text: str):
+        self.text = text
+
+    def invoke_sync(self, request):
+        return DummyPlannerResponse(self.text)
+
+
+class FailingPlannerProvider:
+    def invoke_sync(self, request):
+        raise RuntimeError("planner unavailable")
+
+
+@dataclass
+class DummyModelConfig:
+    temperature: float
+    max_output_tokens: int
+
+
+@dataclass
+class DummyProviderRequest:
+    prompt: str
+    model: str
+    config: DummyModelConfig
+    stream: bool = False
+
+
+class DummyJSONParser:
+    def parse(self, text: str):
+        return None, []
+
+
+@pytest.fixture(autouse=True)
+def stub_generation_contracts(monkeypatch):
+    generation_module = ModuleType("homllm.generation")
+    interfaces_module = ModuleType("homllm.generation.interfaces")
+    parser_module = ModuleType("homllm.generation.parser")
+    interfaces_module.ModelConfig = DummyModelConfig
+    interfaces_module.ProviderRequest = DummyProviderRequest
+    parser_module.ResilientJSONParser = DummyJSONParser
+
+    monkeypatch.setitem(sys.modules, "homllm.generation", generation_module)
+    monkeypatch.setitem(sys.modules, "homllm.generation.interfaces", interfaces_module)
+    monkeypatch.setitem(sys.modules, "homllm.generation.parser", parser_module)
+
+
+def make_snapshot() -> AgenticIterationSnapshot:
+    return AgenticIterationSnapshot(
+        iteration=1,
+        retrieval_overrides={},
+        retrieval_candidates=50,
+        ranking_candidates=42,
+        context_blocks=36,
+        context_tokens=3612,
+        context_budget=5200,
+        insufficiency_detected=False,
+        planner_action="",
+        planner_reason="",
+        planner_parse_ok=True,
+        planner_raw_text="",
+        repeated_signature_count=1,
+        signature="ret=50|rank=42|blocks=36|tok_bucket=36",
+    )
 
 
 def test_read_only_planner_decision_defaults_to_answer():
@@ -117,22 +192,7 @@ def test_agentic_pass_signature_buckets_context_tokens():
 
 
 def test_build_read_only_planner_prompt_contains_strict_json_contract():
-    snapshot = AgenticIterationSnapshot(
-        iteration=1,
-        retrieval_overrides={},
-        retrieval_candidates=50,
-        ranking_candidates=42,
-        context_blocks=36,
-        context_tokens=3612,
-        context_budget=5200,
-        insufficiency_detected=False,
-        planner_action="",
-        planner_reason="",
-        planner_parse_ok=True,
-        planner_raw_text="",
-        repeated_signature_count=1,
-        signature="ret=50|rank=42|blocks=36|tok_bucket=36",
-    )
+    snapshot = make_snapshot()
 
     prompt = build_read_only_planner_prompt(
         query="Trace the execution flow through all layers",
@@ -145,3 +205,83 @@ def test_build_read_only_planner_prompt_contains_strict_json_contract():
     assert '"action": "retrieve_context" | "answer"' in prompt
     assert "Trace the execution flow through all layers" in prompt
     assert '"remaining_iterations": 2' in prompt
+
+
+def test_invoke_read_only_planner_uses_partial_action_from_malformed_output():
+    decision = invoke_read_only_planner(
+        provider=DummyPlannerProvider('{"action": "retrieve_context"'),
+        model_name="dummy",
+        query="Need more context",
+        iteration=1,
+        max_iterations=3,
+        last_snapshot=make_snapshot(),
+    )
+
+    assert decision.action == "retrieve_context"
+    assert decision.reason == "planner_partial_parse_action_only"
+    assert decision.overrides == {}
+    assert decision.parse_ok is False
+
+
+def test_invoke_read_only_planner_forces_partial_action_to_answer_at_max():
+    decision = invoke_read_only_planner(
+        provider=DummyPlannerProvider('{"action": "retrieve_context"'),
+        model_name="dummy",
+        query="Need more context",
+        iteration=3,
+        max_iterations=3,
+        last_snapshot=make_snapshot(),
+    )
+
+    assert decision.action == "answer"
+    assert decision.reason == "planner_partial_parse_action_only"
+    assert decision.overrides == {}
+    assert decision.parse_ok is False
+
+
+def test_invoke_read_only_planner_defaults_malformed_output_to_retrieve_before_max():
+    decision = invoke_read_only_planner(
+        provider=DummyPlannerProvider("not json at all"),
+        model_name="dummy",
+        query="Need more context",
+        iteration=1,
+        max_iterations=3,
+        last_snapshot=make_snapshot(),
+    )
+
+    assert decision.action == "retrieve_context"
+    assert decision.reason == "planner_parse_failed_default_retrieve_context"
+    assert decision.overrides == {}
+    assert decision.parse_ok is False
+
+
+def test_invoke_read_only_planner_defaults_malformed_output_to_answer_at_max():
+    decision = invoke_read_only_planner(
+        provider=DummyPlannerProvider("not json at all"),
+        model_name="dummy",
+        query="Need more context",
+        iteration=3,
+        max_iterations=3,
+        last_snapshot=make_snapshot(),
+    )
+
+    assert decision.action == "answer"
+    assert decision.reason == "planner_parse_failed_default_answer"
+    assert decision.overrides == {}
+    assert decision.parse_ok is False
+
+
+def test_invoke_read_only_planner_provider_exception_returns_answer():
+    decision = invoke_read_only_planner(
+        provider=FailingPlannerProvider(),
+        model_name="dummy",
+        query="Need more context",
+        iteration=1,
+        max_iterations=3,
+        last_snapshot=make_snapshot(),
+    )
+
+    assert decision.action == "answer"
+    assert decision.reason.startswith("planner_error:")
+    assert decision.overrides == {}
+    assert decision.parse_ok is False

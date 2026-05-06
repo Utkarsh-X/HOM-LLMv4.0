@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, replace
 
 
@@ -239,8 +240,28 @@ def invoke_read_only_planner(
         )
 
     if not isinstance(parsed, dict):
-        return ReadOnlyPlannerDecision.answer(
-            "planner_parse_failed_default_answer",
+        action_match = re.search(
+            r'"action"\s*:\s*"([^"]+)"',
+            raw_text,
+            flags=re.IGNORECASE,
+        )
+        if action_match:
+            action = normalize_planner_action(action_match.group(1))
+            if iteration >= max_iterations:
+                action = "answer"
+            return ReadOnlyPlannerDecision(
+                action=action,
+                reason="planner_partial_parse_action_only",
+                overrides={},
+                parse_ok=False,
+                raw_text=raw_text,
+            )
+
+        fallback_action = "retrieve_context" if iteration < max_iterations else "answer"
+        return ReadOnlyPlannerDecision(
+            action=fallback_action,
+            reason=f"planner_parse_failed_default_{fallback_action}",
+            overrides={},
             parse_ok=False,
             raw_text=raw_text,
         )
