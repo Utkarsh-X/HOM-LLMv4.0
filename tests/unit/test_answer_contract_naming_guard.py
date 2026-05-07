@@ -54,7 +54,10 @@ def test_absent_code_mode_activates_for_how_should_without_identifier_evidence()
     )
 
     assert contract.absent_code_mode is True
-    assert "## Repo Finding" in contract.structure_prompt
+    assert "General Guidance" not in contract.enforcement_prompt
+    assert "Design Note" not in contract.enforcement_prompt
+    assert "## Evidence-Backed Finding" in contract.structure_prompt
+    assert "## Repo Gap" in contract.structure_prompt
 
 
 def test_absent_code_mode_activates_for_missing_fallback_chain():
@@ -96,3 +99,78 @@ def test_exact_code_claim_guard_present_without_absent_code_mode():
 
     assert contract.absent_code_mode is False
     assert "Do not add file/symbol references or line-specific claims" in contract.enforcement_prompt
+
+
+def test_stress_outcome_query_requires_synthesis_not_catalog():
+    contract = build_answer_shape_contract(
+        query=(
+            "Summarize expected outcomes of a stress test with 100 concurrent requests "
+            "(errors, pool saturation, cache distribution, fallbacks, latency percentiles)."
+        ),
+        context_artifact=_context(
+            blocks=(
+                SimpleNamespace(
+                    file="database/connection.py",
+                    symbol_name="ConnectionPool.acquire",
+                    symbol_id="ConnectionPool.acquire",
+                    content="max_connections active PoolExhaustedError",
+                ),
+                SimpleNamespace(
+                    file="cache/cache_manager.py",
+                    symbol_name="CacheManager.get_stats",
+                    symbol_id="CacheManager.get_stats",
+                    content="memory_hits memory_misses redis_hits redis_misses evictions hit_rate",
+                ),
+                SimpleNamespace(
+                    file="monitoring/metrics.py",
+                    symbol_name="MetricsCollector.get_timer_stats",
+                    symbol_id="MetricsCollector.get_timer_stats",
+                    content="p50_ms p95_ms p99_ms duration timers",
+                ),
+            )
+        ),
+        coverage_report=_coverage(),
+        claim_packet=None,
+    )
+
+    assert "OUTCOME SYNTHESIS CONTRACT" in contract.enforcement_prompt
+    assert "project the expected outcome" in contract.enforcement_prompt
+    assert "Do not answer as a component catalog" in contract.enforcement_prompt
+    assert "Start the Expected Outcomes section with synthesized consequences" in contract.enforcement_prompt
+    assert "## Expected Outcomes" in contract.structure_prompt
+
+
+def test_interaction_query_requires_evidence_limited_integration_statement():
+    contract = build_answer_shape_contract(
+        query="How do all 5 optimizer rules combine with execution timing and plan caching in complex queries?",
+        context_artifact=_context(
+            blocks=(
+                SimpleNamespace(
+                    file="optimization/query_optimizer.py",
+                    symbol_name="QueryOptimizer.optimize",
+                    symbol_id="QueryOptimizer.optimize",
+                    content="Apply optimization rules in sequence estimated_cost optimization_time_ms",
+                ),
+                SimpleNamespace(
+                    file="optimization/query_planner.py",
+                    symbol_name="QueryPlanner.plan_query",
+                    symbol_id="QueryPlanner.plan_query",
+                    content="plan_cache cache_hits cache_misses Generate new plan",
+                ),
+                SimpleNamespace(
+                    file="optimization/execution_engine.py",
+                    symbol_name="ExecutionEngine.execute",
+                    symbol_id="ExecutionEngine.execute",
+                    content="Execute each step duration_ms metrics.record_timer",
+                ),
+            )
+        ),
+        coverage_report=_coverage(),
+        claim_packet=None,
+    )
+
+    assert "INTEGRATION EVIDENCE RULE" in contract.enforcement_prompt
+    assert "If the context shows separate components but no caller wiring" in contract.enforcement_prompt
+    assert "Do not use words like implicit" in contract.enforcement_prompt
+    assert "Do not include example flows that wire separate components together" in contract.enforcement_prompt
+    assert "## Evidence-Limited Integration" in contract.structure_prompt

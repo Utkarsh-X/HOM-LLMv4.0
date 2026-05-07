@@ -124,9 +124,38 @@ Add a synthesis-first answer contract for low-coverage-but-evidence-present quer
 
 This should be test-driven in `tests/unit/test_answer_contract_naming_guard.py` before touching generation behavior.
 
+## Focused Rerun Result
+
+The focused rerun was executed after adding the answer-shape fix.
+
+Generation artifacts:
+
+- Query 16: `eval/runs/ccg_stage2_agentic_ro3_answer_contract_probe/responses.jsonl`, run `8d3d620b-a157-4e00-8bbf-e7d2332d3bf1`
+- Query 18: `eval/runs/ccg_stage2_agentic_ro3_answer_contract_probe_v2/responses.jsonl`, run `b746659f-96d5-420b-bb4d-7d3bae528379`
+- Query 20: `eval/runs/ccg_stage2_agentic_ro3_answer_contract_probe_v2/responses.jsonl`, run `aa73ce8a-dea5-44eb-9015-23244489d941`
+- Combined judge input: `eval/runs/ccg_stage2_agentic_ro3_answer_contract_probe_v2/responses_combined_q16_q18_q20.jsonl`
+
+Gemini judge result:
+
+```powershell
+.\.venv\Scripts\python.exe eval/run_judge.py --responses eval/runs/ccg_stage2_agentic_ro3_answer_contract_probe_v2/responses_combined_q16_q18_q20.jsonl --baseline eval/cursor_baseline.json --judge-config eval/judge_config.json --provider gemini --rpm 2 --output eval/runs/ccg_stage2_agentic_ro3_answer_contract_probe_v2/judge_results__gemini_combined.jsonl
+```
+
+Outcome:
+
+- Query 16: improved
+- Query 18: improved
+- Query 20: improved
+- Candidate win rate on focused regression set: 100% improved, 0 regressions, 0 equal
+
+Caveats:
+
+- This is a focused regression validation, not a full promotion run.
+- Cerebras judge was unreliable for this step because repeated `429` / queue errors blocked complete judging. Gemini was used as the practical judge provider.
+- A full 20-query canary is still required before promotion.
+
 ## Decision
 
-Read-only orchestration should not be promoted yet.
+Read-only orchestration should not be promoted from only this focused result.
 
-The next correct action is a focused rerun of the three regression queries in an environment with the full runtime dependencies. If they still regress, implement a targeted answer-shape fix with tests.
-
+The targeted answer-shape fix resolved the known Q16/Q18/Q20 regression set under Gemini judging. The next correct action is a full canary run before any write/execute mode work.

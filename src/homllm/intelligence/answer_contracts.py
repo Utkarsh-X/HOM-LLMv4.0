@@ -263,6 +263,23 @@ def _query_requests_numeric_mechanism(query: str) -> bool:
     return any(marker in q for marker in markers)
 
 
+def _query_requests_outcome_synthesis(query: str) -> bool:
+    q = (query or "").lower()
+    outcome_markers = (
+        "expected outcome",
+        "expected outcomes",
+        "stress test",
+        "concurrent requests",
+        "pool saturation",
+        "cache distribution",
+        "latency percentile",
+        "latency percentiles",
+        "fallbacks",
+    )
+    hit_count = sum(1 for marker in outcome_markers if marker in q)
+    return hit_count >= 2 or ("summarize" in q and "outcome" in q)
+
+
 def _query_requests_interface_exactness(query: str) -> bool:
     q = (query or "").lower()
     exactness_markers = (
@@ -372,6 +389,7 @@ def build_answer_shape_contract(
     query_requests_examples = _query_requests_examples(query)
     query_mentions_named_rules = _query_mentions_named_rules(query)
     query_requests_numeric_mechanism = _query_requests_numeric_mechanism(query)
+    query_requests_outcome_synthesis = _query_requests_outcome_synthesis(query)
     query_requests_interface_exactness = _query_requests_interface_exactness(query)
 
     enforcement_parts: list[str] = [
@@ -387,13 +405,19 @@ def build_answer_shape_contract(
         enforcement_parts.append(
             "ABSENT-CODE RESPONSE MODE:\n"
             "- If the provided repo context does not show the requested mechanism directly, do not stop at abstention.\n"
-            "- Use a labeled 'Repo Finding' section stating what the repo does and does not show.\n"
-            "- Then use a labeled 'General Guidance' section with bounded best-practice guidance that is clearly non-repo-grounded.\n"
-            "- Add an optional 'Design Note' only if it helps explain how to make the mechanism easier to inspect in the future.\n"
-            "- Never present general guidance as repo behavior.\n"
+            "- Start with the closest evidence-backed behavior that is shown in the repo.\n"
+            "- Then state the precise repo gap that prevents confirming the requested mechanism.\n"
+            "- Include improvement options only when the user asks for design advice; keep them tied to the observed gap, not generic best practices.\n"
+            "- Never present improvement options as repo behavior.\n"
             "- Never invent file, symbol, or control-flow evidence for the missing mechanism.\n"
         )
-        structure_sections.extend(["## Repo Finding", "## General Guidance", "## Design Note"])
+        structure_sections.extend(
+            [
+                "## Evidence-Backed Finding",
+                "## Repo Gap",
+                "## Evidence-Limited Implication",
+            ]
+        )
 
     if query_class == "flow":
         enforcement_parts.append(
@@ -521,10 +545,19 @@ def build_answer_shape_contract(
                 "- Place those phases explicitly in the interaction flow instead of leaving them implicit.\n"
                 "- If the evidence supports a concrete multi-step path, include exactly one compact evidence-backed example.\n"
             )
+            enforcement_parts.append(
+                "INTEGRATION EVIDENCE RULE:\n"
+                "- If the context shows separate components but no caller wiring between them, say that directly before explaining their individual effects.\n"
+                "- Do not imply an integrated end-to-end pipeline unless a retrieved caller or method directly wires the components together.\n"
+                "- Do not use words like implicit, logical, likely, or would occur to bridge missing caller wiring.\n"
+                "- Do not include example flows that wire separate components together unless that wiring is directly shown.\n"
+                "- Prefer a concise evidence-limited integration statement over a long uncertainty appendix.\n"
+            )
         structure_sections.extend(
             [
                 "## Core Interaction",
                 "## Order / Priority",
+                "## Evidence-Limited Integration",
                 "## Why That Outcome Happens",
             ]
         )
@@ -547,6 +580,23 @@ def build_answer_shape_contract(
             "- Then explain how the code detects, combines, filters, clamps, or reports that numeric behavior.\n"
             "- If an exact formula is not shown, say that directly and stay with the observed code path instead of inventing one.\n"
             "- Do not substitute only operational handling when the query explicitly asks what causes the numeric outcome.\n"
+        )
+
+    if query_requests_outcome_synthesis:
+        enforcement_parts.append(
+            "OUTCOME SYNTHESIS CONTRACT:\n"
+            "- Start with a synthesis: project the expected outcome from the retrieved limits, branches, counters, and failure paths.\n"
+            "- Start the Expected Outcomes section with synthesized consequences, then use component evidence to justify them.\n"
+            "- Connect each outcome to its cause and evidence anchor. Do not answer as a component catalog.\n"
+            "- For stress or concurrency questions, cover error modes, saturation/backlog, cache hit/miss or eviction behavior, fallback presence/absence, and latency drivers when shown.\n"
+            "- If exact rates or percentiles are not directly computable, state the directional outcome and the missing input instead of omitting the synthesis.\n"
+        )
+        structure_sections.extend(
+            [
+                "## Expected Outcomes",
+                "## Cause / Evidence",
+                "## Unknowns That Affect Exact Numbers",
+            ]
         )
 
     if query_requests_interface_exactness:
