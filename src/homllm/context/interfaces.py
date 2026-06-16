@@ -145,6 +145,9 @@ class ContextConfig:
     unresolved_evidence_injection_replace_from_tail: bool = True
     # Tier 3B: Sufficiency escape hatch
     escape_hatch_enabled: bool = False
+    # Tier 3C: Low-value suppression for obvious glue blocks
+    low_value_suppression_enabled: bool = False
+    low_value_suppression_min_keep_blocks: int = 10
 
 
 class BlockScorer(Protocol):

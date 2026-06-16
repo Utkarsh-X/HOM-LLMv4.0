@@ -191,8 +191,8 @@ class QwenEmbedder(Embedder):
             # Normalize to unit vector
             embeddings = embeddings / torch.norm(embeddings)
 
-            # Convert to tuple of floats
-            values = tuple(embeddings.cpu().numpy().tolist())
+            # NumPy cannot materialize BF16 tensors directly; normalize to FP32 for output.
+            values = tuple(embeddings.detach().to(dtype=torch.float32).cpu().numpy().tolist())
 
             return Vector(values=values)
 

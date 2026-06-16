@@ -22,6 +22,39 @@ class _FakeEmbedder:
         return Vector(values=(0.0, 0.1, 0.2, 0.3))
 
 
+class _FakeSearchResult:
+    def limit(self, top_k: int):
+        self.top_k = top_k
+        return self
+
+    def to_pandas(self):
+        raise ModuleNotFoundError("No module named 'pandas'")
+
+    def to_arrow(self):
+        return _FakeArrowTable()
+
+
+class _FakeArrowTable:
+    def to_pylist(self):
+        return [
+            {
+                "doc_id": "d1",
+                "content": "def auth(): pass",
+                "metadata": '{"file_path": "pkg/auth.py"}',
+                "_distance": 0.0,
+            }
+        ]
+
+
+class _FakeLanceTable:
+    def __init__(self):
+        self.query = None
+
+    def search(self, query):
+        self.query = query
+        return _FakeSearchResult()
+
+
 def _tmp_dir() -> Path:
     path = Path("artifacts") / "test_tmp" / "lancedb_adapter"
     path.mkdir(parents=True, exist_ok=True)
@@ -97,6 +130,21 @@ def test_distance_to_similarity_rejects_unknown_mode():
 
     with pytest.raises(ValueError, match="Unknown vector calibration mode"):
         LanceDBAdapter._distance_to_similarity(0.25, calibration_mode="unknown_mode")
+
+
+def test_search_reads_arrow_results_without_pandas_dependency():
+    from homllm.indexer.storage.lancedb_adapter import LanceDBAdapter
+
+    adapter = LanceDBAdapter.__new__(LanceDBAdapter)
+    adapter.db = object()
+    adapter._table = _FakeLanceTable()
+
+    results = adapter.search(Vector(values=(0.1, 0.2, 0.3, 0.4)), 1)
+
+    assert len(results) == 1
+    assert results[0][0] == "d1"
+    assert results[0][2] == "def auth(): pass"
+    assert results[0][3]["file_path"] == "pkg/auth.py"
 
 
 def test_retrieval_config_rejects_unknown_vector_calibration_mode():

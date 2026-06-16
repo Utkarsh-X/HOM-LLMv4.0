@@ -214,15 +214,16 @@ class LanceDBAdapter:
         try:
             # Perform vector search - convert tuple to list for LanceDB
             query_list = list(query_vector.values)
-            results = (
-                self._table.search(query_list)
-                .limit(top_k)
-                .to_pandas()
-            )
+            search_result = self._table.search(query_list).limit(top_k)
+            if hasattr(search_result, "to_arrow"):
+                rows = search_result.to_arrow().to_pylist()
+            else:
+                results = search_result.to_pandas()
+                rows = [row for _, row in results.iterrows()]
 
             # Extract results
             output = []
-            for _, row in results.iterrows():
+            for row in rows:
                 doc_id = row.get("doc_id", "")
                 content = row.get("content", "")
                 metadata_raw = row.get("metadata", "{}")

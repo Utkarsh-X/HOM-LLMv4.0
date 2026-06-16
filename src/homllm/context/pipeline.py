@@ -563,6 +563,16 @@ class ContextPipeline:
                 [ab.block for ab in allocated_blocks]
             )
 
+            low_value_suppression_trace = {"active": False, "reason": "disabled"}
+            if getattr(self.config, "low_value_suppression_enabled", False):
+                allocated_blocks, low_value_suppression_trace = self._apply_low_value_suppression(
+                    allocated_blocks
+                )
+                stage_counts["low_value_suppression_blocks"] = len(allocated_blocks)
+                stage_file_histograms["low_value_suppression"] = _file_hist(
+                    [ab.block for ab in allocated_blocks]
+                )
+
             ranking_ids = [str(getattr(c, "doc_id", "")) for c in ranking_output.ranked_candidates]
             allocated_ids = [ab.block.block_id for ab in allocated_blocks]
             context_reorder_count = self._count_reorders(ranking_ids, allocated_ids)
@@ -650,6 +660,9 @@ class ContextPipeline:
             allocated_id_set = set(allocated_ids)
             drop_trace = []
             filtered_out_ids = set()
+            low_value_suppressed_ids = set(
+                low_value_suppression_trace.get("suppressed_block_ids", []) or []
+            )
             if precision_filter_trace and precision_filter_trace.get("dropped_block_ids"):
                 filtered_out_ids = set(precision_filter_trace["dropped_block_ids"])
             for block in blocks:
@@ -661,6 +674,8 @@ class ContextPipeline:
                     reason = "budget"
                 if block.block_id in filtered_out_ids:
                     reason = "precision_filter"
+                if block.block_id in low_value_suppressed_ids:
+                    reason = "low_value_suppression"
                 drop_trace.append(
                     {
                         "block_id": block.block_id,
@@ -749,6 +764,7 @@ class ContextPipeline:
                 "dynamic_budget": dynamic_budget_trace,
                 "precision_filter": precision_filter_trace,
                 "sparse_backfill": sparse_backfill_trace,
+                "low_value_suppression": low_value_suppression_trace,
                 "budget_guard": budget_guard_trace,
                 "claim_gain_swap": claim_gain_swap_trace,
                 "unresolved_evidence_injection": unresolved_evidence_injection_trace,
@@ -1120,6 +1136,71 @@ class ContextPipeline:
             "tokens_after": current_tokens,
             "blocks_after": len(merged),
         }
+
+    def _apply_low_value_suppression(self, allocated_blocks):
+        """Drop obvious low-value glue blocks without violating min-keep."""
+        if not allocated_blocks:
+            return allocated_blocks, {"active": False, "reason": "no_allocated_blocks"}
+
+        min_keep = int(getattr(self.config, "low_value_suppression_min_keep_blocks", 10) or 10)
+        eligible_ids = {
+            ab.block.block_id
+            for ab in allocated_blocks
+            if self._is_low_value_glue_block(ab.block)
+        }
+        if not eligible_ids:
+            return allocated_blocks, {
+                "active": False,
+                "reason": "no_eligible_low_value_blocks",
+                "suppressed_block_ids": [],
+                "blocks_suppressed": 0,
+            }
+
+        kept = [ab for ab in allocated_blocks if ab.block.block_id not in eligible_ids]
+        if len(kept) < min_keep:
+            return allocated_blocks, {
+                "active": False,
+                "reason": "min_keep_guard",
+                "suppressed_block_ids": [],
+                "blocks_suppressed": 0,
+                "candidate_block_ids": sorted(eligible_ids),
+            }
+
+        return kept, {
+            "active": True,
+            "reason": "applied",
+            "suppressed_block_ids": sorted(eligible_ids),
+            "blocks_suppressed": len(eligible_ids),
+            "blocks_before": len(allocated_blocks),
+            "blocks_after": len(kept),
+        }
+
+    @staticmethod
+    def _is_low_value_glue_block(block) -> bool:
+        file_path = str(getattr(block, "file", "") or "").replace("\\", "/")
+        if not file_path.endswith("__init__.py"):
+            return False
+
+        content = str(getattr(block, "content", "") or "").strip()
+        if not content:
+            return True
+
+        meaningful_lines = [
+            line.strip()
+            for line in content.splitlines()
+            if line.strip() and not line.strip().startswith("#")
+        ]
+        if not meaningful_lines:
+            return True
+
+        allowed_prefixes = ("from ", "import ", "__all__")
+        for line in meaningful_lines:
+            if line.startswith(('"""', "'''")) or line.endswith(('"""', "'''")):
+                continue
+            if line.startswith(allowed_prefixes):
+                continue
+            return False
+        return True
 
     def _apply_claim_gain_epsilon_swap(
         self,

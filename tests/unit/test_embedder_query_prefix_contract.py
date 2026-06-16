@@ -1,8 +1,10 @@
 """Unit tests for embed_query prefix ownership contract."""
 
 import logging
+from types import SimpleNamespace
 
 import pytest
+import torch
 
 import homllm.indexer.embedder as embedder_module
 from homllm.common.types import Vector
@@ -69,3 +71,24 @@ def test_embed_query_logs_input_for_first_five_queries(
         if record.message.startswith("[EMBED_QUERY_INPUT]")
     ]
     assert len(lines) == 5
+
+
+def test_embed_text_converts_bfloat16_embeddings_to_float_vector():
+    embedder = embedder_module.QwenEmbedder.__new__(embedder_module.QwenEmbedder)
+    embedder._model = lambda **_: SimpleNamespace(
+        last_hidden_state=torch.tensor([[[1.0, 2.0], [3.0, 4.0]]], dtype=torch.bfloat16)
+    )
+    embedder._tokenizer = lambda *_, **__: _TokenBatch({"input_ids": torch.tensor([[1, 2]])})
+    embedder._device = "cpu"
+    embedder._dimension = 2
+    embedder._effective_max_input_tokens = 8
+
+    vector = embedder._embed_text("find auth")
+
+    assert len(vector.values) == 2
+    assert all(isinstance(value, float) for value in vector.values)
+
+
+class _TokenBatch(dict):
+    def to(self, device: str):
+        return self
