@@ -12,7 +12,6 @@ API Key Configuration:
 
 import logging
 import os
-import re
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -23,6 +22,10 @@ from homllm.generation.interfaces import (
     ProviderConnector,
     ProviderRequest,
     ProviderResponse,
+)
+from homllm.generation.providers.retry_policy import (
+    call_with_llm_retries,
+    is_retryable_llm_exception,
 )
 
 logger = logging.getLogger(__name__)
@@ -244,79 +247,24 @@ class GeminiProvider(ProviderConnector):
             logger.debug("Key rotation usage recording skipped: %s", e)
 
     def _invoke_with_retry(self, model: str, prompt: str, config_dict: dict):
-        max_attempts = 4
-        for attempt in range(1, max_attempts + 1):
-            try:
-                return self._client.models.generate_content(
-                    model=model,
-                    contents=prompt,
-                    config=config_dict,
-                )
-            except Exception as e:
-                if self._is_quota_exhaustion_exception(e):
-                    self._handle_quota_exhaustion()
-                if attempt >= max_attempts or not self._is_retryable_exception(e):
-                    raise
-                sleep_s = self._retry_delay_seconds(e, attempt)
-                logger.warning(
-                    "[GEMINI_RETRY] transient error attempt=%d/%d sleep=%.1fs err=%s",
-                    attempt,
-                    max_attempts,
-                    sleep_s,
-                    str(e),
-                )
-                time.sleep(sleep_s)
-        raise RuntimeError("Gemini retry loop exhausted unexpectedly")
+        def _call():
+            return self._client.models.generate_content(
+                model=model,
+                contents=prompt,
+                config=config_dict,
+            )
 
-    @staticmethod
-    def _is_retryable_exception(exc: Exception) -> bool:
-        msg = str(exc).lower()
-        retry_tokens = (
-            "429",
-            "rate limit",
-            "resource exhausted",
-            "quota",
-            "temporarily unavailable",
-            "unavailable",
-            "deadline exceeded",
-            "timeout",
-            "timed out",
-            "internal error",
-            "500",
-            "503",
-            "connection reset",
-            "getaddrinfo failed",
-            "name resolution",
-            "temporary failure in name resolution",
-            "failed to establish a new connection",
-            "connection aborted",
-            "connection refused",
-            "connection error",
-            "network is unreachable",
+        def _on_exception(exc: Exception) -> None:
+            if self._is_quota_exhaustion_exception(exc):
+                self._handle_quota_exhaustion()
+
+        return call_with_llm_retries(
+            _call,
+            logger=logger,
+            label="GEMINI",
+            on_exception=_on_exception,
+            is_retryable=is_retryable_llm_exception,
         )
-        return any(tok in msg for tok in retry_tokens)
-
-    @staticmethod
-    def _retry_delay_seconds(exc: Exception, attempt: int) -> float:
-        """
-        Prefer provider-suggested retry delay when available.
-        Fallback: attempts 1-3 use short linear backoff (1.5s, 3s, 4.5s).
-        Attempt 4 uses a longer 5s cooldown for better recovery.
-        """
-        msg = str(exc)
-        lower = msg.lower()
-        # Gemini errors often contain: "Please retry in 39.88s."
-        m = re.search(r"retry in ([0-9]+(?:\.[0-9]+)?)s", lower)
-        if m:
-            try:
-                suggested = float(m.group(1))
-                return max(1.0, min(60.0, suggested + 0.5))
-            except Exception:
-                pass
-        # Attempt 4 gets a longer gap (5s) for better recovery
-        if attempt >= 4:
-            return 5.0
-        return min(15.0, 1.5 * attempt)
 
     @staticmethod
     def _is_quota_exhaustion_exception(exc: Exception) -> bool:
@@ -347,6 +295,18 @@ class GeminiProvider(ProviderConnector):
                 self._client = genai.Client(api_key=new_key)
         except Exception as e:
             logger.debug("Quota-exhaustion rotation handling skipped: %s", e)
+
+    @staticmethod
+    def _is_retryable_exception(exc: Exception) -> bool:
+        # Backward-compatible alias retained for any external callers.
+        return is_retryable_llm_exception(exc)
+
+    @staticmethod
+    def _retry_delay_seconds(exc: Exception, attempt: int) -> float:
+        # Retained for compatibility; retries now use fixed global schedule.
+        _ = exc
+        _ = attempt
+        return 0.0
 
     def invoke_stream(
         self, request: ProviderRequest, on_chunk: Callable[[str], None]

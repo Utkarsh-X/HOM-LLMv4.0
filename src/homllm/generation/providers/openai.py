@@ -19,6 +19,10 @@ from homllm.generation.interfaces import (
     ProviderRequest,
     ProviderResponse,
 )
+from homllm.generation.providers.retry_policy import (
+    call_with_llm_retries,
+    is_retryable_llm_exception,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -127,7 +131,12 @@ class OpenAIProvider(ProviderConnector):
                 kwargs["top_p"] = request.config.top_p
 
             # Invoke API
-            response = self._client.chat.completions.create(**kwargs)
+            response = call_with_llm_retries(
+                lambda: self._client.chat.completions.create(**kwargs),
+                logger=logger,
+                label="OPENAI",
+                is_retryable=is_retryable_llm_exception,
+            )
 
             latency_ms = int((time.time() - start_time) * 1000)
 
@@ -174,7 +183,13 @@ class OpenAIProvider(ProviderConnector):
 
             # Stream response
             full_text = ""
-            for chunk in self._client.chat.completions.create(**kwargs):
+            stream = call_with_llm_retries(
+                lambda: self._client.chat.completions.create(**kwargs),
+                logger=logger,
+                label="OPENAI",
+                is_retryable=is_retryable_llm_exception,
+            )
+            for chunk in stream:
                 if chunk.choices[0].delta.content:
                     chunk_text = chunk.choices[0].delta.content
                     full_text += chunk_text

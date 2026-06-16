@@ -594,8 +594,10 @@ def ensure_cerebras_client(cfg: JudgeConfig):
 
 
 # ------------------------------- RETRY WRAPPER -------------------------------
-# Delays: 1st try (0s), 2nd try (1s), 3rd try (1s), 4th try (3s), 5th try (5s)
-_JUDGE_RETRY_DELAYS = [0, 5, 5, 10, 10, 5, 10, 20]  # delay BEFORE each attempt
+# Initial attempt + 6 retries (delay BEFORE each attempt).
+# Retry schedule requested for transient judge failures:
+# try1(0s), try2(5s), try3(10s), try4(15s), try5(20s), try6(20s), try7(20s)
+_JUDGE_RETRY_DELAYS = [0, 5, 10, 15, 20, 20, 20]
 
 
 def _is_retryable_judge_error(exc: Exception) -> bool:
@@ -605,7 +607,7 @@ def _is_retryable_judge_error(exc: Exception) -> bool:
         "429", "rate limit", "resource exhausted", "quota",
         "temporarily unavailable", "unavailable",
         "deadline exceeded", "timeout", "timed out",
-        "internal error", "500", "503",
+        "internal error", "500", "502", "503", "504",
         "connection reset", "connection error",
         "server error", "service unavailable",
         "empty content",
@@ -627,9 +629,10 @@ def _is_quota_exhausted_error(exc: Exception) -> bool:
 
 def _retry_judge_call(fn, *args, **kwargs):
     """
-    Retry a judge API call up to 5 times with escalating delays.
+    Retry a judge API call with fixed aggressive delays.
 
-    Schedule: try1(0s) -> try2(1s) -> try3(1s) -> try4(3s) -> try5(5s)
+    Schedule: try1(0s) -> try2(5s) -> try3(10s) -> try4(15s)
+              -> try5(20s) -> try6(20s) -> try7(20s)
     Only retries transient errors. Auth/config errors propagate immediately.
     """
     last_exc = None

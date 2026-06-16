@@ -14,6 +14,10 @@ from homllm.generation.interfaces import (
     ProviderRequest,
     ProviderResponse,
 )
+from homllm.generation.providers.retry_policy import (
+    call_with_llm_retries,
+    is_retryable_llm_exception,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -67,13 +71,22 @@ class GenericHTTPProvider(ProviderConnector):
                 payload["seed"] = request.config.seed
 
             # Make request
-            response = requests.post(
-                f"{self.base_url}/v1/chat/completions",
-                json=payload,
-                headers=self.headers,
-                timeout=180,
+            def _call_sync():
+                resp = requests.post(
+                    f"{self.base_url}/v1/chat/completions",
+                    json=payload,
+                    headers=self.headers,
+                    timeout=180,
+                )
+                resp.raise_for_status()
+                return resp
+
+            response = call_with_llm_retries(
+                _call_sync,
+                logger=logger,
+                label="GENERIC_HTTP",
+                is_retryable=is_retryable_llm_exception,
             )
-            response.raise_for_status()
 
             latency_ms = int((time.time() - start_time) * 1000)
 
@@ -115,14 +128,23 @@ class GenericHTTPProvider(ProviderConnector):
             }
 
             # Stream request
-            response = requests.post(
-                f"{self.base_url}/v1/chat/completions",
-                json=payload,
-                headers=self.headers,
-                stream=True,
-                timeout=180,
+            def _call_stream():
+                resp = requests.post(
+                    f"{self.base_url}/v1/chat/completions",
+                    json=payload,
+                    headers=self.headers,
+                    stream=True,
+                    timeout=180,
+                )
+                resp.raise_for_status()
+                return resp
+
+            response = call_with_llm_retries(
+                _call_stream,
+                logger=logger,
+                label="GENERIC_HTTP",
+                is_retryable=is_retryable_llm_exception,
             )
-            response.raise_for_status()
 
             # Parse streaming response
             full_text = ""
