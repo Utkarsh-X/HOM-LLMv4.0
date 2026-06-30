@@ -407,3 +407,53 @@ def test_provider_proposed_patch_planner_preserves_expected_hash_gate(
     assert result.ok is False
     assert result.error is not None
     assert result.error.code == "stale_context"
+
+
+def test_provider_proposed_patch_planner_falls_back_to_direct_read_when_retrieval_empty(
+    tmp_path: Path,
+) -> None:
+    original = "def add(a, b):\n    return a - b\n"
+    (tmp_path / "calculator.py").write_text(original, encoding="utf-8")
+
+    empty_retrieval = EvidenceSet(
+        evidence_set_id="empty-evidence",
+        query="fix add",
+        candidates=(),
+        diagnostics=RetrievalDiagnostics(
+            bm25_count=0,
+            vector_count=0,
+            graph_added_count=0,
+            precision_added_count=0,
+            coverage_added_count=0,
+            retrieval_disagreement=None,
+            degraded=False,
+            degradation_reason=None,
+        ),
+    )
+
+    provider = FakeProvider(
+        response_text=(
+            '{"target_file":"calculator.py",'
+            '"new_content":"def add(a, b):\\n    return a + b\\n",'
+            '"rationale":"Fallback direct read used.",'
+            '"evidence_ids":["fallback-calculator_py"],'
+            '"risk_flags":[]}'
+        )
+    )
+
+    planner = ProviderProposedPatchPlanner(
+        retrieval_service=FakeRetrievalService(output=empty_retrieval),
+        direct_read_service=DirectReadService(workspace_root=tmp_path),
+        edit_proposer=ProviderBackedEditProposer(provider=provider),
+    )
+
+    result = planner.plan(request(tmp_path))
+
+    assert result.ok is True
+    assert result.output is not None
+    assert result.output.patch_plan.target_files == ("calculator.py",)
+    assert result.output.patch_plan.evidence_ids == ("fallback-calculator_py",)
+    assert provider.last_request is not None
+    assert "fallback-calculator_py" in provider.last_request.evidence_ids
+    assert "def add(a, b)" in provider.last_request.prompt
+
