@@ -95,7 +95,11 @@ def run_homllm_agent(request: HomllmAgentRunRequest) -> HomllmAgentRunResult:
     result = HomllmAgentRunResult(
         run_id=session_result.run_id,
         stop_reason=_overall_stop_reason(session_result),
-        error_code=session_result.edit_error_code or session_result.answer_error_code,
+        error_code=(
+            session_result.edit_error_code
+            if request.edit_intent is not None
+            else session_result.answer_error_code
+        ),
         session_state_path=str(session_state_path),
         trajectory_path=str(trajectory_path),
         artifact_root=session_result.artifact_root,
