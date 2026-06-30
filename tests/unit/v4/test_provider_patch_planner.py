@@ -454,6 +454,6 @@ def test_provider_proposed_patch_planner_falls_back_to_direct_read_when_retrieva
     assert result.output.patch_plan.target_files == ("calculator.py",)
     assert result.output.patch_plan.evidence_ids == ("fallback-calculator_py",)
     assert provider.last_request is not None
-    assert "fallback-calculator_py" in provider.last_request.evidence_ids
+    assert "fallback-calculator_py" in provider.last_request.prompt
     assert "def add(a, b)" in provider.last_request.prompt
 

@@ -7,7 +7,7 @@ from homllm_v4.contracts.edit_proposal import (
     EditProposalRequest,
 )
 from homllm_v4.contracts.errors import CapabilityError
-from homllm_v4.contracts.evidence import DirectReadRequest, EvidenceRetrievalRequest, EvidenceSet
+from homllm_v4.contracts.evidence import DirectReadRequest, EvidenceCandidate, EvidenceRetrievalRequest, EvidenceSet
 from homllm_v4.contracts.patch_plan import EvidenceBackedPatchPlanResult
 from homllm_v4.contracts.telemetry import CapabilityTelemetry
 from homllm_v4.planning.evidence_patch_planner import (
@@ -96,6 +96,37 @@ class ProviderProposedPatchPlanner:
         if not direct_read.ok or direct_read.output is None:
             return direct_read
 
+        # Check if the evidence set has any candidate matching the target file.
+        # If not, synthesize a fallback candidate from the direct read.
+        has_evidence_for_target = any(
+            candidate.file_path == target_file
+            for candidate in retrieval.output.candidates
+        )
+        if not has_evidence_for_target:
+            fallback_cand_id = f"fallback-{target_file.replace('/', '_').replace('\\', '_').replace('.', '_')}"
+            fallback_candidate = EvidenceCandidate(
+                candidate_id=fallback_cand_id,
+                file_path=target_file,
+                symbol_id=None,
+                span_start=1,
+                span_end=None,
+                content_hash=direct_read.output.content_hash or "",
+                source_channels=("direct_read_fallback",),
+                bm25_score=1.0,
+                vector_score=None,
+                graph_score=None,
+                retrieval_score=1.0,
+                metadata={"content": direct_read.output.content_excerpt},
+            )
+            evidence_set = EvidenceSet(
+                evidence_set_id=retrieval.output.evidence_set_id,
+                query=retrieval.output.query,
+                candidates=retrieval.output.candidates + (fallback_candidate,),
+                diagnostics=retrieval.output.diagnostics,
+            )
+        else:
+            evidence_set = retrieval.output
+
         proposal = self.edit_proposer.propose(
             EditProposalRequest(
                 task_id=request.task_id,
@@ -105,13 +136,13 @@ class ProviderProposedPatchPlanner:
                 current_content=direct_read.output.content_excerpt,
                 evidence_ids=tuple(
                     candidate.candidate_id
-                    for candidate in retrieval.output.candidates
+                    for candidate in evidence_set.candidates
                     if candidate.file_path == target_file
                 ),
                 allowed_file_paths=(target_file,),
                 verification_summary=" ".join(request.verification_argv),
                 evidence_context=_evidence_context_for_target(
-                    retrieval.output,
+                    evidence_set,
                     target_file,
                 ),
                 repair_context=request.repair_context,
@@ -130,7 +161,7 @@ class ProviderProposedPatchPlanner:
                 target_file=proposal.output.target_file,
                 intent=request.intent,
                 expected_behavior=request.expected_behavior,
-                evidence_set=retrieval.output,
+                evidence_set=evidence_set,
                 direct_reads=(direct_read.output,),
                 expected_content_hash=request.expected_content_hash,
                 new_content=_preserve_original_trailing_newline(
