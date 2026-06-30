@@ -103,7 +103,8 @@ class ProviderProposedPatchPlanner:
             for candidate in retrieval.output.candidates
         )
         if not has_evidence_for_target:
-            fallback_cand_id = f"fallback-{target_file.replace('/', '_').replace('\\', '_').replace('.', '_')}"
+            safe_target = target_file.replace('/', '_').replace('\\', '_').replace('.', '_')
+            fallback_cand_id = f"fallback-{safe_target}"
             fallback_candidate = EvidenceCandidate(
                 candidate_id=fallback_cand_id,
                 file_path=target_file,
