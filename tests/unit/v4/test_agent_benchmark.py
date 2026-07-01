@@ -73,6 +73,7 @@ def test_run_homllm_agent_benchmark_aggregates_trajectory_metrics(
             index_metrics={"source_file_count": 4},
         )
 
+    (tmp_path / "config.yaml").write_text("{}", encoding="utf-8")
     result = run_homllm_agent_benchmark(
         config_path=tmp_path / "config.yaml",
         source_workspace_root=source_workspace,
@@ -105,3 +106,71 @@ def test_run_homllm_agent_benchmark_aggregates_trajectory_metrics(
     assert (
         tmp_path / "runs" / "bench" / "evaluation" / "summary.json"
     ).is_file()
+
+
+def test_run_homllm_agent_benchmark_checks_config_existence(tmp_path: Path) -> None:
+    import pytest
+    source_workspace = tmp_path / "source"
+    source_workspace.mkdir()
+
+    with pytest.raises(ValueError, match="config_not_found"):
+        run_homllm_agent_benchmark(
+            config_path=tmp_path / "config.yaml",
+            source_workspace_root=source_workspace,
+            workspace_root=tmp_path / "work",
+            artifact_root=tmp_path / "runs",
+            run_id="bench",
+        )
+
+
+def test_run_homllm_agent_benchmark_checks_source_workspace_existence(tmp_path: Path) -> None:
+    import pytest
+    (tmp_path / "config.yaml").write_text("{}", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="source_workspace_root_not_found"):
+        run_homllm_agent_benchmark(
+            config_path=tmp_path / "config.yaml",
+            source_workspace_root=tmp_path / "nonexistent_source",
+            workspace_root=tmp_path / "work",
+            artifact_root=tmp_path / "runs",
+            run_id="bench",
+        )
+
+
+def test_run_homllm_agent_benchmark_checks_live_api_key_presence(tmp_path: Path) -> None:
+    import pytest
+    (tmp_path / "config.yaml").write_text("{}", encoding="utf-8")
+    source_workspace = tmp_path / "source"
+    source_workspace.mkdir()
+
+    with pytest.raises(ValueError, match="live_api_key_required"):
+        run_homllm_agent_benchmark(
+            config_path=tmp_path / "config.yaml",
+            source_workspace_root=source_workspace,
+            workspace_root=tmp_path / "work",
+            artifact_root=tmp_path / "runs",
+            run_id="bench",
+            answer_provider_mode="live",
+            live_api_key=None,
+        )
+
+
+def test_run_homllm_agent_benchmark_checks_case_workspace_exists_upfront(tmp_path: Path) -> None:
+    import pytest
+    (tmp_path / "config.yaml").write_text("{}", encoding="utf-8")
+    source_workspace = tmp_path / "source"
+    source_workspace.mkdir()
+
+    case_workspace = tmp_path / "work" / "bench" / "cases" / INTERNAL_AGENT_BENCHMARK_CASES[0].case_id
+    case_workspace.mkdir(parents=True)
+
+    with pytest.raises(ValueError, match="case_workspace_exists"):
+        run_homllm_agent_benchmark(
+            config_path=tmp_path / "config.yaml",
+            source_workspace_root=source_workspace,
+            workspace_root=tmp_path / "work",
+            artifact_root=tmp_path / "runs",
+            run_id="bench",
+            case_ids=(INTERNAL_AGENT_BENCHMARK_CASES[0].case_id,),
+        )
+
