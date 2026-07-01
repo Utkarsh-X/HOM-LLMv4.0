@@ -197,11 +197,26 @@ def run_homllm_agent_benchmark(
     index_skip_vectors: bool = False,
     agent_runner=run_homllm_agent,
 ) -> EvaluationRunResult:
-    resolved_run_id = run_id or str(uuid4())
+    config_path = Path(config_path)
+    if not config_path.exists():
+        raise ValueError(f"config_not_found: {config_path}")
+
     source_workspace_root = Path(source_workspace_root).resolve()
+    if not source_workspace_root.exists():
+        raise ValueError(f"source_workspace_root_not_found: {source_workspace_root}")
+
+    if answer_provider_mode == "live" and not live_api_key:
+        raise ValueError("live_api_key_required")
+
+    resolved_run_id = run_id or str(uuid4())
     workspace_root = Path(workspace_root).resolve()
     artifact_root = Path(artifact_root).resolve()
     cases = _select_cases(case_ids)
+
+    for case in cases:
+        target = workspace_root / resolved_run_id / "cases" / case.case_id
+        if target.exists():
+            raise ValueError(f"case_workspace_exists: {target}")
     artifact_manager = ArtifactManager(
         workspace_root=workspace_root,
         artifact_root=artifact_root,
