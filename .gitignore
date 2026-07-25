@@ -72,3 +72,7 @@ eval/runs/
 eval/folder*_run_score*/
 eval/folder*_run_scores*/
 discussion/
+.agents
+.venv
+plugins
+skills
