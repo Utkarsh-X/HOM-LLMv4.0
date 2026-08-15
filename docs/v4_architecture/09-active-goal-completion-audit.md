@@ -57,10 +57,10 @@ Concrete success criteria implied by the objective and prior roadmap:
 | First local session-like command exists | `agent-session` CLI and `run_agent_session` API can prepare a run-local repo index, run a grounded read-only ask, and optionally run one bounded edit/verify sub-task with shared generated config and artifacts | Satisfied as one-shot local session slice with live Gemini smoke; not an interactive REPL |
 | Provider-grounded session answers exist | `GroundedAnswerSynthesizer` and `agent-session --answer-provider-mode live` synthesize a concise answer from retrieved `ContextPack` blocks, write provider prompt/response artifacts, expose token/prompt metrics, and fall back to the deterministic read-only summary on answer synthesis failure | Satisfied as opt-in live session-answer slice with Gemini smoke; not a broad Q&A benchmark |
 | Persistent MVP session state exists | `AgentSessionStore` writes `<artifact_root>/<session_id>/session.json` with workspace/config/index metadata and append-only turn records; `run_agent_session` persists one turn by default and supports opt-out | Satisfied as state backbone only; no headless multi-step runner yet |
-| Headless MVP agent command exists | `HomllmAgentRunRequest`, `run_homllm_agent`, and `homllm-agent run` wrap the session path, force session-state persistence, and write `<artifact_root>/<run_id>/trajectory.json` with repo-index, grounded-answer, bounded-edit, and verification steps | Satisfied as first headless product-shaped command; not yet a multi-turn autonomous loop or benchmark suite |
-| Internal homllm-agent benchmark runner exists | `run_homllm_agent_benchmark`, `INTERNAL_AGENT_BENCHMARK_CASES`, and `eval-homllm-agent` provide a 10-case internal suite that copies a workspace per case, invokes `homllm-agent run`, consumes `trajectory.json`, writes `evaluation/summary.json`, and aggregates pass/fail, stop reasons, verification counts, token metrics, index metrics, and trajectory statuses | Satisfied for local fake/injected regression coverage; live Gemini benchmark run not yet executed |
+| Headless MVP agent command exists | `HomllmAgentRunRequest`, `run_homllm_agent`, and `homllm-agent run` wrap the session path, force session-state persistence, and write `<artifact_root>/<run_id>/trajectory.json` with repo-index, grounded-answer, bounded-edit, and verification steps | Satisfied as first headless product-shaped command; not yet a multi-turn autonomous loop |
+| Internal homllm-agent benchmark runner exists | `run_homllm_agent_benchmark`, `INTERNAL_AGENT_BENCHMARK_CASES`, and `eval-homllm-agent` provide a 10-case internal suite that copies a workspace per case, invokes `homllm-agent run`, consumes `trajectory.json`, writes `evaluation/summary.json`, aggregates pass/fail, stop reasons, verification counts, token metrics, index metrics, and trajectory statuses, and rejects verified runs with incomplete/ungrounded trajectories | Satisfied for local fake/injected regression coverage and a live Gemini three-case slice; full 10-case live execution remains |
 | Real v3/index smoke exists | `HOMLLM_V4_RUN_REAL_V3_SMOKE=1` tests pass for read-only loop, retrieval-backed planner, provider-proposed planner, and provider-proposed execution | Satisfied |
-| Whole unit suite is green | `pytest tests/unit -q` -> `629 passed, 7 skipped` | Satisfied |
+| v4 unit suite is green | `.\\.venv\\Scripts\\python.exe -m pytest tests\\unit\\v4 -q` -> `220 passed, 6 skipped` | Satisfied for the v4 scope; broader repository suite is not claimed here |
 | Full product-grade coding agent exists | bounded live LLM patch synthesis results plus current internal 15-case live evidence, no external live baseline, no product UX | Not satisfied |
 
 ## Fresh Verification Evidence
@@ -328,6 +328,13 @@ Commands run in this checkpoint:
 - real-index provider suite and harness focused verification after copy fix
   - Result: `.\.venv\Scripts\python.exe -m pytest tests\unit\v4\test_real_index_provider_patch_suite.py tests\unit\v4\test_evaluation_harness.py -q` passed with `22 passed`.
 
+Additional current checkpoint evidence:
+
+- `\.venv\Scripts\python.exe -m pytest tests\unit\v4\test_python_ast_fallback.py -q` -> `1 passed`; the parser regression failed before the parent-link fix and passes after it.
+- `\.venv\Scripts\python.exe -m pytest tests\unit\v4\test_index_service_contract.py -q` -> `3 passed` after replacing eager adapter exports with lazy package exports; the previous collection error was a circular import.
+- `\.venv\Scripts\python.exe -m pytest tests\unit\v4 -q` -> `220 passed, 6 skipped`.
+- `\.venv\Scripts\python.exe runtime\v4_cli.py eval-homllm-agent --config configs\default.yaml --source-workspace-root test_repo --workspace-root temp\v4_agent_benchmark_live_3case_work --artifact-root temp\v4_agent_benchmark_live_3case_runs --run-id live-suite-3case-grounded --case-id admin-routes-compile --case-id string-truncate-guard --case-id validate-email-local-dot-guard --live-api-key-env GOOGLE_API_KEY --answer-provider-mode live --provider-repair-attempts 1 --index-skip-vectors --smoke-safe` -> exit code `0`, `3 passed_cases`, `0 failed_cases`; summary artifact: `temp/v4_agent_benchmark_live_3case_runs/live-suite-3case-grounded/evaluation/summary.json`.
+
 ## What Is Actually Achieved
 
 v4 has crossed from architecture-only into a verified research-core foundation:
@@ -400,6 +407,9 @@ v4 has crossed from architecture-only into a verified research-core foundation:
 - persistent session state: `AgentSessionStore` and `run_agent_session` now write `session.json` with effective config/index metadata and append-only turn records, giving the future headless runner a durable state backbone
 - headless MVP agent command: `run_homllm_agent` and `homllm-agent run` now reuse the session path, require persistent session state, and write a compact `trajectory.json` suitable for local benchmark harness consumption
 - internal headless-agent benchmark runner: `run_homllm_agent_benchmark` and `eval-homllm-agent` expose a 10-case local suite around `homllm-agent run`, isolate case workspaces, consume `trajectory.json`, and aggregate local benchmark summaries through the existing `EvaluationRunResult` shape
+- benchmark pass quality gate: successful cases now require built index evidence when requested, `grounded_answer=sufficient`, `bounded_edit=verified`, `verification=passed`, and both session/trajectory artifacts; incomplete runs receive `benchmark_quality_gate_failed` instead of being counted as passes
+- Python fallback index resilience: `_PythonAstNode` now links parent nodes, restoring entity/chunk extraction when tree-sitter language packages are unavailable; the v4 adapter package also uses lazy exports to avoid an index-service import cycle
+- live `eval-homllm-agent` three-case slice: run `live-suite-3case-grounded` completed `3/3` with `answer_provider_mode=live`, `trajectory_grounded_answer_status=sufficient` for all cases, `trajectory_bounded_edit_status=verified` for all cases, `trajectory_verification_status=passed` for all cases, `benchmark_quality_gate=passed` for all cases, `provider_tokens_in=12538`, and `provider_tokens_out=4644`
 - provider-proposed fixture execution through patch apply and verification
 - runnable CLI/API entrypoints
 
@@ -421,7 +431,7 @@ Missing or incomplete:
 - prompt preflight reduces live-run risk, but it is not a substitute for multi-case live synthesis evaluation
 - omitted-target provider-proposed write planning is covered by only seven real-index benchmark cases
 - semantic real-index write coverage is still narrow: twelve hand-authored behavior cases in the core fixture plus three behavior cases in the local inventory fixture, all Python and synthetic
-- the new `eval-homllm-agent` suite has regression coverage with injected/fake agent execution only; a real live Gemini run across the 10-case suite has not been executed in this slice
+- the new `eval-homllm-agent` suite has a real live Gemini three-case slice, but the full 10-case live suite has not yet been executed in this slice
 - live-provider indexed-repo provider-proposed patch execution has verified most of the current internal 15-case retrieval/evidence suite, all target-known direct-provider cases, one inventory `agent-task` smoke, and one inventory `agent-task --prepare-index` smoke; no external repository/task suite has been run
 - the direct-provider baseline is target-known, so it does not test localization, ambiguous repository navigation, or multi-file planning; it is an internal baseline, not a Cursor/Codex/SWE-agent comparison
 - arbitrary verification-command side effects are detected and can be cleaned up from local snapshots when rollback is enabled, but this is not a substitute for OS-level sandbox isolation
@@ -441,6 +451,6 @@ Do not mark the goal complete.
 
 The correct next milestone is:
 
-> M6 next slice: run a small opt-in live Gemini smoke through `eval-homllm-agent` on one or two cases, then harden any failures in trajectory metrics, benchmark isolation, or CLI preflight before expanding to the full 10-case suite.
+> M6 next slice: execute the full 10-case live `eval-homllm-agent` suite, inspect every trajectory and quality-gate failure, and then decide whether bounded live repair or benchmark-case expansion is the next highest-value work.
 
 Live-provider benchmark execution must remain opt-in and fake-provider-first by default; the benchmark runner now exists, but the full MVP is not complete until live evidence and benchmark artifacts prove the end-to-end loop under realistic cases.
