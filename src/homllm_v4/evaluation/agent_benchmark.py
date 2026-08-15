@@ -318,10 +318,14 @@ def _run_case(
             )
         )
         metrics = _case_metrics(case, result)
-        passed = (
-            result.stop_reason == case.expected_stop_reason
-            and result.error_code == case.expected_error_code
-        )
+        quality_failures = _quality_gate_failures(case, result, metrics)
+        metrics["benchmark_quality_failures"] = quality_failures
+        metrics["benchmark_quality_gate"] = "failed" if quality_failures else "passed"
+        metrics["benchmark_quality_failure_count"] = len(quality_failures)
+        passed = not quality_failures
+        error_code = result.error_code
+        if not passed and error_code is None:
+            error_code = "benchmark_quality_gate_failed"
         return EvaluationCaseResult(
             case_id=case.case_id,
             runner_id="homllm-agent",
@@ -330,7 +334,7 @@ def _run_case(
             actual_stop_reason=result.stop_reason,
             passed=passed,
             metrics=metrics,
-            error_code=result.error_code,
+            error_code=error_code,
         )
     except Exception as exc:
         return EvaluationCaseResult(
@@ -346,6 +350,40 @@ def _run_case(
             },
             error_code=f"runner_exception:{type(exc).__name__}",
         )
+
+
+def _quality_gate_failures(
+    case: AgentBenchmarkCase,
+    result: HomllmAgentRunResult,
+    metrics: dict[str, object],
+) -> tuple[str, ...]:
+    failures: list[str] = []
+    if result.stop_reason != case.expected_stop_reason:
+        failures.append("stop_reason_mismatch")
+    if result.error_code != case.expected_error_code:
+        failures.append("error_code_mismatch")
+
+    # Negative cases intentionally expect a failure and do not require the
+    # successful-run trajectory stages below.
+    if case.expected_stop_reason != "verified" or case.expected_error_code is not None:
+        return tuple(failures)
+
+    if case.prepare_index and (
+        result.index_built is not True
+        or metrics.get("trajectory_repo_index_status") != "built"
+    ):
+        failures.append("repo_index_not_built")
+    if metrics.get("trajectory_grounded_answer_status") != "sufficient":
+        failures.append("grounded_answer_not_sufficient")
+    if metrics.get("trajectory_bounded_edit_status") != "verified":
+        failures.append("bounded_edit_not_verified")
+    if metrics.get("trajectory_verification_status") != "passed":
+        failures.append("verification_not_passed")
+    if not Path(result.session_state_path).is_file():
+        failures.append("session_artifact_missing")
+    if not Path(result.trajectory_path).is_file():
+        failures.append("trajectory_artifact_missing")
+    return tuple(failures)
 
 
 def _case_metrics(

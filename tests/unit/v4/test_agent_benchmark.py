@@ -108,6 +108,74 @@ def test_run_homllm_agent_benchmark_aggregates_trajectory_metrics(
     ).is_file()
 
 
+def test_run_homllm_agent_benchmark_rejects_verified_run_with_empty_grounded_evidence(
+    tmp_path: Path,
+) -> None:
+    source_workspace = tmp_path / "source"
+    source_workspace.mkdir()
+    (source_workspace / "module.py").write_text("VALUE = 1\n", encoding="utf-8")
+
+    def fake_agent_runner(request):
+        run_dir = Path(request.artifact_root) / request.run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        session_path = run_dir / "session.json"
+        trajectory_path = run_dir / "trajectory.json"
+        session_path.write_text('{"session_id":"fake"}\n', encoding="utf-8")
+        trajectory_path.write_text(
+            json.dumps(
+                {
+                    "run_id": request.run_id,
+                    "steps": [
+                        {"name": "repo_index", "status": "built"},
+                        {"name": "grounded_answer", "status": "empty_evidence"},
+                        {"name": "bounded_edit", "status": "verified"},
+                        {"name": "verification", "status": "passed"},
+                    ],
+                    "metrics": {"index": {"source_file_count": 1}},
+                }
+            ),
+            encoding="utf-8",
+        )
+        return HomllmAgentRunResult(
+            run_id=request.run_id,
+            stop_reason="verified",
+            error_code=None,
+            session_state_path=str(session_path),
+            trajectory_path=str(trajectory_path),
+            artifact_root=str(request.artifact_root),
+            answer_text="ok",
+            answer_provider_mode=request.answer_provider_mode,
+            ask_stop_reason="empty_evidence",
+            edit_stop_reason="verified",
+            patch_attempt_count=1,
+            provider_repair_attempt_count=0,
+            verification_count=1,
+            index_built=True,
+            index_config_path=None,
+            index_artifact_paths=None,
+            index_metrics={"source_file_count": 1},
+        )
+
+    (tmp_path / "config.yaml").write_text("{}", encoding="utf-8")
+    result = run_homllm_agent_benchmark(
+        config_path=tmp_path / "config.yaml",
+        source_workspace_root=source_workspace,
+        workspace_root=tmp_path / "work",
+        artifact_root=tmp_path / "runs",
+        run_id="bench-empty-grounding",
+        case_ids=(INTERNAL_AGENT_BENCHMARK_CASES[0].case_id,),
+        live_api_key="test-key",
+        agent_runner=fake_agent_runner,
+    )
+
+    assert result.passed_cases == 0
+    assert result.failed_cases == 1
+    assert result.case_results[0].error_code == "benchmark_quality_gate_failed"
+    assert result.case_results[0].metrics["benchmark_quality_failures"] == (
+        "grounded_answer_not_sufficient",
+    )
+
+
 def test_run_homllm_agent_benchmark_checks_config_existence(tmp_path: Path) -> None:
     import pytest
     source_workspace = tmp_path / "source"
@@ -173,4 +241,3 @@ def test_run_homllm_agent_benchmark_checks_case_workspace_exists_upfront(tmp_pat
             run_id="bench",
             case_ids=(INTERNAL_AGENT_BENCHMARK_CASES[0].case_id,),
         )
-
