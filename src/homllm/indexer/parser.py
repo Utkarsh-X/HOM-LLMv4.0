@@ -44,8 +44,10 @@ class _PythonAstNode:
         self.end_byte = end_byte
         self.children = children or []
         self._fields = fields or {}
+        self.parent = None
         self.prev_sibling = None
         for index, child in enumerate(self.children):
+            child.parent = self
             child.prev_sibling = self.children[index - 1] if index > 0 else None
 
     def child_by_field_name(self, name: str):
