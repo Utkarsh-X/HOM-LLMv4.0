@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from homllm_v4.artifacts.manager import ArtifactManager
 from homllm_v4.contracts.evaluation import EvaluationCaseResult, EvaluationRunResult
+from homllm_v4.evaluation.canned_provider import PromptAwareCannedProvider
 from homllm_v4.runtime.agent_run import HomllmAgentRunRequest, HomllmAgentRunResult
 from homllm_v4.runtime.agent_run import run_homllm_agent
 
@@ -33,7 +34,11 @@ INTERNAL_AGENT_BENCHMARK_CASES = (
         expected_behavior="api/routes.py remains syntactically valid after patch execution.",
         target_file="api/routes.py",
         verification_argv=(sys.executable, "-m", "compileall", "-q", "api/routes.py"),
-        metadata={"verification_kind": "compile", "requires_localization": False},
+        metadata={
+            "verification_kind": "compile",
+            "requires_localization": False,
+            "provider_mode": "noop",
+        },
     ),
     AgentBenchmarkCase(
         case_id="cache-manager-compile",
@@ -42,7 +47,11 @@ INTERNAL_AGENT_BENCHMARK_CASES = (
         expected_behavior="cache/cache_manager.py remains syntactically valid after patch execution.",
         target_file="cache/cache_manager.py",
         verification_argv=(sys.executable, "-m", "compileall", "-q", "cache/cache_manager.py"),
-        metadata={"verification_kind": "compile", "requires_localization": False},
+        metadata={
+            "verification_kind": "compile",
+            "requires_localization": False,
+            "provider_mode": "noop",
+        },
     ),
     AgentBenchmarkCase(
         case_id="metrics-compile",
@@ -51,7 +60,11 @@ INTERNAL_AGENT_BENCHMARK_CASES = (
         expected_behavior="monitoring/metrics.py remains syntactically valid after patch execution.",
         target_file="monitoring/metrics.py",
         verification_argv=(sys.executable, "-m", "compileall", "-q", "monitoring/metrics.py"),
-        metadata={"verification_kind": "compile", "requires_localization": False},
+        metadata={
+            "verification_kind": "compile",
+            "requires_localization": False,
+            "provider_mode": "noop",
+        },
     ),
     AgentBenchmarkCase(
         case_id="string-truncate-guard",
@@ -66,7 +79,11 @@ INTERNAL_AGENT_BENCHMARK_CASES = (
             "raise SystemExit(0 if truncate_string('abcdef', 2) == 'ab' "
             "and truncate_string('abcdef', 4) == 'a...' else 1)",
         ),
-        metadata={"verification_kind": "behavior", "requires_localization": False},
+        metadata={
+            "verification_kind": "behavior",
+            "requires_localization": False,
+            "provider_mode": "truncate_guard",
+        },
     ),
     AgentBenchmarkCase(
         case_id="validate-file-path-drive-guard",
@@ -80,7 +97,11 @@ INTERNAL_AGENT_BENCHMARK_CASES = (
             "from utils.validators import validate_file_path; "
             "raise SystemExit(0 if not validate_file_path('C:/secret.txt')[0] else 1)",
         ),
-        metadata={"verification_kind": "behavior", "requires_localization": False},
+        metadata={
+            "verification_kind": "behavior",
+            "requires_localization": False,
+            "provider_mode": "file_path_drive_guard",
+        },
     ),
     AgentBenchmarkCase(
         case_id="validate-email-local-dot-guard",
@@ -95,7 +116,11 @@ INTERNAL_AGENT_BENCHMARK_CASES = (
             "raise SystemExit(0 if not validate_email('a..b@example.com')[0] "
             "and validate_email('a.b@example.com')[0] else 1)",
         ),
-        metadata={"verification_kind": "behavior", "requires_localization": False},
+        metadata={
+            "verification_kind": "behavior",
+            "requires_localization": False,
+            "provider_mode": "email_local_dot_guard",
+        },
     ),
     AgentBenchmarkCase(
         case_id="string-truncate-target-selection",
@@ -110,7 +135,11 @@ INTERNAL_AGENT_BENCHMARK_CASES = (
             "raise SystemExit(0 if truncate_string('abcdef', 2) == 'ab' "
             "and truncate_string('abcdef', 4) == 'a...' else 1)",
         ),
-        metadata={"verification_kind": "behavior", "requires_localization": True},
+        metadata={
+            "verification_kind": "behavior",
+            "requires_localization": True,
+            "provider_mode": "truncate_guard",
+        },
     ),
     AgentBenchmarkCase(
         case_id="parse-date-strip",
@@ -125,7 +154,11 @@ INTERNAL_AGENT_BENCHMARK_CASES = (
             "raise SystemExit(0 if parse_date(' 2024-01-02 ') is not None "
             "and parse_date('bad') is None else 1)",
         ),
-        metadata={"verification_kind": "behavior", "requires_localization": False},
+        metadata={
+            "verification_kind": "behavior",
+            "requires_localization": False,
+            "provider_mode": "parse_date_strip",
+        },
     ),
     AgentBenchmarkCase(
         case_id="job-queue-total-size-guard",
@@ -145,7 +178,11 @@ INTERNAL_AGENT_BENCHMARK_CASES = (
             "    ok = True\n"
             "raise SystemExit(0 if ok else 1)",
         ),
-        metadata={"verification_kind": "behavior", "requires_localization": False},
+        metadata={
+            "verification_kind": "behavior",
+            "requires_localization": False,
+            "provider_mode": "job_queue_size_guard",
+        },
     ),
     AgentBenchmarkCase(
         case_id="parse-date-target-selection",
@@ -160,7 +197,243 @@ INTERNAL_AGENT_BENCHMARK_CASES = (
             "raise SystemExit(0 if parse_date(' 2024-01-02 ') is not None "
             "and parse_date('bad') is None else 1)",
         ),
-        metadata={"verification_kind": "behavior", "requires_localization": True},
+        metadata={
+            "verification_kind": "behavior",
+            "requires_localization": True,
+            "provider_mode": "parse_date_strip",
+        },
+    ),
+    AgentBenchmarkCase(
+        case_id="cache-namespace-invalidate",
+        query="cache namespace invalidation clears all memory entries for a namespace",
+        edit_intent="Make namespace-wide cache invalidation clear all memory entries in that namespace.",
+        expected_behavior=(
+            "After setting two entries in a namespace, invalidate(namespace) makes both reads miss."
+        ),
+        target_file="cache/cache_manager.py",
+        verification_argv=(
+            sys.executable,
+            "-c",
+            "import sys, types; "
+            "sys.modules['redis'] = types.SimpleNamespace("
+            "ConnectionPool=lambda **kwargs: None, Redis=lambda connection_pool: None); "
+            "from cache.cache_manager import CacheManager; "
+            "CacheManager._instance = None; cm = CacheManager(); cm.redis = None; "
+            "cm.set('users', 'a', 1); cm.set('users', 'b', 2); "
+            "cm.invalidate('users'); "
+            "raise SystemExit(0 if cm.get('users', 'a') is None "
+            "and cm.get('users', 'b') is None else 1)",
+        ),
+        metadata={
+            "verification_kind": "behavior",
+            "requires_localization": False,
+            "provider_mode": "cache_namespace_invalidation",
+        },
+    ),
+    AgentBenchmarkCase(
+        case_id="cache-namespace-invalidate-target-selection",
+        query="cache namespace invalidation clears all memory entries for a namespace",
+        edit_intent="Make namespace-wide cache invalidation clear all memory entries in that namespace.",
+        expected_behavior=(
+            "After setting two entries in a namespace, invalidate(namespace) makes both reads miss."
+        ),
+        target_file=None,
+        verification_argv=(
+            sys.executable,
+            "-c",
+            "import sys, types; "
+            "sys.modules['redis'] = types.SimpleNamespace("
+            "ConnectionPool=lambda **kwargs: None, Redis=lambda connection_pool: None); "
+            "from cache.cache_manager import CacheManager; "
+            "CacheManager._instance = None; cm = CacheManager(); cm.redis = None; "
+            "cm.set('users', 'a', 1); cm.set('users', 'b', 2); "
+            "cm.invalidate('users'); "
+            "raise SystemExit(0 if cm.get('users', 'a') is None "
+            "and cm.get('users', 'b') is None else 1)",
+        ),
+        metadata={
+            "verification_kind": "behavior",
+            "requires_localization": True,
+            "provider_mode": "cache_namespace_invalidation",
+        },
+    ),
+    AgentBenchmarkCase(
+        case_id="metrics-labelled-stats",
+        query="labelled histogram timer stats appear in all metrics export",
+        edit_intent="Make get_all_metrics preserve labelled histogram and timer statistics.",
+        expected_behavior=(
+            "After recording labelled histogram and timer values, get_all_metrics reports "
+            "count == 1 for both labelled metric keys."
+        ),
+        target_file="monitoring/metrics.py",
+        verification_argv=(
+            sys.executable,
+            "-c",
+            "from monitoring.metrics import MetricsCollector; "
+            "MetricsCollector._instance = None; m = MetricsCollector(); "
+            "m.record_histogram('latency', 12.0, labels={'route': 'search'}); "
+            "m.record_timer('latency', 8.0, labels={'route': 'search'}); "
+            "all_metrics = m.get_all_metrics(); "
+            "ok = all_metrics['histogram_stats']['latency{route=search}']['count'] == 1 "
+            "and all_metrics['timer_stats']['latency{route=search}']['count'] == 1; "
+            "raise SystemExit(0 if ok else 1)",
+        ),
+        metadata={
+            "verification_kind": "behavior",
+            "requires_localization": False,
+            "provider_mode": "metrics_labelled_stats",
+        },
+    ),
+    AgentBenchmarkCase(
+        case_id="metrics-labelled-stats-target-selection",
+        query="labelled histogram timer stats appear in all metrics export",
+        edit_intent="Make get_all_metrics preserve labelled histogram and timer statistics.",
+        expected_behavior=(
+            "After recording labelled histogram and timer values, get_all_metrics reports "
+            "count == 1 for both labelled metric keys."
+        ),
+        target_file=None,
+        verification_argv=(
+            sys.executable,
+            "-c",
+            "from monitoring.metrics import MetricsCollector; "
+            "MetricsCollector._instance = None; m = MetricsCollector(); "
+            "m.record_histogram('latency', 12.0, labels={'route': 'search'}); "
+            "m.record_timer('latency', 8.0, labels={'route': 'search'}); "
+            "all_metrics = m.get_all_metrics(); "
+            "ok = all_metrics['histogram_stats']['latency{route=search}']['count'] == 1 "
+            "and all_metrics['timer_stats']['latency{route=search}']['count'] == 1; "
+            "raise SystemExit(0 if ok else 1)",
+        ),
+        metadata={
+            "verification_kind": "behavior",
+            "requires_localization": True,
+            "provider_mode": "metrics_labelled_stats",
+        },
+    ),
+    AgentBenchmarkCase(
+        case_id="hashing-needs-rehash-hidden-test",
+        query="security hashing needs_rehash flags legacy unsalted password hashes",
+        edit_intent=(
+            "Make needs_rehash return True for hashes that do not use the current "
+            "salted (salt:hash) format so legacy unsalted hashes get upgraded."
+        ),
+        expected_behavior=(
+            "needs_rehash returns True for unsalted or short-salt hashes and "
+            "False for freshly hashed passwords."
+        ),
+        target_file="security/hashing.py",
+        verification_argv=(
+            sys.executable,
+            "-m",
+            "pytest",
+            "tests/test_hashing.py",
+            "-q",
+        ),
+        metadata={
+            "verification_kind": "hidden_test",
+            "requires_localization": False,
+            "provider_mode": "hashing_needs_rehash",
+        },
+    ),
+    AgentBenchmarkCase(
+        case_id="filters-anonymous-public-hidden-test",
+        query="search_engine filters anonymous users cannot see public files",
+        edit_intent=(
+            "Make PermissionFilter allow anonymous users (no user_id) to see "
+            "public files while still blocking private files."
+        ),
+        expected_behavior=(
+            "filter_by_permissions keeps public file paths even when the user dict "
+            "has no user_id, and still drops private user files."
+        ),
+        target_file="search_engine/filters.py",
+        verification_argv=(
+            sys.executable,
+            "-m",
+            "pytest",
+            "tests/test_filters.py",
+            "-q",
+        ),
+        metadata={
+            "verification_kind": "hidden_test",
+            "requires_localization": False,
+            "provider_mode": "filters_anonymous_public",
+        },
+    ),
+    AgentBenchmarkCase(
+        case_id="query-optimizer-pushdown-hidden-test",
+        query="optimization query_optimizer predicate pushdown orders most selective filters first",
+        edit_intent=(
+            "Make predicate pushdown order filters from most selective "
+            "(lowest selectivity value) to least selective."
+        ),
+        expected_behavior=(
+            "After pushdown, an equality filter (selectivity 0.01) precedes a "
+            "range filter (selectivity 0.1)."
+        ),
+        target_file="optimization/query_optimizer.py",
+        verification_argv=(
+            sys.executable,
+            "-m",
+            "pytest",
+            "tests/test_query_optimizer.py",
+            "-q",
+        ),
+        metadata={
+            "verification_kind": "hidden_test",
+            "requires_localization": False,
+            "provider_mode": "query_optimizer_pushdown",
+        },
+    ),
+    AgentBenchmarkCase(
+        case_id="redis-pickle-hit-stats-hidden-test",
+        query="cache redis_client pickle deserialization counts a cache hit as a hit",
+        edit_intent=(
+            "Make RedisClient.get count a successful pickle deserialization as a "
+            "cache hit so hit/miss statistics are accurate."
+        ),
+        expected_behavior=(
+            "After a pickle round-trip, get_stats reports hits == 1 and misses == 0."
+        ),
+        target_file="cache/redis_client.py",
+        verification_argv=(
+            sys.executable,
+            "-m",
+            "pytest",
+            "tests/test_redis_client.py",
+            "-q",
+        ),
+        metadata={
+            "verification_kind": "hidden_test",
+            "requires_localization": False,
+            "provider_mode": "redis_pickle_hit_stats",
+        },
+    ),
+    AgentBenchmarkCase(
+        case_id="query-planner-parameter-aware-cache-hidden-test",
+        query="optimization query_planner plan cache distinguishes queries by parameters",
+        edit_intent=(
+            "Make QueryPlanner include query parameters in the plan cache key so "
+            "the same SQL text with different parameters produces distinct plans."
+        ),
+        expected_behavior=(
+            "plan_query with different parameters returns different plan ids and "
+            "records no cache hit for the second call."
+        ),
+        target_file="optimization/query_planner.py",
+        verification_argv=(
+            sys.executable,
+            "-m",
+            "pytest",
+            "tests/test_query_planner.py",
+            "-q",
+        ),
+        metadata={
+            "verification_kind": "hidden_test",
+            "requires_localization": False,
+            "provider_mode": "query_planner_param_cache",
+        },
     ),
 )
 
@@ -195,6 +468,7 @@ def run_homllm_agent_benchmark(
     provider_repair_attempts: int = 1,
     smoke_safe: bool = True,
     index_skip_vectors: bool = False,
+    edit_provider_mode: str = "live",
     agent_runner=run_homllm_agent,
 ) -> EvaluationRunResult:
     config_path = Path(config_path)
@@ -205,7 +479,9 @@ def run_homllm_agent_benchmark(
     if not source_workspace_root.exists():
         raise ValueError(f"source_workspace_root_not_found: {source_workspace_root}")
 
-    if answer_provider_mode == "live" and not live_api_key:
+    if edit_provider_mode not in {"fake", "live"}:
+        raise ValueError(f"unsupported_edit_provider_mode: {edit_provider_mode}")
+    if (answer_provider_mode == "live" or edit_provider_mode == "live") and not live_api_key:
         raise ValueError("live_api_key_required")
 
     resolved_run_id = run_id or str(uuid4())
@@ -245,6 +521,7 @@ def run_homllm_agent_benchmark(
             provider_repair_attempts=provider_repair_attempts,
             smoke_safe=smoke_safe,
             index_skip_vectors=index_skip_vectors,
+            edit_provider_mode=edit_provider_mode,
             agent_runner=agent_runner,
         )
         for case in cases
@@ -284,6 +561,7 @@ def _run_case(
     provider_repair_attempts: int,
     smoke_safe: bool,
     index_skip_vectors: bool,
+    edit_provider_mode: str,
     agent_runner,
 ) -> EvaluationCaseResult:
     case_workspace = _copy_case_workspace(
@@ -293,6 +571,12 @@ def _run_case(
         case_id=case.case_id,
     )
     case_run_id = f"{benchmark_run_id}-{case.case_id}"
+    edit_provider_builder = None
+    edit_require_live_api_key = True
+    if edit_provider_mode == "fake":
+        provider_mode = _case_provider_mode(case)
+        edit_provider_builder = _canned_provider_builder(provider_mode)
+        edit_require_live_api_key = False
     try:
         result: HomllmAgentRunResult = agent_runner(
             HomllmAgentRunRequest(
@@ -315,6 +599,8 @@ def _run_case(
                 provider_repair_attempts=provider_repair_attempts,
                 prepare_index=case.prepare_index,
                 index_skip_vectors=index_skip_vectors,
+                edit_provider_builder=edit_provider_builder,
+                edit_require_live_api_key=edit_require_live_api_key,
             )
         )
         metrics = _case_metrics(case, result)
@@ -384,6 +670,20 @@ def _quality_gate_failures(
     if not Path(result.trajectory_path).is_file():
         failures.append("trajectory_artifact_missing")
     return tuple(failures)
+
+
+def _case_provider_mode(case: AgentBenchmarkCase) -> str:
+    metadata = case.metadata or {}
+    return str(metadata.get("provider_mode", "noop"))
+
+
+def _canned_provider_builder(provider_mode: str):
+    provider = PromptAwareCannedProvider(provider_mode=provider_mode)
+
+    def builder(**kwargs):
+        return provider
+
+    return builder
 
 
 def _case_metrics(
