@@ -19,6 +19,7 @@ from homllm_v4.api import (
     run_python_provider_patch_fixture_suite,
     run_real_index_provider_patch_suite,
     run_read_only_query,
+    run_token_efficiency_comparison,
 )
 
 
@@ -188,6 +189,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     agent_benchmark.add_argument("--provider-repair-attempts", type=int, default=1)
     agent_benchmark.add_argument("--smoke-safe", action="store_true")
     agent_benchmark.add_argument("--index-skip-vectors", action="store_true")
+    agent_benchmark.add_argument(
+        "--edit-provider-mode",
+        choices=("fake", "live"),
+        default="live",
+        help="fake = deterministic canned provider (regression only); live = Gemini",
+    )
+    token_efficiency = subparsers.add_parser(
+        "eval-token-efficiency",
+        help="compare evidence-first prompt size vs naive full-file/full-repo context",
+    )
+    token_efficiency.add_argument("--config", required=True)
+    token_efficiency.add_argument("--source-workspace-root", required=True)
+    token_efficiency.add_argument("--workspace-root", required=True)
+    token_efficiency.add_argument("--artifact-root", required=True)
+    token_efficiency.add_argument("--run-id")
+    token_efficiency.add_argument("--case-id", action="append")
+    token_efficiency.add_argument("--index-skip-vectors", action="store_true")
+    token_efficiency.add_argument("--max-prompt-chars", type=int)
     real_index_provider_patch = subparsers.add_parser(
         "eval-real-index-provider-patch",
         help="run the v4 real-index provider-proposed patch suite",
@@ -363,6 +382,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "index_config_path": result.index_config_path,
                     "index_artifact_paths": result.index_artifact_paths,
                     "index_metrics": result.index_metrics,
+                    "rollback_occurred": result.rollback_occurred,
+                    "rollback_restored_count": result.rollback_restored_count,
+                    "rollback_deleted_count": result.rollback_deleted_count,
                 },
                 sort_keys=True,
             )
@@ -485,6 +507,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "index_config_path": result.index_config_path,
                     "index_artifact_paths": result.index_artifact_paths,
                     "index_metrics": result.index_metrics,
+                    "rollback_occurred": getattr(result, "rollback_occurred", False),
+                    "rollback_restored_count": getattr(result, "rollback_restored_count", 0),
+                    "rollback_deleted_count": getattr(result, "rollback_deleted_count", 0),
                 },
                 sort_keys=True,
             )
@@ -558,6 +583,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                         None,
                     ),
                     "index_metrics": getattr(result, "index_metrics", None),
+                    "rollback_occurred": getattr(result, "rollback_occurred", False),
+                    "rollback_restored_count": getattr(result, "rollback_restored_count", 0),
+                    "rollback_deleted_count": getattr(result, "rollback_deleted_count", 0),
                 },
                 sort_keys=True,
             )
@@ -621,17 +649,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             )
             return 0
-        missing = tuple(
-            name
-            for name, value in (
-                ("config", args.config),
-                ("source_workspace_root", args.source_workspace_root),
-                ("workspace_root", args.workspace_root),
-                ("artifact_root", args.artifact_root),
-                ("live_api_key_env", args.live_api_key_env),
-            )
-            if value is None
+        needs_live_api_key = (
+            args.answer_provider_mode == "live" or args.edit_provider_mode == "live"
         )
+        missing_values = (
+            ("config", args.config),
+            ("source_workspace_root", args.source_workspace_root),
+            ("workspace_root", args.workspace_root),
+            ("artifact_root", args.artifact_root),
+        )
+        missing = tuple(
+            name for name, value in missing_values if value is None
+        )
+        if needs_live_api_key and not args.live_api_key_env:
+            missing += ("live_api_key_env",)
         if missing:
             print(
                 json.dumps(
@@ -655,12 +686,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 answer_provider_mode=args.answer_provider_mode,
                 live_provider_name=args.live_provider,
                 live_model=args.live_model,
-                live_api_key=os.getenv(args.live_api_key_env),
+                live_api_key=os.getenv(args.live_api_key_env) if args.live_api_key_env else None,
                 live_max_output_tokens=args.live_max_output_tokens,
                 max_prompt_chars=args.max_prompt_chars,
                 provider_repair_attempts=args.provider_repair_attempts,
                 smoke_safe=bool(args.smoke_safe),
                 index_skip_vectors=bool(args.index_skip_vectors),
+                edit_provider_mode=args.edit_provider_mode,
             )
         except ValueError as exc:
             print(
@@ -689,6 +721,43 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         )
         return 0 if result.failed_cases == 0 else 1
+    if args.command == "eval-token-efficiency":
+        try:
+            result = run_token_efficiency_comparison(
+                config_path=Path(args.config),
+                source_workspace_root=Path(args.source_workspace_root),
+                workspace_root=Path(args.workspace_root),
+                artifact_root=Path(args.artifact_root),
+                run_id=args.run_id,
+                case_ids=tuple(args.case_id) if args.case_id else None,
+                max_prompt_chars=args.max_prompt_chars,
+                index_skip_vectors=bool(args.index_skip_vectors),
+            )
+        except ValueError as exc:
+            print(
+                json.dumps(
+                    {
+                        "command": args.command,
+                        "error_code": _error_code(exc),
+                        "message": str(exc),
+                    },
+                    sort_keys=True,
+                )
+            )
+            return 1
+        print(
+            json.dumps(
+                {
+                    "command": args.command,
+                    "run_id": result.run_id,
+                    "total_cases": result.total_cases,
+                    "artifact_root": str(Path(args.artifact_root).resolve()),
+                    "summary_metrics": result.summary_metrics,
+                },
+                sort_keys=True,
+            )
+        )
+        return 0
     if args.command == "eval-real-index-provider-patch":
         if args.list_cases:
             try:
