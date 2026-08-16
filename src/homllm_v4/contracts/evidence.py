@@ -8,7 +8,7 @@ class DirectReadRequest:
     file_path: str
     line_start: int | None = None
     line_end: int | None = None
-    max_bytes: int = 20000
+    max_bytes: int = 262144
     require_hash: bool = True
 
 

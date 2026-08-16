@@ -23,6 +23,7 @@ class AgentBenchmarkCase:
     expected_stop_reason: str = "verified"
     expected_error_code: str | None = None
     prepare_index: bool = True
+    source_workspace_root: Path | None = None
     metadata: dict[str, object] | None = None
 
 
@@ -459,6 +460,7 @@ def run_homllm_agent_benchmark(
     artifact_root: Path,
     run_id: str | None = None,
     case_ids: tuple[str, ...] | None = None,
+    cases: tuple[AgentBenchmarkCase, ...] | None = None,
     answer_provider_mode: str = "summary",
     live_provider_name: str = "gemini",
     live_model: str = "gemini-3.1-flash-lite-preview",
@@ -487,7 +489,7 @@ def run_homllm_agent_benchmark(
     resolved_run_id = run_id or str(uuid4())
     workspace_root = Path(workspace_root).resolve()
     artifact_root = Path(artifact_root).resolve()
-    cases = _select_cases(case_ids)
+    cases = cases if cases is not None else _select_cases(case_ids)
 
     for case in cases:
         target = workspace_root / resolved_run_id / "cases" / case.case_id
@@ -509,7 +511,7 @@ def run_homllm_agent_benchmark(
             case=case,
             benchmark_run_id=resolved_run_id,
             config_path=Path(config_path),
-            source_workspace_root=source_workspace_root,
+            source_workspace_root=case.source_workspace_root or source_workspace_root,
             workspace_root=workspace_root,
             artifact_root=artifact_root,
             answer_provider_mode=answer_provider_mode,
