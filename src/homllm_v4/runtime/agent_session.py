@@ -31,6 +31,8 @@ class AgentSessionRequest:
     answer_provider_mode: str = "summary"
     answer_synthesizer: Any = None
     answer_provider_builder: Any = build_v3_provider_edit_adapter_from_params
+    edit_provider_builder: Any = None
+    edit_require_live_api_key: bool = True
     persist_session_state: bool = True
     edit_intent: str | None = None
     expected_behavior: str | None = None
@@ -72,6 +74,9 @@ class AgentSessionResult:
     index_config_path: str | None
     index_artifact_paths: dict[str, str] | None
     index_metrics: dict[str, object] | None
+    rollback_occurred: bool = False
+    rollback_restored_count: int = 0
+    rollback_deleted_count: int = 0
 
 
 def run_agent_session(request: AgentSessionRequest) -> AgentSessionResult:
@@ -152,6 +157,12 @@ def run_agent_session(request: AgentSessionRequest) -> AgentSessionResult:
                 index_artifact_dir=request.index_artifact_dir,
                 index_incremental=request.index_incremental,
                 index_skip_vectors=request.index_skip_vectors,
+                provider_builder=(
+                    request.edit_provider_builder
+                    if request.edit_provider_builder is not None
+                    else build_v3_provider_edit_adapter_from_params
+                ),
+                require_live_api_key=request.edit_require_live_api_key,
             )
         )
 
@@ -173,6 +184,11 @@ def run_agent_session(request: AgentSessionRequest) -> AgentSessionResult:
         ),
         verification_count=edit_result.verification_count if edit_result else 0,
         planner_metrics=edit_result.planner_metrics if edit_result else {},
+        rollback_occurred=edit_result.rollback_occurred if edit_result else False,
+        rollback_restored_count=(
+            edit_result.rollback_restored_count if edit_result else 0
+        ),
+        rollback_deleted_count=edit_result.rollback_deleted_count if edit_result else 0,
         index_built=bool(
             (index_prep_result and index_prep_result.built)
             or (edit_result and edit_result.index_built)
@@ -243,6 +259,9 @@ def _persist_session_turn(
         "provider_repair_attempt_count": result.provider_repair_attempt_count,
         "verification_count": result.verification_count,
         "index_built": result.index_built,
+        "rollback_occurred": result.rollback_occurred,
+        "rollback_restored_count": result.rollback_restored_count,
+        "rollback_deleted_count": result.rollback_deleted_count,
     }
     store.append_turn(
         AgentSessionTurn(

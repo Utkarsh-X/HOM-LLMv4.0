@@ -49,6 +49,7 @@ class AgentTaskRequest:
     index_builder: Any = build_v3_agent_task_index
     provider_builder: Any = build_v3_provider_edit_adapter_from_params
     planner_builder: Any = build_v3_provider_proposed_patch_planner
+    require_live_api_key: bool = True
 
 
 @dataclass(frozen=True)
@@ -65,10 +66,13 @@ class AgentTaskResult:
     index_config_path: str | None = None
     index_artifact_paths: dict[str, str] | None = None
     index_metrics: dict[str, object] | None = None
+    rollback_occurred: bool = False
+    rollback_restored_count: int = 0
+    rollback_deleted_count: int = 0
 
 
 def run_agent_task(request: AgentTaskRequest) -> AgentTaskResult:
-    if not request.live_api_key:
+    if request.require_live_api_key and not request.live_api_key:
         raise ValueError("live_provider_api_key_required")
     if not request.verification_argv:
         raise ValueError("verification_argv_required")
@@ -157,6 +161,7 @@ def run_agent_task(request: AgentTaskRequest) -> AgentTaskResult:
             rollback_on_failure=True,
         )
     )
+    rollback = _rollback_summary(result.write_results)
     return AgentTaskResult(
         run_id=run_id,
         stop_reason=result.stop_reason,
@@ -170,4 +175,34 @@ def run_agent_task(request: AgentTaskRequest) -> AgentTaskResult:
         index_config_path=str(index_prep_result.config_path) if index_prep_result else None,
         index_artifact_paths=index_prep_result.artifact_paths if index_prep_result else None,
         index_metrics=index_prep_result.metrics if index_prep_result else None,
+        rollback_occurred=rollback.occurred,
+        rollback_restored_count=rollback.restored_count,
+        rollback_deleted_count=rollback.deleted_count,
+    )
+
+
+@dataclass(frozen=True)
+class _RollbackSummary:
+    occurred: bool = False
+    restored_count: int = 0
+    deleted_count: int = 0
+
+
+def _rollback_summary(write_results: tuple[object, ...]) -> _RollbackSummary:
+    occurred = False
+    restored_count = 0
+    deleted_count = 0
+    for write_result in write_results:
+        rollback_result = getattr(write_result, "rollback_result", None)
+        if rollback_result is None:
+            continue
+        if not getattr(rollback_result, "rolled_back", False):
+            continue
+        occurred = True
+        restored_count += len(tuple(getattr(rollback_result, "restored_files", ())))
+        deleted_count += len(tuple(getattr(rollback_result, "deleted_files", ())))
+    return _RollbackSummary(
+        occurred=occurred,
+        restored_count=restored_count,
+        deleted_count=deleted_count,
     )

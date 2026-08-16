@@ -17,6 +17,11 @@ from homllm_v4.evaluation.agent_benchmark import (
 )
 from homllm_v4.evaluation.real_index_provider_suites import run_real_index_provider_patch_suite
 from homllm_v4.evaluation.real_index_provider_suites import real_index_provider_patch_case_metadata
+from homllm_v4.evaluation.token_efficiency import (
+    TokenEfficiencyCaseResult,
+    TokenEfficiencyRunResult,
+    run_token_efficiency_comparison,
+)
 from homllm_v4.ledger.writer import EventWriter
 from homllm_v4.runtime.agent_task import AgentTaskRequest, AgentTaskResult, run_agent_task
 from homllm_v4.runtime.agent_run import (
