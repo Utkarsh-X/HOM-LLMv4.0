@@ -1,3 +1,4 @@
+import pytest
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -450,6 +451,38 @@ def test_provider_backed_edit_proposer_reports_truncated_response_separately() -
     assert result.error is not None
     assert result.error.code == "provider_response_truncated"
     assert result.error.details["finish_reason"] == "max_tokens"
+
+
+def test_provider_backed_edit_proposer_repairs_unescaped_backslashes_in_json() -> None:
+    # Model emitted a literal backslash (e.g. r'%s^{\dagger}') without
+    # escaping it inside the JSON string: json.loads rejects \d as an invalid
+    # escape. The parser must repair it (\d -> \\d) and still recover the
+    # full file content. Build the valid JSON first, then corrupt it exactly
+    # the way the model does (drop one backslash before 'dagger').
+    import json as json_module
+
+    payload = {
+        "target_file": "calculator.py",
+        "new_content": "tex = r'%s^{\\dagger}' % arg\nif exp:\n    pass",
+        "rationale": "fix",
+        "evidence_ids": ["cand-1"],
+        "risk_flags": [],
+    }
+    valid = json_module.dumps(payload)
+    response_text = valid.replace("\\\\dagger", "\\dagger")
+    with pytest.raises(json_module.JSONDecodeError):
+        json_module.loads(response_text)
+
+    proposer = ProviderBackedEditProposer(provider=FakeProvider(response_text))
+
+    result = proposer.propose(proposal_request())
+
+    assert result.ok is True
+    assert result.output is not None
+    assert result.output.target_file == "calculator.py"
+    assert "dagger" in result.output.new_content
+    assert "\\d" in result.output.new_content
+    assert "if exp:" in result.output.new_content
 
 
 def test_provider_backed_edit_proposer_reports_provider_invocation_failure() -> None:
