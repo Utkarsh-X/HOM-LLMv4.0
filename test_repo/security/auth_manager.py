@@ -18,9 +18,9 @@ class AuthManager:
     
     def __init__(self):
         """Initialize the authentication manager."""
-        self.secret_key = settings.JWT_SECRET_KEY
-        self.algorithm = settings.JWT_ALGORITHM
-        self.expiration_hours = settings.JWT_EXPIRATION_HOURS
+        self.secret_key = settings.security.jwt_secret_key
+        self.algorithm = settings.security.jwt_algorithm
+        self.expiration_hours = settings.security.jwt_expiration_hours
     
     def generate_token(self, user_id: str, username: str, is_admin: bool = False) -> str:
         """
