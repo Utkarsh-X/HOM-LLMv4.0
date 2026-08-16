@@ -36,7 +36,7 @@ class AgentTaskRequest:
     verification_argv: tuple[str, ...]
     run_id: str | None = None
     live_provider_name: str = "gemini"
-    live_model: str = "gemini-3.1-flash-lite-preview"
+    live_model: str = "gemini-3.5-flash-lite"
     live_api_key: str | None = None
     live_max_output_tokens: int = 8192
     max_prompt_chars: int | None = 22000
