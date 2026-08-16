@@ -20,6 +20,8 @@ from homllm_v4.api import (
     run_real_index_provider_patch_suite,
     run_read_only_query,
     run_token_efficiency_comparison,
+    swebench_lite_case_metadata,
+    swebench_lite_cases,
 )
 
 
@@ -190,6 +192,36 @@ def main(argv: Sequence[str] | None = None) -> int:
     agent_benchmark.add_argument("--smoke-safe", action="store_true")
     agent_benchmark.add_argument("--index-skip-vectors", action="store_true")
     agent_benchmark.add_argument(
+        "--edit-provider-mode",
+        choices=("fake", "live"),
+        default="live",
+        help="fake = deterministic canned provider (regression only); live = Gemini",
+    )
+    swebench_lite = subparsers.add_parser(
+        "eval-swebench-lite",
+        help="run the v4 homllm-agent benchmark on external SWE-bench Lite fixtures",
+    )
+    swebench_lite.add_argument("--fixtures-root", required=True)
+    swebench_lite.add_argument("--config")
+    swebench_lite.add_argument("--workspace-root")
+    swebench_lite.add_argument("--artifact-root")
+    swebench_lite.add_argument("--run-id")
+    swebench_lite.add_argument("--list-cases", action="store_true")
+    swebench_lite.add_argument("--case-id", action="append")
+    swebench_lite.add_argument(
+        "--answer-provider-mode",
+        choices=("summary", "live"),
+        default="summary",
+    )
+    swebench_lite.add_argument("--live-provider", default="gemini")
+    swebench_lite.add_argument("--live-model", default="gemini-3.1-flash-lite-preview")
+    swebench_lite.add_argument("--live-max-output-tokens", type=int, default=8192)
+    swebench_lite.add_argument("--live-api-key-env")
+    swebench_lite.add_argument("--max-prompt-chars", type=int, default=300000)
+    swebench_lite.add_argument("--provider-repair-attempts", type=int, default=1)
+    swebench_lite.add_argument("--smoke-safe", action="store_true")
+    swebench_lite.add_argument("--index-skip-vectors", action="store_true")
+    swebench_lite.add_argument(
         "--edit-provider-mode",
         choices=("fake", "live"),
         default="live",
@@ -683,6 +715,107 @@ def main(argv: Sequence[str] | None = None) -> int:
                 artifact_root=Path(args.artifact_root),
                 run_id=args.run_id,
                 case_ids=tuple(args.case_id) if args.case_id else None,
+                answer_provider_mode=args.answer_provider_mode,
+                live_provider_name=args.live_provider,
+                live_model=args.live_model,
+                live_api_key=os.getenv(args.live_api_key_env) if args.live_api_key_env else None,
+                live_max_output_tokens=args.live_max_output_tokens,
+                max_prompt_chars=args.max_prompt_chars,
+                provider_repair_attempts=args.provider_repair_attempts,
+                smoke_safe=bool(args.smoke_safe),
+                index_skip_vectors=bool(args.index_skip_vectors),
+                edit_provider_mode=args.edit_provider_mode,
+            )
+        except ValueError as exc:
+            print(
+                json.dumps(
+                    {
+                        "command": args.command,
+                        "error_code": _error_code(exc),
+                        "message": str(exc),
+                    },
+                    sort_keys=True,
+                )
+            )
+            return 1
+        print(
+            json.dumps(
+                {
+                    "command": args.command,
+                    "run_id": result.run_id,
+                    "total_cases": result.total_cases,
+                    "passed_cases": result.passed_cases,
+                    "failed_cases": result.failed_cases,
+                    "artifact_root": str(Path(args.artifact_root)),
+                    "summary_metrics": result.summary_metrics,
+                },
+                sort_keys=True,
+            )
+        )
+        return 0 if result.failed_cases == 0 else 1
+    if args.command == "eval-swebench-lite":
+        if args.list_cases:
+            try:
+                cases = swebench_lite_case_metadata(Path(args.fixtures_root))
+            except ValueError as exc:
+                print(
+                    json.dumps(
+                        {
+                            "command": args.command,
+                            "error_code": _error_code(exc),
+                            "message": str(exc),
+                        },
+                        sort_keys=True,
+                    )
+                )
+                return 1
+            print(
+                json.dumps(
+                    {
+                        "command": args.command,
+                        "case_count": len(cases),
+                        "cases": cases,
+                    },
+                    sort_keys=True,
+                )
+            )
+            return 0
+        needs_live_api_key = (
+            args.answer_provider_mode == "live" or args.edit_provider_mode == "live"
+        )
+        missing_values = (
+            ("config", args.config),
+            ("fixtures_root", args.fixtures_root),
+            ("workspace_root", args.workspace_root),
+            ("artifact_root", args.artifact_root),
+        )
+        missing = tuple(name for name, value in missing_values if value is None)
+        if needs_live_api_key and not args.live_api_key_env:
+            missing += ("live_api_key_env",)
+        if missing:
+            print(
+                json.dumps(
+                    {
+                        "command": args.command,
+                        "error_code": "missing_required_args",
+                        "missing": missing,
+                    },
+                    sort_keys=True,
+                )
+            )
+            return 2
+        try:
+            cases = swebench_lite_cases(
+                Path(args.fixtures_root),
+                case_ids=tuple(args.case_id) if args.case_id else None,
+            )
+            result = run_homllm_agent_benchmark(
+                config_path=Path(args.config),
+                source_workspace_root=Path(args.fixtures_root),
+                workspace_root=Path(args.workspace_root),
+                artifact_root=Path(args.artifact_root),
+                run_id=args.run_id,
+                cases=cases,
                 answer_provider_mode=args.answer_provider_mode,
                 live_provider_name=args.live_provider,
                 live_model=args.live_model,

@@ -44,6 +44,7 @@ x/
 *.lance/
 *.index/
 *.tantivy/
+fixtures/v4/swebench_lite/
 
 # Testing
 .pytest_cache/

@@ -17,6 +17,12 @@ from homllm_v4.evaluation.agent_benchmark import (
 )
 from homllm_v4.evaluation.real_index_provider_suites import run_real_index_provider_patch_suite
 from homllm_v4.evaluation.real_index_provider_suites import real_index_provider_patch_case_metadata
+from homllm_v4.evaluation.swebench_lite_suites import (
+    SwebenchLiteFixture,
+    load_swebench_lite_fixtures,
+    swebench_lite_case_metadata,
+    swebench_lite_cases,
+)
 from homllm_v4.evaluation.token_efficiency import (
     TokenEfficiencyCaseResult,
     TokenEfficiencyRunResult,
