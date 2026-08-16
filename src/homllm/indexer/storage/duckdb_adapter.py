@@ -548,6 +548,29 @@ class DuckDBAdapter:
             self.conn.execute("DELETE FROM chunks WHERE file_path = ?", [variant])
             self.conn.execute("DELETE FROM entities WHERE file_path = ?", [variant])
 
+    def begin_transaction(self) -> None:
+        """Start a transaction for batched writes.
+
+        Indexing a real repository writes tens of thousands of rows; the
+        default per-statement autocommit makes that take minutes longer.
+        """
+        if self.conn is None:
+            self.connect()
+        self.conn.execute("BEGIN TRANSACTION")
+
+    def commit_transaction(self) -> None:
+        """Commit the current transaction."""
+        if self.conn is not None:
+            self.conn.execute("COMMIT")
+
+    def rollback_transaction(self) -> None:
+        """Roll back the current transaction on failure."""
+        if self.conn is not None:
+            try:
+                self.conn.execute("ROLLBACK")
+            except Exception:
+                pass
+
     def reset_index_data(self) -> None:
         """Clear all indexed rows while preserving schema."""
         if self.conn is None:

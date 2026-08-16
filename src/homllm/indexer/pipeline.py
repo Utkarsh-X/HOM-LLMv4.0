@@ -152,6 +152,12 @@ class IndexerPipeline:
         if self.config.vector_indexing_enabled:
             self.lancedb.connect()
 
+        # Wrap all DuckDB row writes in a single transaction. The default
+        # per-statement autocommit makes full-repo indexing (tens of thousands
+        # of rows with large TEXT payloads) take minutes longer and was the
+        # dominant cost on real repositories.
+        self.duckdb.begin_transaction()
+
         # Preflight embeddings before any destructive operations (no quality deterioration).
         if self.config.vector_indexing_enabled:
             _ = self.embedder.embed_query("embedding_preflight")
@@ -452,6 +458,7 @@ class IndexerPipeline:
             file_count=len(files),
         )
 
+        self.duckdb.commit_transaction()
         self.incremental_indexer.save(files)
 
         logger.info("Indexing complete")
