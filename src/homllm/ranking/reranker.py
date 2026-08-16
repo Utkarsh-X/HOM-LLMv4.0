@@ -5,7 +5,13 @@ import math
 import os
 from typing import Any, Optional
 
-import torch
+try:
+    import torch
+except ImportError:
+    # torch is only required to load the local cross-encoder model; without it
+    # the reranker stays disabled (returns neutral scores). Lazy import lets the
+    # ranking pipeline load without a GPU stack.
+    torch = None  # type: ignore[assignment]
 
 from homllm.common.hf_cache import resolve_snapshot_dir
 from homllm.ranking.interfaces import Reranker
@@ -84,8 +90,10 @@ class QwenReranker(Reranker):
             logger.warning("Unknown reranker device '%s', using auto", device)
             requested = "auto"
         if requested == "auto":
+            if torch is None:
+                return "cpu"
             return "cuda" if torch.cuda.is_available() else "cpu"
-        if requested == "cuda" and not torch.cuda.is_available():
+        if requested == "cuda" and (torch is None or not torch.cuda.is_available()):
             logger.warning("Reranker device 'cuda' requested but CUDA not available; using cpu")
             return "cpu"
         return requested
@@ -100,7 +108,7 @@ class QwenReranker(Reranker):
     @classmethod
     def _validate_loaded_head(
         cls,
-        model: torch.nn.Module,
+        model: "torch.nn.Module",
         loading_info: dict[str, Any],
     ) -> None:
         """

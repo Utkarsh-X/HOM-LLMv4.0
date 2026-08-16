@@ -5,7 +5,14 @@ import os
 from typing import Optional
 
 import numpy as np
-import torch
+
+try:
+    import torch
+except ImportError:
+    # torch is only required to load the local embedding model; without it the
+    # embedder stays in its documented degraded (zero-vector) state. Making the
+    # import lazy lets retrieval/ranking pipelines import without a GPU stack.
+    torch = None  # type: ignore[assignment]
 
 from homllm.common.types import Vector
 from homllm.common.hf_cache import resolve_snapshot_dir
@@ -68,8 +75,10 @@ class QwenEmbedder(Embedder):
             logger.warning("Unknown embedding device '%s', using auto", device)
             requested = "auto"
         if requested == "auto":
+            if torch is None:
+                return "cpu"
             return "cuda" if torch.cuda.is_available() else "cpu"
-        if requested == "cuda" and not torch.cuda.is_available():
+        if requested == "cuda" and (torch is None or not torch.cuda.is_available()):
             logger.warning("Embedding device 'cuda' requested but CUDA not available; using cpu")
             return "cpu"
         return requested
