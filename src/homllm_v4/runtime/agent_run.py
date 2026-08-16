@@ -34,6 +34,8 @@ class HomllmAgentRunRequest:
     index_incremental: bool = False
     index_skip_vectors: bool = False
     session_runner: Any = run_agent_session
+    edit_provider_builder: Any = None
+    edit_require_live_api_key: bool = True
 
 
 @dataclass(frozen=True)
@@ -55,6 +57,9 @@ class HomllmAgentRunResult:
     index_config_path: str | None
     index_artifact_paths: dict[str, str] | None
     index_metrics: dict[str, object] | None
+    rollback_occurred: bool = False
+    rollback_restored_count: int = 0
+    rollback_deleted_count: int = 0
 
 
 def run_homllm_agent(request: HomllmAgentRunRequest) -> HomllmAgentRunResult:
@@ -84,6 +89,8 @@ def run_homllm_agent(request: HomllmAgentRunRequest) -> HomllmAgentRunResult:
             index_artifact_dir=request.index_artifact_dir,
             index_incremental=request.index_incremental,
             index_skip_vectors=request.index_skip_vectors,
+            edit_provider_builder=request.edit_provider_builder,
+            edit_require_live_api_key=request.edit_require_live_api_key,
         )
     )
     artifact_root = Path(session_result.artifact_root)
@@ -114,6 +121,9 @@ def run_homllm_agent(request: HomllmAgentRunRequest) -> HomllmAgentRunResult:
         index_config_path=session_result.index_config_path,
         index_artifact_paths=session_result.index_artifact_paths,
         index_metrics=session_result.index_metrics,
+        rollback_occurred=session_result.rollback_occurred,
+        rollback_restored_count=session_result.rollback_restored_count,
+        rollback_deleted_count=session_result.rollback_deleted_count,
     )
     _write_trajectory(trajectory_path, request, session_result, result)
     return result
@@ -161,6 +171,13 @@ def _write_trajectory(
                 "status": _verification_status(session_result),
                 "verification_count": session_result.verification_count,
             },
+            {
+                "name": "rollback",
+                "status": _rollback_status(session_result),
+                "occurred": session_result.rollback_occurred,
+                "restored_count": session_result.rollback_restored_count,
+                "deleted_count": session_result.rollback_deleted_count,
+            },
         ],
         "metrics": {
             "answer": session_result.answer_metrics,
@@ -169,6 +186,9 @@ def _write_trajectory(
             "provider_repair_attempt_count": (
                 session_result.provider_repair_attempt_count
             ),
+            "rollback_occurred": session_result.rollback_occurred,
+            "rollback_restored_count": session_result.rollback_restored_count,
+            "rollback_deleted_count": session_result.rollback_deleted_count,
         },
     }
     temp_path = path.with_name(".trajectory.json.tmp")
@@ -186,6 +206,14 @@ def _verification_status(result: AgentSessionResult) -> str:
     if result.edit_stop_reason == "verified" and result.edit_error_code is None:
         return "passed"
     return "failed"
+
+
+def _rollback_status(result: AgentSessionResult) -> str:
+    if result.edit_stop_reason is None:
+        return "skipped"
+    if not result.rollback_occurred:
+        return "not_required"
+    return "performed"
 
 
 def _ensure_inside(path: Path, root: Path) -> None:

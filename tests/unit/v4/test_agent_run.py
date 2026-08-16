@@ -66,7 +66,17 @@ def test_run_homllm_agent_writes_trajectory_and_session_state_path(tmp_path: Pat
         {"name": "grounded_answer", "status": "sufficient", "provider_mode": "live"},
         {"name": "bounded_edit", "status": "verified", "patch_attempt_count": 1},
         {"name": "verification", "status": "passed", "verification_count": 1},
+        {
+            "name": "rollback",
+            "status": "not_required",
+            "occurred": False,
+            "restored_count": 0,
+            "deleted_count": 0,
+        },
     ]
+    assert result.rollback_occurred is False
+    assert result.rollback_restored_count == 0
+    assert result.rollback_deleted_count == 0
 
 
 def test_run_homllm_agent_ignores_answer_error_code_when_edit_succeeds(tmp_path: Path) -> None:
@@ -116,4 +126,63 @@ def test_run_homllm_agent_ignores_answer_error_code_when_edit_succeeds(tmp_path:
 
     assert result.stop_reason == "verified"
     assert result.error_code is None
+
+
+def test_run_homllm_agent_surfaces_rollback_in_trajectory(tmp_path: Path) -> None:
+    def fake_session_runner(request):
+        session_dir = Path(request.artifact_root) / request.run_id
+        session_dir.mkdir(parents=True)
+        (session_dir / "session.json").write_text('{"session_id":"agent-run"}\n', encoding="utf-8")
+        return AgentSessionResult(
+            run_id=request.run_id,
+            ask_run_id=f"{request.run_id}-ask",
+            ask_stop_reason="sufficient",
+            answer_text="",
+            answer_provider_mode=request.answer_provider_mode,
+            answer_error_code=None,
+            answer_metrics={},
+            edit_run_id=f"{request.run_id}-edit",
+            edit_stop_reason="verification_failed",
+            edit_error_code=None,
+            artifact_root=str(request.artifact_root),
+            patch_attempt_count=1,
+            provider_repair_attempt_count=0,
+            verification_count=1,
+            planner_metrics={},
+            index_built=True,
+            index_config_path=str(Path(request.artifact_root) / request.run_id / "index" / "generated_config.yaml"),
+            index_artifact_paths={"artifacts": str(Path(request.artifact_root) / request.run_id / "index")},
+            index_metrics={"source_file_count": 1},
+            rollback_occurred=True,
+            rollback_restored_count=1,
+            rollback_deleted_count=0,
+        )
+
+    result = run_homllm_agent(
+        HomllmAgentRunRequest(
+            config_path=tmp_path / "config.yaml",
+            workspace_root=tmp_path / "repo",
+            artifact_root=tmp_path / "runs",
+            run_id="agent-run-rollback",
+            query="Where is normalize?",
+            answer_provider_mode="live",
+            edit_intent="Strip whitespace before uppercasing.",
+            expected_behavior="normalize(' sku ') returns 'SKU'.",
+            target_file="sku.py",
+            verification_argv=("python.exe", "-m", "compileall", "-q", "sku.py"),
+            live_api_key="test-key",
+            prepare_index=True,
+            session_runner=fake_session_runner,
+        )
+    )
+
+    assert result.rollback_occurred is True
+    assert result.rollback_restored_count == 1
+    assert result.rollback_deleted_count == 0
+    payload = json.loads(Path(result.trajectory_path).read_text(encoding="utf-8"))
+    rollback_step = next(step for step in payload["steps"] if step["name"] == "rollback")
+    assert rollback_step["status"] == "performed"
+    assert rollback_step["occurred"] is True
+    assert payload["metrics"]["rollback_occurred"] is True
+    assert payload["metrics"]["rollback_restored_count"] == 1
 
