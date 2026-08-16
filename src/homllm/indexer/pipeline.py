@@ -41,6 +41,18 @@ from homllm.indexer.incremental_indexer import IncrementalIndexer
 logger = logging.getLogger(__name__)
 
 
+def _dedupe_by_key(items: list, *, key) -> list:
+    """Deduplicate a list by a primary-key function, keeping last occurrence.
+
+    Keeps insertion order of the *last* occurrence of each key to preserve the
+    replace-last-wins semantics of the removed ``INSERT OR REPLACE`` path.
+    """
+    last_index: dict = {}
+    for index, item in enumerate(items):
+        last_index[key(item)] = index
+    return [items[index] for index in sorted(last_index.values())]
+
+
 class IndexerPipeline:
     """
     Main indexer pipeline.
@@ -297,12 +309,22 @@ class IndexerPipeline:
                 logger.error(f"Error processing {file_info.path}: {e}")
                 # Continue with other files (IDX-004: Language parsers are isolated)
 
+        # Deduplicate rows by primary key before storage. IDs are derived from
+        # (file_id, name, line) and the AST fallback parser can emit the same
+        # entity/symbol twice within a file; the old INSERT OR REPLACE absorbed
+        # these silently but was pathologically slow on TEXT keys. Keep the
+        # last occurrence to preserve replace semantics.
+        all_symbols = _dedupe_by_key(all_symbols, key=lambda s: s.id)
+        all_entities = _dedupe_by_key(all_entities, key=lambda e: e.entity_id)
+        all_chunks = _dedupe_by_key(all_chunks, key=lambda c: c.chunk_id)
+
         # 3. Build graphs
         call_edges = self.graph_builder.build_call_graph()
         validation_errors = self.graph_builder.validate()
         if validation_errors:
             logger.warning(f"Graph validation errors: {validation_errors}")
 
+        existing_call_edge_keys: set = set()
         if incremental:
             existing_symbols = self.duckdb.get_all_symbols()
             existing_files = self.duckdb.get_all_files()
@@ -310,9 +332,17 @@ class IndexerPipeline:
             all_symbols = existing_symbols
             all_files = existing_files
             call_edges = existing_call_edges + call_edges
+            existing_call_edge_keys = {
+                (edge.caller_id, edge.callee_id, edge.call_site_line)
+                for edge in existing_call_edges
+            }
 
-        # Store call edges
+        # Store call edges (skip rows already present in incremental mode;
+        # plain INSERT is fast but violates PKs on re-inserts)
         for edge in call_edges:
+            key = (edge.caller_id, edge.callee_id, edge.call_site_line)
+            if key in existing_call_edge_keys:
+                continue
             self.duckdb.insert_call_edge(edge)
         
         # ===================================================================
@@ -337,6 +367,9 @@ class IndexerPipeline:
             # Build typed relation graph
             all_relations = self.graph_builder.build_relation_graph()
 
+            existing_entities: list = []
+            existing_relations: list = []
+            existing_chunks: list = []
             if incremental:
                 existing_entities = self.duckdb.get_all_entities()
                 existing_relations = self.duckdb.get_all_relations()
@@ -344,19 +377,41 @@ class IndexerPipeline:
                 all_entities = existing_entities + all_entities
                 all_relations = existing_relations + all_relations
                 all_chunks = existing_chunks + all_chunks
-            
+
+            # In incremental mode the merged lists contain rows already present
+            # in the DB; plain INSERT (fast) would violate their primary keys,
+            # so only insert rows whose key is not already stored.
+            existing_entity_ids = {entity.entity_id for entity in existing_entities}
+            existing_relation_keys = {
+                (r.src_entity_id, r.dst_entity_id, r.relation_type)
+                for r in existing_relations
+            }
+            existing_chunk_ids = {chunk.chunk_id for chunk in existing_chunks}
+
+            all_relations = _dedupe_by_key(
+                all_relations,
+                key=lambda r: (r.src_entity_id, r.dst_entity_id, r.relation_type),
+            )
+
             # Store entities
             for entity in all_entities:
+                if entity.entity_id in existing_entity_ids:
+                    continue
                 self.duckdb.insert_entity(entity)
             logger.info(f"Stored {len(all_entities)} entities")
             
             # Store relations
             for relation in all_relations:
+                key = (relation.src_entity_id, relation.dst_entity_id, relation.relation_type)
+                if key in existing_relation_keys:
+                    continue
                 self.duckdb.insert_relation(relation)
             logger.info(f"Stored {len(all_relations)} relations")
             
             # Store chunks
             for chunk in all_chunks:
+                if chunk.chunk_id in existing_chunk_ids:
+                    continue
                 self.duckdb.insert_chunk(chunk)
             logger.info(f"Stored {len(all_chunks)} chunks")
 

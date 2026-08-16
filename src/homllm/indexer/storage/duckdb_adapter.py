@@ -229,9 +229,14 @@ class DuckDBAdapter:
 
         normalized_path = str(file_info.path).replace("\\", "/")
 
+        # Plain INSERT: full rebuilds call reset_index_data() and incremental
+        # rebuilds call delete_file_data() first, so no primary-key conflicts
+        # are possible. INSERT OR REPLACE on TEXT primary keys is pathologically
+        # slow in DuckDB (super-linear, ~10x slower) and made full-repo indexing
+        # unbounded on real repositories.
         self.conn.execute(
             """
-            INSERT OR REPLACE INTO files 
+            INSERT INTO files 
             (file_id, path, language, content_hash, line_count)
             VALUES (?, ?, ?, ?, ?)
             """,
@@ -249,9 +254,12 @@ class DuckDBAdapter:
         if self.conn is None:
             self.connect()
 
+        # Plain INSERT: safe because reset_index_data()/delete_file_data()
+        # clear rows first (see insert_file). Avoids the pathological
+        # INSERT OR REPLACE behavior on TEXT primary keys.
         self.conn.execute(
             """
-            INSERT OR REPLACE INTO symbols
+            INSERT INTO symbols
             (symbol_id, file_id, name, kind, start_line, end_line, signature, parent_id, content)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
@@ -283,9 +291,12 @@ class DuckDBAdapter:
         if self.conn is None:
             self.connect()
 
+        # Plain INSERT: the graph builder dedupes edges before storage, so no
+        # primary-key conflicts are possible. Avoids the slow INSERT OR IGNORE
+        # path on composite TEXT keys at full-repo scale.
         self.conn.execute(
             """
-            INSERT OR IGNORE INTO call_edges
+            INSERT INTO call_edges
             (caller_id, callee_id, call_site_line)
             VALUES (?, ?, ?)
             """,
@@ -743,9 +754,12 @@ class DuckDBAdapter:
             self.connect()
         normalized_file_path = self._normalize_path(entity.file_path)
 
+        # Plain INSERT: safe because reset_index_data()/delete_file_data()
+        # clear rows first (see insert_file). Avoids the pathological
+        # INSERT OR REPLACE behavior on TEXT primary keys.
         self.conn.execute(
             """
-            INSERT OR REPLACE INTO entities
+            INSERT INTO entities
             (entity_id, entity_type, name, file_path, span_start, span_end,
              docstring_hash, granularity_level, confidence_score,
              has_type_annotation, is_exported, parent_entity_id)
@@ -772,9 +786,12 @@ class DuckDBAdapter:
         if self.conn is None:
             self.connect()
 
+        # Plain INSERT: the graph builder dedupes relations before storage, so
+        # no primary-key conflicts are possible. Avoids the slow INSERT OR
+        # IGNORE path on composite TEXT keys at full-repo scale.
         self.conn.execute(
             """
-            INSERT OR IGNORE INTO relations
+            INSERT INTO relations
             (src_entity_id, dst_entity_id, relation_type, extraction_source)
             VALUES (?, ?, ?, ?)
             """,
@@ -796,9 +813,12 @@ class DuckDBAdapter:
         entity_ids_json = json.dumps(list(chunk.entity_ids))
         symbol_name = chunk.symbol_name or ""
 
+        # Plain INSERT: safe because reset_index_data()/delete_file_data()
+        # clear rows first (see insert_file). Avoids the pathological
+        # INSERT OR REPLACE behavior on TEXT primary keys.
         self.conn.execute(
             """
-            INSERT OR REPLACE INTO chunks
+            INSERT INTO chunks
             (chunk_id, file_path, content, granularity_level, span_start, span_end, entity_ids, symbol_name)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,

@@ -43,10 +43,29 @@ class GraphBuilder:
         """
         self.edges: list[CallEdge] = []
         self.relations: list[RelationInfo] = []  # Typed relations (Plan A)
+        # O(1) membership sets backing the lists. The lists keep insertion
+        # order (and are sorted before export); the sets make dedup cheap.
+        # Without these, ``if relation not in self.relations`` is O(n) per
+        # candidate, making full-repo indexing O(relations^2) and effectively
+        # unbounded on real repositories (e.g. sympy's 30k+ relations).
+        self._edge_set: set[CallEdge] = set()
+        self._relation_set: set[RelationInfo] = set()
         self.symbols: dict[str, SymbolInfo] = {}
         self.entities: dict[str, EntityInfo] = {}  # Entity storage (Plan A)
         self.file_contents: dict[str, str] = {}  # file_path -> content
         self.entity_centric_enabled = entity_centric_enabled
+
+    def _add_edge(self, edge: CallEdge) -> None:
+        """Append an edge if not already present (O(1) dedup)."""
+        if edge not in self._edge_set:
+            self._edge_set.add(edge)
+            self.edges.append(edge)
+
+    def _add_relation(self, relation: RelationInfo) -> None:
+        """Append a relation if not already present (O(1) dedup)."""
+        if relation not in self._relation_set:
+            self._relation_set.add(relation)
+            self.relations.append(relation)
 
     def add_file_result(self, file_path: str, result: ParseResult) -> None:
         """
@@ -430,8 +449,7 @@ class GraphBuilder:
                 callee_id=callee_symbol.id,
                 call_site_line=line_number,
             )
-            if edge not in self.edges:
-                self.edges.append(edge)
+            self._add_edge(edge)
 
     def _extract_call_edges_regex(
         self,
@@ -487,9 +505,8 @@ class GraphBuilder:
                         callee_id=callee_symbol.id,
                         call_site_line=line_num,
                     )
-                    # Avoid duplicates
-                    if edge not in self.edges:
-                        self.edges.append(edge)
+                    # Avoid duplicates (O(1) membership via set)
+                    self._add_edge(edge)
 
     def _extract_call_edges(self, file_path: str, result: ParseResult) -> None:
         """Extract call graph edges using AST first, regex fallback."""
@@ -550,8 +567,7 @@ class GraphBuilder:
                     relation_type=RelationType.DEFINES.value,
                     extraction_source="symbol_parent",
                 )
-                if relation not in self.relations:
-                    self.relations.append(relation)
+                self._add_relation(relation)
 
     def _extract_uses_relations(
         self,
@@ -564,34 +580,45 @@ class GraphBuilder:
         
         Uses regex matching to find symbol references in function bodies.
         """
-        # Build symbol name set
-        symbol_names = {s.name: s for s in result.symbols}
-        
+        # Build a single alternation regex over every symbol name so each
+        # function body is scanned once instead of once per candidate name.
+        # Without this, files with ~2k symbols (e.g. sympy's generated rubi
+        # rules) trigger ~4M regex passes per file and full-repo indexing
+        # becomes unbounded.
+        if not result.symbols:
+            return
+        symbol_by_name: dict[str, SymbolInfo] = {}
+        for ref_symbol in result.symbols:
+            symbol_by_name.setdefault(ref_symbol.name, ref_symbol)
+        if len(symbol_by_name) == 1:
+            return
+        names = sorted(symbol_by_name)
+        combined = re.compile(rf"\b(?:{'|'.join(re.escape(name) for name in names)})\b")
+
         for symbol in result.symbols:
             if symbol.kind.value not in ["function", "method"]:
                 continue
-            
+
             # Get function body
             start_idx = max(0, symbol.start_line - 1)
             end_idx = min(len(lines), symbol.end_line)
             body_text = "\n".join(lines[start_idx:end_idx])
-            
-            # Find references to other symbols
-            for name, ref_symbol in symbol_names.items():
-                if name == symbol.name:
+
+            # Find references to other symbols with a single scan
+            seen: set[str] = set()
+            for match in combined.finditer(body_text):
+                name = match.group(0)
+                if name == symbol.name or name in seen:
                     continue
-                
-                # Look for identifier usage (not just calls)
-                pattern = rf"\b{re.escape(name)}\b"
-                if re.search(pattern, body_text):
-                    relation = RelationInfo(
-                        src_entity_id=symbol.id,
-                        dst_entity_id=ref_symbol.id,
-                        relation_type=RelationType.USES.value,
-                        extraction_source="identifier_reference",
-                    )
-                    if relation not in self.relations:
-                        self.relations.append(relation)
+                seen.add(name)
+                ref_symbol = symbol_by_name[name]
+                relation = RelationInfo(
+                    src_entity_id=symbol.id,
+                    dst_entity_id=ref_symbol.id,
+                    relation_type=RelationType.USES.value,
+                    extraction_source="identifier_reference",
+                )
+                self._add_relation(relation)
 
     def _extract_inherits_relations(self, result: ParseResult, content: str) -> None:
         """
@@ -623,8 +650,7 @@ class GraphBuilder:
                                     relation_type=RelationType.INHERITS.value,
                                     extraction_source="class_definition",
                                 )
-                                if relation not in self.relations:
-                                    self.relations.append(relation)
+                                self._add_relation(relation)
                                 break
 
     def extract_import_relations(
@@ -652,8 +678,7 @@ class GraphBuilder:
                     relation_type=RelationType.IMPORTS.value,
                     extraction_source="import_statement",
                 )
-                if relation not in self.relations:
-                    self.relations.append(relation)
+                self._add_relation(relation)
 
     def extract_override_relations(
         self,
@@ -707,8 +732,7 @@ class GraphBuilder:
                                         relation_type=RelationType.OVERRIDES.value,
                                         extraction_source="method_override",
                                     )
-                                    if override_rel not in self.relations:
-                                        self.relations.append(override_rel)
+                                    self._add_relation(override_rel)
 
     def build_call_graph(self) -> list[CallEdge]:
         """
@@ -736,8 +760,7 @@ class GraphBuilder:
                 relation_type=RelationType.CALLS.value,
                 extraction_source="call_expression",
             )
-            if relation not in self.relations:
-                self.relations.append(relation)
+            self._add_relation(relation)
         
         # Sort for determinism
         self.relations.sort(
