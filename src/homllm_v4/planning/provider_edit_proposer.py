@@ -321,7 +321,19 @@ def _format_location(file_path: str, span_start: int | None, span_end: int | Non
 
 
 def parse_provider_edit_response(text: str) -> EditProposalResult:
-    data = json.loads(_json_text_from_provider_response(text))
+    raw_text = _json_text_from_provider_response(text)
+    try:
+        data = json.loads(raw_text)
+    except json.JSONDecodeError as first_error:
+        repaired = _repair_invalid_json_escapes(raw_text)
+        if repaired == raw_text:
+            raise first_error
+        try:
+            data = json.loads(repaired)
+        except json.JSONDecodeError as repair_error:
+            raise ValueError(
+                f"provider response JSON invalid after escape repair: {repair_error}"
+            ) from first_error
     if not isinstance(data, dict):
         raise ValueError("provider response must be a JSON object")
 
@@ -352,6 +364,43 @@ def _json_text_from_provider_response(text: str) -> str:
     if len(lines) >= 3 and lines[0].startswith("```") and lines[-1].strip() == "```":
         return "\n".join(lines[1:-1]).strip()
     return stripped
+
+
+_VALID_JSON_ESCAPE_NEXT = frozenset('"\\/bfnrtu')
+
+
+def _repair_invalid_json_escapes(text: str) -> str:
+    """Repair model output where a backslash precedes a non-JSON escape char.
+
+    Providers occasionally emit source code containing a literal backslash
+    (e.g. ``r'%s^{\dagger}'``) without doubling it inside the JSON string,
+    producing ``Invalid \\escape`` errors. This repairs such escapes by
+    doubling the backslash only when the following character is not a valid
+    JSON escape, leaving valid escapes untouched. Returns the input unchanged
+    when no repair was needed.
+    """
+    if "\\" not in text:
+        return text
+    out: list[str] = []
+    changed = False
+    index = 0
+    length = len(text)
+    while index < length:
+        char = text[index]
+        if char != "\\" or index + 1 >= length:
+            out.append(char)
+            index += 1
+            continue
+        following = text[index + 1]
+        if following in _VALID_JSON_ESCAPE_NEXT:
+            out.append(char)
+            out.append(following)
+        else:
+            out.append("\\\\")
+            out.append(following)
+            changed = True
+        index += 2
+    return "".join(out) if changed else text
 
 
 def _string_field(data: dict[str, object], key: str) -> str:
