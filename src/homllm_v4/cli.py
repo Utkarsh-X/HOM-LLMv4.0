@@ -79,7 +79,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     homllm_agent_run.add_argument("--live-provider", default="gemini")
     homllm_agent_run.add_argument(
         "--live-model",
-        default="gemini-3.1-flash-lite-preview",
+        default="gemini-3.5-flash-lite",
     )
     homllm_agent_run.add_argument("--live-max-output-tokens", type=int, default=8192)
     homllm_agent_run.add_argument("--live-api-key-env")
@@ -110,7 +110,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     agent_session.add_argument("--target-file")
     agent_session.add_argument("--verification-cmd")
     agent_session.add_argument("--live-provider", default="gemini")
-    agent_session.add_argument("--live-model", default="gemini-3.1-flash-lite-preview")
+    agent_session.add_argument("--live-model", default="gemini-3.5-flash-lite")
     agent_session.add_argument("--live-max-output-tokens", type=int, default=8192)
     agent_session.add_argument("--live-api-key-env")
     agent_session.add_argument(
@@ -138,7 +138,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     agent_task.add_argument("--target-file")
     agent_task.add_argument("--verification-cmd", required=True)
     agent_task.add_argument("--live-provider", default="gemini")
-    agent_task.add_argument("--live-model", default="gemini-3.1-flash-lite-preview")
+    agent_task.add_argument("--live-model", default="gemini-3.5-flash-lite")
     agent_task.add_argument("--live-max-output-tokens", type=int, default=8192)
     agent_task.add_argument("--live-api-key-env", required=True)
     agent_task.add_argument("--max-prompt-chars", type=int, default=22000)
@@ -183,7 +183,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     agent_benchmark.add_argument("--live-provider", default="gemini")
     agent_benchmark.add_argument(
         "--live-model",
-        default="gemini-3.1-flash-lite-preview",
+        default="gemini-3.5-flash-lite",
     )
     agent_benchmark.add_argument("--live-max-output-tokens", type=int, default=8192)
     agent_benchmark.add_argument("--live-api-key-env")
@@ -214,13 +214,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         default="summary",
     )
     swebench_lite.add_argument("--live-provider", default="gemini")
-    swebench_lite.add_argument("--live-model", default="gemini-3.1-flash-lite-preview")
-    swebench_lite.add_argument("--live-max-output-tokens", type=int, default=8192)
+    swebench_lite.add_argument("--live-model", default="gemini-3.5-flash-lite")
+    swebench_lite.add_argument("--live-max-output-tokens", type=int, default=65536)
     swebench_lite.add_argument("--live-api-key-env")
     swebench_lite.add_argument("--max-prompt-chars", type=int, default=300000)
     swebench_lite.add_argument("--provider-repair-attempts", type=int, default=1)
     swebench_lite.add_argument("--smoke-safe", action="store_true")
-    swebench_lite.add_argument("--index-skip-vectors", action="store_true")
+    swebench_lite.add_argument(
+        "--index-vectors",
+        action="store_true",
+        help="enable vector indexing (slow on CPU; default skips vectors for real-repo runs)",
+    )
     swebench_lite.add_argument(
         "--edit-provider-mode",
         choices=("fake", "live"),
@@ -258,7 +262,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         default="fake",
     )
     real_index_provider_patch.add_argument("--live-provider", default="gemini")
-    real_index_provider_patch.add_argument("--live-model", default="gemini-2.5-flash")
+    real_index_provider_patch.add_argument("--live-model", default="gemini-3.5-flash-lite")
     real_index_provider_patch.add_argument("--live-max-output-tokens", type=int, default=2048)
     real_index_provider_patch.add_argument("--live-api-key-env")
     real_index_provider_patch.add_argument("--max-prompt-chars", type=int)
@@ -824,7 +828,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 max_prompt_chars=args.max_prompt_chars,
                 provider_repair_attempts=args.provider_repair_attempts,
                 smoke_safe=bool(args.smoke_safe),
-                index_skip_vectors=bool(args.index_skip_vectors),
+                index_skip_vectors=not bool(args.index_vectors),
                 edit_provider_mode=args.edit_provider_mode,
             )
         except ValueError as exc:

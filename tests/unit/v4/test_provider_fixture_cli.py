@@ -73,7 +73,7 @@ def test_cli_runs_agent_task_with_live_defaults(monkeypatch, tmp_path: Path) -> 
 
     assert result == 0
     request = captured["request"]
-    assert request.live_model == "gemini-3.1-flash-lite-preview"
+    assert request.live_model == "gemini-3.5-flash-lite"
     assert request.live_api_key == "test-key"
     assert request.target_file == "sku.py"
     assert request.provider_repair_attempts == 1

@@ -172,7 +172,7 @@ def test_cli_agent_session_prints_combined_json(tmp_path: Path, monkeypatch, cap
     assert request.run_id == "session-cli"
     assert request.query == "Where is normalize?"
     assert request.edit_intent == "Strip whitespace before uppercasing."
-    assert request.live_model == "gemini-3.1-flash-lite-preview"
+    assert request.live_model == "gemini-3.5-flash-lite"
     assert request.live_api_key == "test-key"
     assert request.answer_provider_mode == "live"
     assert request.prepare_index is True
