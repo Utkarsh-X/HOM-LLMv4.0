@@ -76,3 +76,19 @@ discussion/
 .venv
 plugins
 skills
+.freebuff/
+skills-lock.json
+configs/agentic/
+docs/
+
+# Internal Agentic & Architecture Documents
+AI_ENGINEERING_RULES.md
+ARCHITECTURE_BOUNDARIES.md
+ENGINEERING_CODEX.md
+HOM-LLM_Agentic_Integration_Roadmap.md
+HOM-LLM_Architectural_Audit_and_Agentic_Integration_Foundation.md
+RULES.md
+TDD_WORKFLOW.md
+V4_COMPREHENSIVE_PROJECT_AUDIT.md
+Visual-Architecture-Report.md
+COPY_PASTE_COMMIT_STAGES.md
