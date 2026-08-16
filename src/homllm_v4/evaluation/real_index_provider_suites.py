@@ -11,6 +11,7 @@ from homllm_v4.adapters.v3_provider_patch_factory import build_v3_provider_propo
 from homllm_v4.artifacts.manager import ArtifactManager
 from homllm_v4.contracts.command import CommandPolicy, CommandRunRequest
 from homllm_v4.contracts.evaluation import CaseExecutionResult, EvaluationCase, EvaluationRunResult
+from homllm_v4.evaluation.canned_provider import canned_provider_content
 from homllm_v4.evaluation.harness import V4EvaluationHarness
 from homllm_v4.ledger.writer import EventWriter
 from homllm_v4.planning.direct_provider_patch_planner import DirectProviderPatchPlanner
@@ -206,6 +207,51 @@ REAL_INDEX_PROVIDER_PATCH_CASES = (
         planner_target_file=None,
     ),
     RealIndexProviderPatchCase(
+        case_id="hashing-needs-rehash-hidden-test",
+        target_file="security/hashing.py",
+        query="security hashing needs_rehash flags legacy unsalted password hashes",
+        intent=(
+            "Make needs_rehash return True for hashes that do not use the current "
+            "salted (salt:hash) format so legacy unsalted hashes get upgraded."
+        ),
+        expected_behavior=(
+            "needs_rehash returns True for unsalted or short-salt hashes and "
+            "False for freshly hashed passwords."
+        ),
+        provider_mode="hashing_needs_rehash",
+        verification_mode="hidden_test_hashing",
+    ),
+    RealIndexProviderPatchCase(
+        case_id="filters-anonymous-public-hidden-test",
+        target_file="search_engine/filters.py",
+        query="search_engine filters anonymous users cannot see public files",
+        intent=(
+            "Make PermissionFilter allow anonymous users (no user_id) to see "
+            "public files while still blocking private files."
+        ),
+        expected_behavior=(
+            "filter_by_permissions keeps public file paths even when the user dict "
+            "has no user_id, and still drops private user files."
+        ),
+        provider_mode="filters_anonymous_public",
+        verification_mode="hidden_test_filters",
+    ),
+    RealIndexProviderPatchCase(
+        case_id="query-optimizer-pushdown-hidden-test",
+        target_file="optimization/query_optimizer.py",
+        query="optimization query_optimizer predicate pushdown orders most selective filters first",
+        intent=(
+            "Make predicate pushdown order filters from most selective "
+            "(lowest selectivity value) to least selective."
+        ),
+        expected_behavior=(
+            "After pushdown, an equality filter (selectivity 0.01) precedes a "
+            "range filter (selectivity 0.1)."
+        ),
+        provider_mode="query_optimizer_pushdown",
+        verification_mode="hidden_test_query_optimizer",
+    ),
+    RealIndexProviderPatchCase(
         case_id="metrics-labelled-stats-target-selection",
         target_file="monitoring/metrics.py",
         query="labelled histogram timer stats appear in all metrics export",
@@ -217,6 +263,35 @@ REAL_INDEX_PROVIDER_PATCH_CASES = (
         provider_mode="metrics_labelled_stats",
         verification_mode="metrics_labelled_stats",
         planner_target_file=None,
+    ),
+    RealIndexProviderPatchCase(
+        case_id="redis-pickle-hit-stats-hidden-test",
+        target_file="cache/redis_client.py",
+        query="cache redis_client pickle deserialization counts a cache hit as a hit",
+        intent=(
+            "Make RedisClient.get count a successful pickle deserialization as a "
+            "cache hit so hit/miss statistics are accurate."
+        ),
+        expected_behavior=(
+            "After a pickle round-trip, get_stats reports hits == 1 and misses == 0."
+        ),
+        provider_mode="redis_pickle_hit_stats",
+        verification_mode="hidden_test_redis_client",
+    ),
+    RealIndexProviderPatchCase(
+        case_id="query-planner-parameter-aware-cache-hidden-test",
+        target_file="optimization/query_planner.py",
+        query="optimization query_planner plan cache distinguishes queries by parameters",
+        intent=(
+            "Make QueryPlanner include query parameters in the plan cache key so "
+            "the same SQL text with different parameters produces distinct plans."
+        ),
+        expected_behavior=(
+            "plan_query with different parameters returns different plan ids and "
+            "records no cache hit for the second call."
+        ),
+        provider_mode="query_planner_param_cache",
+        verification_mode="hidden_test_query_planner",
     ),
 )
 
@@ -675,147 +750,11 @@ def _accepts_keyword(callable_object, keyword: str) -> bool:
 
 
 def _provider_content(case: EvaluationCase, target_content: str) -> str:
-    if case.input_payload.get("provider_mode") == "truncate_guard":
-        old = (
-            "    if len(text) <= max_length:\n"
-            "        return text\n"
-            "    return text[:max_length - len(suffix)] + suffix"
-        )
-        new = (
-            "    if len(text) <= max_length:\n"
-            "        return text\n"
-            "    if max_length <= len(suffix):\n"
-            "        return text[:max_length]\n"
-            "    return text[:max_length - len(suffix)] + suffix"
-        )
-        if old not in target_content:
-            raise ValueError("truncate_guard_pattern_not_found")
-        return target_content.replace(old, new)
-    if case.input_payload.get("provider_mode") == "file_path_drive_guard":
-        old = (
-            "    if '..' in file_path or file_path.startswith('/'):\n"
-            "        return False, \"Invalid file path\""
-        )
-        new = (
-            "    if '..' in file_path or file_path.startswith('/') "
-            "or file_path.startswith('\\\\') or ':' in file_path:\n"
-            "        return False, \"Invalid file path\""
-        )
-        if old not in target_content:
-            raise ValueError("file_path_drive_guard_pattern_not_found")
-        return target_content.replace(old, new)
-    if case.input_payload.get("provider_mode") == "email_local_dot_guard":
-        old = (
-            "    if not re.match(email_pattern, email):\n"
-            "        return False, \"Invalid email format\"\n"
-            "    \n"
-            "    return True, None"
-        )
-        new = (
-            "    if not re.match(email_pattern, email):\n"
-            "        return False, \"Invalid email format\"\n"
-            "    \n"
-            "    local_part = email.split('@', 1)[0]\n"
-            "    if '..' in local_part:\n"
-            "        return False, \"Invalid email format\"\n"
-            "    \n"
-            "    return True, None"
-        )
-        if old not in target_content:
-            raise ValueError("email_local_dot_guard_pattern_not_found")
-        return target_content.replace(old, new)
-    if case.input_payload.get("provider_mode") == "parse_date_strip":
-        old = "        return datetime.strptime(date_string, format_str)"
-        new = "        return datetime.strptime(date_string.strip(), format_str)"
-        if old not in target_content:
-            raise ValueError("parse_date_strip_pattern_not_found")
-        return target_content.replace(old, new)
-    if case.input_payload.get("provider_mode") == "job_queue_size_guard":
-        old = (
-            "            if len(self.pending_jobs) >= self.max_queue_size:\n"
-            "                raise RuntimeError(f\"Queue full (max {self.max_queue_size})\")"
-        )
-        new = (
-            "            current_queue_size = sum(len(jobs) for jobs in self.pending_jobs.values())\n"
-            "            if current_queue_size >= self.max_queue_size:\n"
-            "                raise RuntimeError(f\"Queue full (max {self.max_queue_size})\")"
-        )
-        if old not in target_content:
-            raise ValueError("job_queue_size_guard_pattern_not_found")
-        return target_content.replace(old, new)
-    if case.input_payload.get("provider_mode") == "cache_namespace_invalidation":
-        old = "        return hashlib.md5(key.encode()).hexdigest()"
-        new = "        return key"
-        if old not in target_content:
-            raise ValueError("cache_namespace_invalidation_pattern_not_found")
-        return target_content.replace(old, new)
-    if case.input_payload.get("provider_mode") == "metrics_labelled_stats":
-        old = (
-            "    def get_all_metrics(self) -> Dict[str, Any]:\n"
-            "        \"\"\"Get all collected metrics.\"\"\"\n"
-            "        return {\n"
-            "            \"counters\": dict(self.counters),\n"
-            "            \"gauges\": dict(self.gauges),\n"
-            "            \"histogram_stats\": {\n"
-            "                key: self.get_histogram_stats(key.split(\"{\")[0])\n"
-            "                for key in self.histograms.keys()\n"
-            "            },\n"
-            "            \"timer_stats\": {\n"
-            "                key: self.get_timer_stats(key.split(\"{\")[0])\n"
-            "                for key in self.timers.keys()\n"
-            "            }\n"
-            "        }"
-        )
-        new = (
-            "    def get_all_metrics(self) -> Dict[str, Any]:\n"
-            "        \"\"\"Get all collected metrics.\"\"\"\n"
-            "        def value_stats(values: List[float]) -> Dict[str, float]:\n"
-            "            if not values:\n"
-            "                return {}\n"
-            "            sorted_values = sorted(values)\n"
-            "            return {\n"
-            "                \"count\": len(values),\n"
-            "                \"sum\": sum(values),\n"
-            "                \"mean\": sum(values) / len(values),\n"
-            "                \"min\": min(values),\n"
-            "                \"max\": max(values),\n"
-            "                \"p50\": sorted_values[len(values) // 2],\n"
-            "                \"p95\": sorted_values[int(len(values) * 0.95)],\n"
-            "                \"p99\": sorted_values[int(len(values) * 0.99)]\n"
-            "            }\n"
-            "        return {\n"
-            "            \"counters\": dict(self.counters),\n"
-            "            \"gauges\": dict(self.gauges),\n"
-            "            \"histogram_stats\": {\n"
-            "                key: value_stats(values)\n"
-            "                for key, values in self.histograms.items()\n"
-            "            },\n"
-            "            \"timer_stats\": {\n"
-            "                key: value_stats(values)\n"
-            "                for key, values in self.timers.items()\n"
-            "            }\n"
-            "        }"
-        )
-        if old not in target_content:
-            raise ValueError("metrics_labelled_stats_pattern_not_found")
-        return target_content.replace(old, new)
-    if case.input_payload.get("provider_mode") == "inventory_sku_strip_normalization":
-        old = "    return sku.upper()"
-        new = "    return sku.strip().upper()"
-        if old not in target_content:
-            raise ValueError("inventory_sku_strip_normalization_pattern_not_found")
-        return target_content.replace(old, new)
-    if case.input_payload.get("provider_mode") == "pricing_negative_discount_guard":
-        old = "    return price * rate"
-        new = (
-            "    if rate < 0:\n"
-            "        return 0.0\n"
-            "    return price * rate"
-        )
-        if old not in target_content:
-            raise ValueError("pricing_negative_discount_guard_pattern_not_found")
-        return target_content.replace(old, new)
-    return target_content
+    provider_mode = str(case.input_payload.get("provider_mode", "noop"))
+    return canned_provider_content(
+        provider_mode=provider_mode,
+        target_content=target_content,
+    )
 
 
 def _verification_argv(case: EvaluationCase, target_file: str) -> tuple[str, ...]:
@@ -890,6 +829,46 @@ def _verification_argv(case: EvaluationCase, target_file: str) -> tuple[str, ...
             "ok = all_metrics['histogram_stats']['latency{route=search}']['count'] == 1 "
             "and all_metrics['timer_stats']['latency{route=search}']['count'] == 1; "
             "raise SystemExit(0 if ok else 1)",
+        )
+    if case.input_payload.get("verification_mode") == "hidden_test_hashing":
+        return (
+            sys.executable,
+            "-m",
+            "pytest",
+            "tests/test_hashing.py",
+            "-q",
+        )
+    if case.input_payload.get("verification_mode") == "hidden_test_filters":
+        return (
+            sys.executable,
+            "-m",
+            "pytest",
+            "tests/test_filters.py",
+            "-q",
+        )
+    if case.input_payload.get("verification_mode") == "hidden_test_query_optimizer":
+        return (
+            sys.executable,
+            "-m",
+            "pytest",
+            "tests/test_query_optimizer.py",
+            "-q",
+        )
+    if case.input_payload.get("verification_mode") == "hidden_test_redis_client":
+        return (
+            sys.executable,
+            "-m",
+            "pytest",
+            "tests/test_redis_client.py",
+            "-q",
+        )
+    if case.input_payload.get("verification_mode") == "hidden_test_query_planner":
+        return (
+            sys.executable,
+            "-m",
+            "pytest",
+            "tests/test_query_planner.py",
+            "-q",
         )
     if case.input_payload.get("verification_mode") == "inventory_sku_strip_normalization":
         return (

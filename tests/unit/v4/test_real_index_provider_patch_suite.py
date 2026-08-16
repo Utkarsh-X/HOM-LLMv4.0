@@ -251,7 +251,7 @@ def test_real_index_provider_patch_suite_runs_multiple_cases_with_injected_plann
     assert "current_queue_size = sum(len(jobs) for jobs in self.pending_jobs.values())" in (
         job_queue_target.read_text(encoding="utf-8")
     )
-    assert result.summary_metrics["baseline_case_count"] == 12
+    assert result.summary_metrics["baseline_case_count"] == 17
     numeric_totals = result.summary_metrics["numeric_metric_totals"]
     assert numeric_totals["prompt_char_count"] > 0
     assert numeric_totals["evidence_context_item_count"] >= result.total_cases
@@ -315,9 +315,9 @@ def test_real_index_provider_patch_suite_runs_multiple_cases_with_injected_plann
     assert job_selection_case.metrics["resolved_target_file"] == "async_jobs/job_queue.py"
     assert result.summary_metrics["categorical_metric_counts"]["target_selection_decision"] == {
         "selected": 7,
-        "supplied": 8,
+        "supplied": 13,
     }
-    assert result.summary_metrics["baseline_case_count"] == 12
+    assert result.summary_metrics["baseline_case_count"] == 17
     noop_case = next(case for case in result.case_results if case.case_id == "admin-routes-noop")
     assert noop_case.baseline_runner_id is None
     assert noop_case.baseline_stop_reason is None
