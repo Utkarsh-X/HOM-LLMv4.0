@@ -94,6 +94,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     homllm_agent_run.add_argument("--index-artifact-dir")
     homllm_agent_run.add_argument("--index-incremental", action="store_true")
     homllm_agent_run.add_argument("--index-skip-vectors", action="store_true")
+    homllm_agent_run.add_argument("--verification-timeout", type=int)
     agent_session = subparsers.add_parser(
         "agent-session",
         help="run a v4 local session: grounded ask plus optional bounded edit",
@@ -124,6 +125,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     agent_session.add_argument("--index-artifact-dir")
     agent_session.add_argument("--index-incremental", action="store_true")
     agent_session.add_argument("--index-skip-vectors", action="store_true")
+    agent_session.add_argument("--verification-timeout", type=int)
     agent_task = subparsers.add_parser(
         "agent-task",
         help="run one bounded v4 MVP coding-agent task",
@@ -148,6 +150,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     agent_task.add_argument("--index-artifact-dir")
     agent_task.add_argument("--index-incremental", action="store_true")
     agent_task.add_argument("--index-skip-vectors", action="store_true")
+    agent_task.add_argument("--verification-timeout", type=int)
     fixture_patch = subparsers.add_parser(
         "eval-fixture-patch",
         help="run the v4 deterministic Python patch fixture suite",
@@ -191,6 +194,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     agent_benchmark.add_argument("--provider-repair-attempts", type=int, default=1)
     agent_benchmark.add_argument("--smoke-safe", action="store_true")
     agent_benchmark.add_argument("--index-skip-vectors", action="store_true")
+    agent_benchmark.add_argument("--verification-timeout", type=int)
+    agent_benchmark.add_argument(
+        "--verify-baseline",
+        action="store_true",
+        help="run verification against the pristine fixture first and skip stale/broken cases",
+    )
     agent_benchmark.add_argument(
         "--edit-provider-mode",
         choices=("fake", "live"),
@@ -224,6 +233,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--index-vectors",
         action="store_true",
         help="enable vector indexing (slow on CPU; default skips vectors for real-repo runs)",
+    )
+    swebench_lite.add_argument(
+        "--include-pass-to-pass",
+        action="store_true",
+        help="also verify SWE-bench PASS_TO_PASS tests (slower; guards against regressions)",
+    )
+    swebench_lite.add_argument("--verification-timeout", type=int)
+    swebench_lite.add_argument(
+        "--verify-baseline",
+        action="store_true",
+        help="run FAIL_TO_PASS against the pristine fixture first and skip stale/broken cases",
     )
     swebench_lite.add_argument(
         "--edit-provider-mode",
@@ -381,6 +401,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     ),
                     index_incremental=bool(args.index_incremental),
                     index_skip_vectors=bool(args.index_skip_vectors),
+                    verification_timeout_seconds=args.verification_timeout,
                 )
             )
         except ValueError as exc:
@@ -504,6 +525,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     ),
                     index_incremental=bool(args.index_incremental),
                     index_skip_vectors=bool(args.index_skip_vectors),
+                    verification_timeout_seconds=args.verification_timeout,
                 )
             )
         except ValueError as exc:
@@ -583,6 +605,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     ),
                     index_incremental=bool(args.index_incremental),
                     index_skip_vectors=bool(args.index_skip_vectors),
+                    verification_timeout_seconds=args.verification_timeout,
                 )
             )
         except ValueError as exc:
@@ -729,6 +752,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 smoke_safe=bool(args.smoke_safe),
                 index_skip_vectors=bool(args.index_skip_vectors),
                 edit_provider_mode=args.edit_provider_mode,
+                verification_timeout_seconds=args.verification_timeout,
+                verify_baseline=bool(args.verify_baseline),
             )
         except ValueError as exc:
             print(
@@ -760,7 +785,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "eval-swebench-lite":
         if args.list_cases:
             try:
-                cases = swebench_lite_case_metadata(Path(args.fixtures_root))
+                cases = swebench_lite_case_metadata(
+                    Path(args.fixtures_root),
+                    include_pass_to_pass=bool(args.include_pass_to_pass),
+                )
             except ValueError as exc:
                 print(
                     json.dumps(
@@ -812,6 +840,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             cases = swebench_lite_cases(
                 Path(args.fixtures_root),
                 case_ids=tuple(args.case_id) if args.case_id else None,
+                include_pass_to_pass=bool(args.include_pass_to_pass),
             )
             result = run_homllm_agent_benchmark(
                 config_path=Path(args.config),
@@ -830,6 +859,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 smoke_safe=bool(args.smoke_safe),
                 index_skip_vectors=not bool(args.index_vectors),
                 edit_provider_mode=args.edit_provider_mode,
+                verification_timeout_seconds=args.verification_timeout,
+                verify_baseline=bool(args.verify_baseline),
             )
         except ValueError as exc:
             print(

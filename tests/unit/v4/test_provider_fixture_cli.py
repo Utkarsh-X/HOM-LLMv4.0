@@ -6,6 +6,53 @@ from homllm_v4.contracts.evaluation import EvaluationRunResult
 from homllm_v4.cli import main
 
 
+def test_cli_swebench_lite_threads_verify_baseline_flag(monkeypatch, tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    captured: dict[str, object] = {}
+    monkeypatch.setenv("GOOGLE_API_KEY", "test-key")
+
+    def fake_benchmark(**kwargs) -> EvaluationRunResult:
+        captured.update(kwargs)
+        return EvaluationRunResult(
+            run_id="swebench-baseline-cli-test",
+            total_cases=0,
+            passed_cases=0,
+            failed_cases=0,
+            case_results=(),
+            summary_metrics={"baseline_counts": {"checked": 0}},
+        )
+
+    monkeypatch.setattr("homllm_v4.cli.run_homllm_agent_benchmark", fake_benchmark)
+
+    result = main(
+        [
+            "eval-swebench-lite",
+            "--fixtures-root",
+            str(repo_root / "fixtures" / "v4" / "swebench_lite"),
+            "--config",
+            str(
+                repo_root
+                / "configs"
+                / "agentic"
+                / "ccg_stage2_canary_v1"
+                / "ccg_stage2_agentic_ro3.yaml"
+            ),
+            "--workspace-root",
+            str(tmp_path / "work"),
+            "--artifact-root",
+            str(tmp_path / "runs"),
+            "--run-id",
+            "swebench-baseline-cli-test",
+            "--edit-provider-mode",
+            "fake",
+            "--verify-baseline",
+        ]
+    )
+
+    assert result == 0
+    assert captured["verify_baseline"] is True
+
+
 def test_cli_runs_provider_proposed_fixture_suite(tmp_path: Path) -> None:
     repo_root = Path(__file__).resolve().parents[3]
 
@@ -199,6 +246,57 @@ def test_cli_runs_agent_task_with_index_prep_flags(monkeypatch, tmp_path: Path) 
     assert request.index_artifact_dir == tmp_path / "custom-index"
     assert request.index_incremental is True
     assert request.index_skip_vectors is True
+
+
+def test_cli_agent_task_threads_verification_timeout(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+
+    class Result:
+        run_id = "agent-cli-timeout-test"
+        stop_reason = "verified"
+        error_code = None
+        artifact_root = str(tmp_path / "runs")
+        patch_attempt_count = 1
+        provider_repair_attempt_count = 0
+        verification_count = 1
+        planner_metrics: dict[str, object] = {}
+
+    def fake_run(request):
+        captured["request"] = request
+        return Result()
+
+    monkeypatch.setenv("GOOGLE_API_KEY", "test-key")
+    monkeypatch.setattr("homllm_v4.cli.run_agent_task", fake_run)
+
+    result = main(
+        [
+            "agent-task",
+            "--config",
+            "config.yaml",
+            "--workspace-root",
+            str(tmp_path),
+            "--artifact-root",
+            str(tmp_path / "runs"),
+            "--query",
+            "fix normalize whitespace",
+            "--intent",
+            "Strip whitespace before uppercasing.",
+            "--expected-behavior",
+            "normalize(' sku ') returns 'SKU'.",
+            "--target-file",
+            "sku.py",
+            "--verification-cmd",
+            f"{sys.executable} -m compileall -q sku.py",
+            "--live-api-key-env",
+            "GOOGLE_API_KEY",
+            "--verification-timeout",
+            "120",
+        ]
+    )
+
+    assert result == 0
+    request = captured["request"]
+    assert request.verification_timeout_seconds == 120
 
 
 def test_cli_runs_real_index_provider_patch_suite(monkeypatch, tmp_path: Path) -> None:
