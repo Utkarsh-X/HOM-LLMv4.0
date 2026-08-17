@@ -1,5 +1,6 @@
 import hashlib
 import sys
+from dataclasses import replace
 
 from homllm_v4.contracts.evidence import (
     DirectReadResult,
@@ -98,6 +99,28 @@ def test_evidence_patch_planner_creates_patch_request_from_fresh_evidence() -> N
         "def add(a, b):\n    return a - b\n"
     )
     assert result.output.verification_commands[0].argv == (sys.executable, "-m", "pytest", ".", "-q")
+
+
+def test_evidence_patch_planner_uses_default_verification_timeout() -> None:
+    result = EvidenceBackedPatchPlanner().plan(request())
+    assert result.output is not None
+    assert result.output.verification_commands[0].timeout_seconds == 60
+
+
+def test_evidence_patch_planner_honors_configured_verification_timeout() -> None:
+    result = EvidenceBackedPatchPlanner().plan(
+        replace(request(), verification_timeout_seconds=120)
+    )
+    assert result.output is not None
+    assert result.output.verification_commands[0].timeout_seconds == 120
+
+
+def test_evidence_patch_planner_rejects_zero_verification_timeout() -> None:
+    result = EvidenceBackedPatchPlanner().plan(
+        replace(request(), verification_timeout_seconds=0)
+    )
+    assert result.output is not None
+    assert result.output.verification_commands[0].timeout_seconds == 1
 
 
 def test_evidence_patch_planner_rejects_missing_target_evidence() -> None:

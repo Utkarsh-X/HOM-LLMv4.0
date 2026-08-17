@@ -38,6 +38,7 @@ class ProviderProposedPatchPlanRequest:
     retrieval_policy: dict[str, object]
     expected_content_hash: str | None = None
     repair_context: str = ""
+    verification_timeout_seconds: int | None = None
 
 
 class ProviderProposedPatchPlanner:
@@ -97,10 +98,17 @@ class ProviderProposedPatchPlanner:
             return direct_read
 
         # Check if the evidence set has any candidate matching the target file.
-        # If not, synthesize a fallback candidate from the direct read.
+        # If not, synthesize a fallback candidate from the direct read so the
+        # edit can still proceed -- but surface the retrieval miss in
+        # telemetry, because a fallback means the model never saw retrieved
+        # evidence for the file it must edit.
         has_evidence_for_target = any(
             candidate.file_path == target_file
             for candidate in retrieval.output.candidates
+        )
+        target_file_retrieval_score = _best_retrieval_score(
+            retrieval.output.candidates,
+            target_file,
         )
         if not has_evidence_for_target:
             safe_target = target_file.replace('/', '_').replace('\\', '_').replace('.', '_')
@@ -171,6 +179,7 @@ class ProviderProposedPatchPlanner:
                 ),
                 verification_argv=request.verification_argv,
                 allowed_file_paths=(target_file,),
+                verification_timeout_seconds=request.verification_timeout_seconds,
             )
         )
         return _with_provider_planner_telemetry(
@@ -181,7 +190,24 @@ class ProviderProposedPatchPlanner:
             provider_prompt_metrics=provider_prompt_metrics,
             provider_token_usage=provider_token_usage,
             provider_model_usage=provider_model_usage,
-    )
+            target_evidence_retrieved=has_evidence_for_target,
+            target_file_retrieval_score=target_file_retrieval_score,
+            retrieved_evidence_count=len(retrieval.output.candidates),
+        )
+
+
+def _best_retrieval_score(
+    candidates: tuple[EvidenceCandidate, ...],
+    target_file: str,
+) -> float | None:
+    scores = [
+        candidate.retrieval_score
+        for candidate in candidates
+        if candidate.file_path == target_file and candidate.retrieval_score is not None
+    ]
+    if not scores:
+        return None
+    return max(scores)
 
 
 def _preserve_original_trailing_newline(new_content: str, old_content: str) -> str:
@@ -257,10 +283,19 @@ def _with_provider_planner_telemetry(
     provider_prompt_metrics: dict[str, object],
     provider_token_usage: dict[str, int],
     provider_model_usage: dict[str, object],
+    target_evidence_retrieved: bool | None = None,
+    target_file_retrieval_score: float | None = None,
+    retrieved_evidence_count: int | None = None,
 ) -> CapabilityResult[EvidenceBackedPatchPlanResult]:
     output_summary = dict(result.telemetry.output_summary)
     output_summary.update(provider_prompt_metrics)
     output_summary["resolved_target_file"] = resolved_target_file
+    if target_evidence_retrieved is not None:
+        output_summary["target_evidence_retrieved"] = target_evidence_retrieved
+    if target_file_retrieval_score is not None:
+        output_summary["target_file_retrieval_score"] = target_file_retrieval_score
+    if retrieved_evidence_count is not None:
+        output_summary["retrieved_evidence_count"] = retrieved_evidence_count
     if selection is None:
         output_summary["target_selection_decision"] = "supplied"
     else:
@@ -298,6 +333,8 @@ def _provider_prompt_metrics(output_summary: dict[str, object]) -> dict[str, obj
         "evidence_context_item_count",
         "evidence_context_rendered_char_count",
         "evidence_context_truncated",
+        "current_content_char_count",
+        "current_content_truncated",
     ):
         if key in output_summary:
             metrics[key] = output_summary[key]

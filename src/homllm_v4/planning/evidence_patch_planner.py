@@ -24,6 +24,7 @@ class EvidenceBackedPatchPlanRequest:
     new_content: str
     verification_argv: tuple[str, ...]
     allowed_file_paths: tuple[str, ...] | None = None
+    verification_timeout_seconds: int | None = None
 
 
 class EvidenceBackedPatchPlanner:
@@ -90,12 +91,20 @@ class EvidenceBackedPatchPlanner:
             allowed_file_paths=request.allowed_file_paths or (request.target_file,),
             max_file_changes=1,
         )
+        # 60s default: real-repo verification (SWE-bench, sympy) can exceed
+        # 10s in collection + startup alone. The command service clamps to the
+        # policy max (10s for fixture suites, 60s for agent tasks), so this
+        # default is safe across both.
         verification = CommandRunRequest(
             task_id=request.task_id,
             workspace_root=request.workspace_root,
             cwd=".",
             argv=request.verification_argv,
-            timeout_seconds=10,
+            timeout_seconds=(
+                60
+                if request.verification_timeout_seconds is None
+                else max(1, int(request.verification_timeout_seconds))
+            ),
         )
         return CapabilityResult(
             capability_name="patch.plan.evidence_backed",

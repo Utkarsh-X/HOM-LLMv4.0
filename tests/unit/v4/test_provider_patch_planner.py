@@ -151,6 +151,9 @@ def test_provider_proposed_patch_planner_creates_patch_plan_from_retrieval_and_p
     assert result.telemetry.output_summary["evidence_context_item_count"] == 1
     assert result.telemetry.output_summary["evidence_context_rendered_char_count"] > 0
     assert result.telemetry.output_summary["evidence_context_truncated"] is False
+    assert result.telemetry.output_summary["target_evidence_retrieved"] is True
+    assert result.telemetry.output_summary["target_file_retrieval_score"] == 1.0
+    assert result.telemetry.output_summary["retrieved_evidence_count"] == 1
 
 
 def test_provider_proposed_patch_planner_selects_target_file_from_retrieved_evidence(
@@ -456,4 +459,62 @@ def test_provider_proposed_patch_planner_falls_back_to_direct_read_when_retrieva
     assert provider.last_request is not None
     assert "fallback-calculator_py" in provider.last_request.prompt
     assert "def add(a, b)" in provider.last_request.prompt
+    # The retrieval miss that triggered the fallback must be visible in
+    # telemetry: the model saw no retrieved evidence for its target file.
+    assert result.telemetry.output_summary["target_evidence_retrieved"] is False
+    assert "target_file_retrieval_score" not in result.telemetry.output_summary
+    assert result.telemetry.output_summary["retrieved_evidence_count"] == 0
+
+
+def test_best_retrieval_score_picks_strongest_candidate_for_target_file() -> None:
+    from homllm_v4.planning.provider_patch_planner import _best_retrieval_score
+
+    candidates = (
+        EvidenceCandidate(
+            candidate_id="c1",
+            file_path="a.py",
+            symbol_id=None,
+            span_start=1,
+            span_end=2,
+            content_hash="h",
+            source_channels=("bm25",),
+            bm25_score=None,
+            vector_score=None,
+            graph_score=None,
+            retrieval_score=0.4,
+            metadata={},
+        ),
+        EvidenceCandidate(
+            candidate_id="c2",
+            file_path="target.py",
+            symbol_id=None,
+            span_start=1,
+            span_end=2,
+            content_hash="h",
+            source_channels=("bm25",),
+            bm25_score=None,
+            vector_score=None,
+            graph_score=None,
+            retrieval_score=0.9,
+            metadata={},
+        ),
+        EvidenceCandidate(
+            candidate_id="c3",
+            file_path="target.py",
+            symbol_id=None,
+            span_start=1,
+            span_end=2,
+            content_hash="h",
+            source_channels=("bm25",),
+            bm25_score=None,
+            vector_score=None,
+            graph_score=None,
+            retrieval_score=0.7,
+            metadata={},
+        ),
+    )
+
+    assert _best_retrieval_score(candidates, "target.py") == 0.9
+    assert _best_retrieval_score(candidates, "missing.py") is None
+    assert _best_retrieval_score((), "target.py") is None
 
