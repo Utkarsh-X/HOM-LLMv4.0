@@ -31,6 +31,7 @@ class SwebenchLiteFixture:
     base_commit: str
     problem_statement: str
     fail_to_pass: tuple[str, ...]
+    pass_to_pass: tuple[str, ...]
     target_files: tuple[str, ...]
     source_root: Path
 
@@ -50,6 +51,17 @@ def load_swebench_lite_fixtures(
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         if not isinstance(manifest, dict):
             continue
+        pass_to_pass_node_ids = tuple(manifest.get("pass_to_pass_node_ids", []))
+        if not pass_to_pass_node_ids:
+            # Fixtures materialized before node-id resolution existed: resolve
+            # the raw PASS_TO_PASS names against the test files the hidden
+            # test_patch touches, mirroring the FAIL_TO_PASS resolver.
+            raw_names = tuple(str(x) for x in manifest.get("pass_to_pass", []))
+            test_patch = str(manifest.get("test_patch", ""))
+            pass_to_pass_node_ids = _resolve_test_node_ids(
+                raw_names,
+                _test_files_from_patch(test_patch),
+            )
         fixtures.append(
             SwebenchLiteFixture(
                 instance_id=str(manifest.get("instance_id", fixture_dir.name)),
@@ -57,6 +69,7 @@ def load_swebench_lite_fixtures(
                 base_commit=str(manifest.get("base_commit", "")),
                 problem_statement=str(manifest.get("problem_statement", "")),
                 fail_to_pass=tuple(manifest.get("fail_to_pass", [])),
+                pass_to_pass=pass_to_pass_node_ids,
                 target_files=tuple(manifest.get("target_files", [])),
                 source_root=fixture_dir,
             )
@@ -66,43 +79,108 @@ def load_swebench_lite_fixtures(
     return tuple(fixtures)
 
 
-def _case_for_fixture(fixture: SwebenchLiteFixture) -> AgentBenchmarkCase:
+def _test_files_from_patch(patch: str) -> tuple[str, ...]:
+    files: list[str] = []
+    for line in patch.splitlines():
+        if line.startswith("diff --git") and " b/" in line:
+            path = line.split(" b/", 1)[-1]
+            if "test" in path:
+                files.append(path)
+    return tuple(files)
+
+
+def _resolve_test_node_ids(
+    names: tuple[str, ...],
+    test_files: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Resolve bare SWE-bench test names to pytest node ids.
+
+    Bare entries (e.g. ``test_Abs``) are joined with every test file the
+    hidden test patch touches, mirroring the materializer's FAIL_TO_PASS
+    resolution. Entries that already carry a path or ``::`` pass through.
+    """
+    resolved: list[str] = []
+    for name in names:
+        if "::" in name or "/" in name:
+            resolved.append(name)
+        else:
+            for test_file in test_files:
+                resolved.append(f"{test_file}::{name}")
+    return tuple(resolved)
+
+
+def _case_for_fixture(
+    fixture: SwebenchLiteFixture,
+    *,
+    include_pass_to_pass: bool = False,
+) -> AgentBenchmarkCase:
     statement = fixture.problem_statement.strip()
     target_file = fixture.target_files[0] if fixture.target_files else None
-    first_f2p = fixture.fail_to_pass[0] if fixture.fail_to_pass else "hidden test"
+    fail_to_pass = fixture.fail_to_pass or ("hidden test",)
+    verification_args: list[str] = list(fixture.fail_to_pass)
+    if include_pass_to_pass:
+        verification_args.extend(fixture.pass_to_pass)
     verification_argv = (
         sys.executable,
         "-m",
         "pytest",
-        *fixture.fail_to_pass,
+        *verification_args,
         "-q",
     )
+    metadata: dict[str, object] = {
+        "verification_kind": "hidden_test",
+        "swebench_instance_id": fixture.instance_id,
+        "source_repo": fixture.repo,
+        "base_commit": fixture.base_commit,
+        "requires_localization": True,
+        "fail_to_pass_count": len(fixture.fail_to_pass),
+        "pass_to_pass_count": len(fixture.pass_to_pass),
+        "regression_check": bool(include_pass_to_pass and fixture.pass_to_pass),
+        "baseline_must_fail_argv": (
+            sys.executable,
+            "-m",
+            "pytest",
+            *fixture.fail_to_pass,
+            "-q",
+        ),
+    }
+    if include_pass_to_pass and fixture.pass_to_pass:
+        metadata["baseline_must_pass_argv"] = (
+            sys.executable,
+            "-m",
+            "pytest",
+            *fixture.pass_to_pass,
+            "-q",
+        )
     return AgentBenchmarkCase(
         case_id=fixture.instance_id,
         query=statement,
         edit_intent=(
             "Fix the bug described in the issue so the hidden tests pass. "
-            "Keep the fix minimal and localized to the relevant source file."
+            "Keep the fix minimal and localized to the relevant source file. "
+            "Do not regress existing behavior: related tests must keep passing."
         ),
-        expected_behavior=f"pytest {first_f2p} passes after the fix.",
+        expected_behavior=(
+            "All of these tests must pass after the fix: " + "; ".join(fail_to_pass) + "."
+        ),
         target_file=target_file,
         verification_argv=verification_argv,
         source_workspace_root=fixture.source_root,
-        metadata={
-            "verification_kind": "hidden_test",
-            "swebench_instance_id": fixture.instance_id,
-            "source_repo": fixture.repo,
-            "base_commit": fixture.base_commit,
-            "requires_localization": True,
-        },
+        metadata=metadata,
     )
 
 
 def swebench_lite_cases(
     fixtures_root: Path = FIXTURES_ROOT_DEFAULT,
     case_ids: tuple[str, ...] | None = None,
+    include_pass_to_pass: bool = False,
 ) -> tuple[AgentBenchmarkCase, ...]:
-    """Build agent benchmark cases from materialized SWE-bench fixtures."""
+    """Build agent benchmark cases from materialized SWE-bench fixtures.
+
+    Pass ``include_pass_to_pass=True`` to also verify the SWE-bench
+    PASS_TO_PASS tests, guarding against fixes that pass the target test but
+    regress existing behavior.
+    """
     fixtures = load_swebench_lite_fixtures(fixtures_root)
     if case_ids is not None:
         by_id = {f.instance_id: f for f in fixtures}
@@ -110,11 +188,15 @@ def swebench_lite_cases(
         if missing:
             raise ValueError(f"unknown_swebench_case: {missing[0]}")
         fixtures = tuple(by_id[cid] for cid in case_ids)
-    return tuple(_case_for_fixture(f) for f in fixtures)
+    return tuple(
+        _case_for_fixture(f, include_pass_to_pass=include_pass_to_pass)
+        for f in fixtures
+    )
 
 
 def swebench_lite_case_metadata(
     fixtures_root: Path = FIXTURES_ROOT_DEFAULT,
+    include_pass_to_pass: bool = False,
 ) -> tuple[dict[str, object], ...]:
     return tuple(
         {
@@ -124,5 +206,8 @@ def swebench_lite_case_metadata(
             "verification": " ".join(case.verification_argv),
             "metadata": case.metadata or {},
         }
-        for case in swebench_lite_cases(fixtures_root)
+        for case in swebench_lite_cases(
+            fixtures_root,
+            include_pass_to_pass=include_pass_to_pass,
+        )
     )

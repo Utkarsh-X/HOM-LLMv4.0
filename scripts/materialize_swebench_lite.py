@@ -201,6 +201,9 @@ def _materialize_one(row: dict, fixtures_root: Path, checkout_root: Path) -> Pat
             f"{instance_id}: none of the FAIL_TO_PASS node ids collect "
             f"(resolved {node_ids!r} from files {test_files!r})"
         )
+    p2p = _parse_test_list(row.get("PASS_TO_PASS"))
+    p2p_node_ids = _resolve_node_ids(p2p, test_files)
+    valid_p2p = _collect_node_ids(fixture_dir, p2p_node_ids)
 
     target_files = tuple(
         line.split(" b/", 1)[-1]
@@ -216,7 +219,8 @@ def _materialize_one(row: dict, fixtures_root: Path, checkout_root: Path) -> Pat
         "test_patch": test_patch,
         "fail_to_pass": list(valid_ids),
         "fail_to_pass_raw": list(f2p),
-        "pass_to_pass": list(_parse_test_list(row.get("PASS_TO_PASS"))),
+        "pass_to_pass": list(p2p),
+        "pass_to_pass_node_ids": list(valid_p2p),
         "target_files": target_files,
     }
     (fixture_dir / "manifest.json").write_text(
