@@ -8,6 +8,7 @@ from homllm_v4.planning.provider_edit_proposer import (
     ProviderBackedEditProposer,
     ProviderEditProposalRequest,
     ProviderEditProposalResponse,
+    parse_provider_edit_response,
 )
 
 
@@ -105,6 +106,51 @@ def test_provider_backed_edit_proposer_accepts_valid_json_response() -> None:
         "Do not call a helper that re-acquires a non-reentrant lock while inside that lock"
         in provider.last_request.prompt
     )
+
+
+def _json_payload_text() -> str:
+    import json as json_module
+
+    payload = {
+        "target_file": "calculator.py",
+        "new_content": "def add(a, b):\n    return a + b\n",
+        "rationale": "fix sign",
+        "evidence_ids": ["cand-1"],
+        "risk_flags": [],
+    }
+    return json_module.dumps(payload)
+
+
+def test_parse_provider_edit_response_handles_prose_wrapped_json() -> None:
+    json_text = _json_payload_text()
+    result = parse_provider_edit_response(f"Here is the fix:\n{json_text}\nHope this helps!")
+    assert result.target_file == "calculator.py"
+    assert "return a + b" in result.new_content
+
+
+def test_parse_provider_edit_response_handles_fence_in_middle_of_prose() -> None:
+    json_text = _json_payload_text()
+    result = parse_provider_edit_response(
+        "The fix is:\n```json\n" + json_text + "\n```\nThat should do it."
+    )
+    assert result.target_file == "calculator.py"
+    assert "return a + b" in result.new_content
+
+
+def test_parse_provider_edit_response_handles_braces_in_trailing_prose() -> None:
+    json_text = _json_payload_text()
+    result = parse_provider_edit_response(
+        json_text + "\n(I verified it with pytest {and} the suite passes.)"
+    )
+    assert result.target_file == "calculator.py"
+    assert "return a + b" in result.new_content
+
+
+def test_parse_provider_edit_response_handles_bare_json_object_in_prose() -> None:
+    json_text = _json_payload_text()
+    result = parse_provider_edit_response(f"Before: everything was broken. {json_text}")
+    assert result.target_file == "calculator.py"
+    assert "return a + b" in result.new_content
 
 
 def test_provider_backed_edit_proposer_accepts_markdown_fenced_json_response() -> None:
@@ -402,6 +448,51 @@ def test_provider_backed_edit_proposer_reports_evidence_context_truncation() -> 
     assert result.telemetry.output_summary["evidence_context_truncated"] is True
 
 
+def test_provider_backed_edit_proposer_truncates_current_content_to_fit_budget() -> None:
+    # A real-repo target file can exceed max_prompt_chars. The proposer must
+    # degrade gracefully: rebuild the prompt with a head+tail slice of the
+    # file (marked in the prompt and telemetry) instead of hard-failing the
+    # case before the provider is ever called.
+    provider = FakeProvider(
+        response_text=(
+            '{"target_file":"calculator.py",'
+            '"new_content":"def add(a, b):\\n    return a + b\\n",'
+            '"rationale":"Use evidence.",'
+            '"evidence_ids":["cand-1"],'
+            '"risk_flags":[]}'
+        )
+    )
+    lines = [f"line_{index:04d} = {index * 7}" for index in range(400)]
+    current_content = "\n".join(lines) + "\n"
+    request = EditProposalRequest(
+        task_id="task-1",
+        target_file="calculator.py",
+        intent="fix add",
+        expected_behavior="add returns a sum",
+        current_content=current_content,
+        evidence_ids=("cand-1",),
+        allowed_file_paths=("calculator.py",),
+        verification_summary="pytest . -q",
+    )
+
+    result = ProviderBackedEditProposer(
+        provider=provider,
+        max_prompt_chars=5000,
+    ).propose(request)
+
+    assert result.ok is True
+    assert provider.last_request is not None
+    prompt = provider.last_request.prompt
+    assert len(prompt) <= 5000
+    assert "lines omitted" in prompt
+    assert "line_0000 = 0" in prompt
+    assert "line_0399 = 2793" in prompt
+    assert result.telemetry.output_summary["current_content_truncated"] is True
+    assert result.telemetry.output_summary["current_content_char_count"] == len(
+        current_content
+    )
+
+
 def test_provider_backed_edit_proposer_rejects_prompt_over_size_limit_without_calling_provider() -> None:
     provider = FakeProvider(
         response_text=(
@@ -425,6 +516,7 @@ def test_provider_backed_edit_proposer_rejects_prompt_over_size_limit_without_ca
     assert result.error.details["max_prompt_chars"] == 10
     assert result.error.details["prompt_char_count"] > 10
     assert result.telemetry.output_summary["prompt_char_count"] > 10
+    assert result.telemetry.output_summary["current_content_truncated"] is False
 
 
 def test_provider_backed_edit_proposer_rejects_invalid_json() -> None:

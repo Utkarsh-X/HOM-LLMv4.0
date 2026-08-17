@@ -46,6 +46,8 @@ class _PromptBuild:
     evidence_context_item_count: int
     evidence_context_rendered_char_count: int
     evidence_context_truncated: bool
+    current_content_char_count: int
+    current_content_truncated: bool
 
 
 class EditProposalProvider(Protocol):
@@ -75,11 +77,7 @@ class ProviderBackedEditProposer:
     def propose(self, request: EditProposalRequest) -> CapabilityResult[EditProposalResult]:
         started = perf_counter()
         provider_response: ProviderEditProposalResponse | None = None
-        prompt_build = _build_edit_proposal_prompt_with_metadata(
-            request,
-            max_evidence_item_chars=self.max_evidence_item_chars,
-            max_evidence_context_chars=self.max_evidence_context_chars,
-        )
+        prompt_build = self._build_within_budget(request)
         prompt = prompt_build.prompt
         artifacts = self._write_prompt_artifact(request, prompt)
         if (
@@ -166,6 +164,38 @@ class ProviderBackedEditProposer:
             artifacts=artifacts,
         )
 
+    def _build_within_budget(self, request: EditProposalRequest) -> _PromptBuild:
+        """Build the proposal prompt, shrinking the current-content section when needed.
+
+        The current content is the full target file (up to the direct-read byte
+        cap), which can exceed ``max_prompt_chars`` on real repositories. A
+        hard failure there would kill the whole case, so when the budget is
+        exceeded we first rebuild with a head+tail slice of the file and mark
+        the truncation in telemetry. Only if the non-content part alone still
+        overflows do we fail with ``provider_prompt_budget_exceeded``.
+        """
+        prompt_build = _build_edit_proposal_prompt_with_metadata(
+            request,
+            max_evidence_item_chars=self.max_evidence_item_chars,
+            max_evidence_context_chars=self.max_evidence_context_chars,
+        )
+        if (
+            self.max_prompt_chars is None
+            or prompt_build.prompt_char_count <= self.max_prompt_chars
+            or prompt_build.current_content_truncated
+        ):
+            return prompt_build
+        non_content_chars = (
+            prompt_build.prompt_char_count - prompt_build.current_content_char_count
+        )
+        content_cap = max(2000, self.max_prompt_chars - non_content_chars)
+        return _build_edit_proposal_prompt_with_metadata(
+            request,
+            max_evidence_item_chars=self.max_evidence_item_chars,
+            max_evidence_context_chars=self.max_evidence_context_chars,
+            max_current_content_chars=content_cap,
+        )
+
     def _write_prompt_artifact(
         self,
         request: EditProposalRequest,
@@ -204,11 +234,13 @@ def build_edit_proposal_prompt(
     *,
     max_evidence_item_chars: int = 2000,
     max_evidence_context_chars: int = 12000,
+    max_current_content_chars: int | None = None,
 ) -> str:
     return _build_edit_proposal_prompt_with_metadata(
         request,
         max_evidence_item_chars=max_evidence_item_chars,
         max_evidence_context_chars=max_evidence_context_chars,
+        max_current_content_chars=max_current_content_chars,
     ).prompt
 
 
@@ -217,11 +249,15 @@ def _build_edit_proposal_prompt_with_metadata(
     *,
     max_evidence_item_chars: int,
     max_evidence_context_chars: int,
+    max_current_content_chars: int | None = None,
 ) -> _PromptBuild:
     evidence_render = _render_evidence_context(
         request,
         max_evidence_item_chars=max_evidence_item_chars,
         max_evidence_context_chars=max_evidence_context_chars,
+    )
+    current_content, current_content_char_count, current_content_truncated = (
+        _render_current_content(request.current_content, max_current_content_chars)
     )
     prompt = "\n".join(
         (
@@ -250,7 +286,7 @@ def _build_edit_proposal_prompt_with_metadata(
             f"Verification: {request.verification_summary}",
             evidence_render.text,
             "Current content:",
-            request.current_content,
+            current_content,
         )
     )
     return _PromptBuild(
@@ -259,7 +295,52 @@ def _build_edit_proposal_prompt_with_metadata(
         evidence_context_item_count=evidence_render.item_count,
         evidence_context_rendered_char_count=evidence_render.rendered_char_count,
         evidence_context_truncated=evidence_render.truncated,
+        current_content_char_count=current_content_char_count,
+        current_content_truncated=current_content_truncated,
     )
+
+
+def _render_current_content(
+    content: str,
+    max_chars: int | None,
+) -> tuple[str, int, bool]:
+    """Render current content, slicing head+tail when it exceeds ``max_chars``.
+
+    Returns ``(rendered, original_char_count, truncated)``. Truncation keeps
+    whole lines from the head and tail of the file with an explicit omission
+    marker, so the model still sees imports and the end of the file (where the
+    edited functions usually live) without silently dropping context.
+    """
+    if max_chars is None or len(content) <= max_chars:
+        return content, len(content), False
+    if "\n" not in content:
+        return content[: max(1, int(max_chars))], len(content), True
+    lines = content.splitlines(keepends=True)
+    marker_reserve = 64
+    max_chars = max(1, int(max_chars))
+    head_budget = max(1, (max_chars - marker_reserve) // 2)
+    head_lines, head_used = _take_whole_lines(lines, head_budget)
+    tail_budget = max(0, max_chars - marker_reserve - head_used)
+    tail_lines, _ = _take_whole_lines(reversed(lines), tail_budget)
+    tail_lines.reverse()
+    skipped = len(lines) - len(head_lines) - len(tail_lines)
+    marker = f"\n[--- {skipped} lines omitted ---]\n"
+    truncated = "".join(head_lines) + marker + "".join(tail_lines)
+    return truncated, len(content), True
+
+
+def _take_whole_lines(
+    lines,
+    budget: int,
+) -> tuple[list[str], int]:
+    taken: list[str] = []
+    used = 0
+    for line in lines:
+        if used + len(line) > budget:
+            break
+        taken.append(line)
+        used += len(line)
+    return taken, used
 
 
 def _render_evidence_context(
@@ -358,19 +439,73 @@ def parse_provider_edit_response(text: str) -> EditProposalResult:
 
 def _json_text_from_provider_response(text: str) -> str:
     stripped = text.strip()
-    if not stripped.startswith("```"):
-        return stripped
-    lines = stripped.splitlines()
-    if len(lines) >= 3 and lines[0].startswith("```") and lines[-1].strip() == "```":
-        return "\n".join(lines[1:-1]).strip()
-    return stripped
+    fenced = _extract_fenced_json(stripped)
+    if fenced is not None:
+        return fenced
+    return _extract_balanced_json_object(stripped)
+
+
+def _extract_fenced_json(text: str) -> str | None:
+    """Return the first `````json`` fenced block, or None when absent.
+
+    Unlike the previous implementation this accepts fences anywhere in the
+    response (small models frequently wrap JSON with explanatory prose) and
+    tolerates a missing closing fence by falling back to brace extraction.
+    """
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        candidate = line.strip()
+        if not candidate.startswith("```"):
+            continue
+        language = candidate[3:].strip().lower()
+        if language and not language.startswith("json"):
+            continue
+        for close_index in range(index + 1, len(lines)):
+            if lines[close_index].strip() == "```":
+                return "\n".join(lines[index + 1 : close_index]).strip()
+    return None
+
+
+def _extract_balanced_json_object(text: str) -> str:
+    """Extract the outermost balanced JSON object from arbitrary prose.
+
+    Scans from the first ``{`` and tracks nesting while respecting string
+    literals and escape sequences, returning the span that closes at depth 0.
+    Returns the input unchanged when no balanced object is found so the
+    caller's ``json.loads`` produces the underlying error.
+    """
+    start = text.find("{")
+    if start == -1:
+        return text
+    depth = 0
+    in_string = False
+    escaped = False
+    for index in range(start, len(text)):
+        char = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : index + 1]
+    return text
 
 
 _VALID_JSON_ESCAPE_NEXT = frozenset('"\\/bfnrtu')
 
 
 def _repair_invalid_json_escapes(text: str) -> str:
-    """Repair model output where a backslash precedes a non-JSON escape char.
+    r"""Repair model output where a backslash precedes a non-JSON escape char.
 
     Providers occasionally emit source code containing a literal backslash
     (e.g. ``r'%s^{\dagger}'``) without doubling it inside the JSON string,
@@ -496,6 +631,8 @@ def _telemetry(
         "evidence_context_item_count": prompt_build.evidence_context_item_count,
         "evidence_context_rendered_char_count": prompt_build.evidence_context_rendered_char_count,
         "evidence_context_truncated": prompt_build.evidence_context_truncated,
+        "current_content_char_count": prompt_build.current_content_char_count,
+        "current_content_truncated": prompt_build.current_content_truncated,
     }
 
     return CapabilityTelemetry(
