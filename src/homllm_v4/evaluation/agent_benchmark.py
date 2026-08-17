@@ -3,13 +3,16 @@ import shutil
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from time import perf_counter
 from uuid import uuid4
 
 from homllm_v4.artifacts.manager import ArtifactManager
+from homllm_v4.contracts.command import CommandPolicy, CommandRunRequest
 from homllm_v4.contracts.evaluation import EvaluationCaseResult, EvaluationRunResult
 from homllm_v4.evaluation.canned_provider import PromptAwareCannedProvider
 from homllm_v4.runtime.agent_run import HomllmAgentRunRequest, HomllmAgentRunResult
 from homllm_v4.runtime.agent_run import run_homllm_agent
+from homllm_v4.services.command_service import LocalCommandService
 
 
 @dataclass(frozen=True)
@@ -25,6 +28,28 @@ class AgentBenchmarkCase:
     prepare_index: bool = True
     source_workspace_root: Path | None = None
     metadata: dict[str, object] | None = None
+    requires_baseline_failure: bool | None = None
+
+
+@dataclass(frozen=True)
+class BaselineCheck:
+    healthy: bool
+    error_code: str | None
+    checks: tuple[dict[str, object], ...]
+    duration_ms: int
+
+
+_BASELINE_FAILURE_KINDS = frozenset({"behavior", "hidden_test"})
+
+
+def _case_requires_baseline_failure(case: AgentBenchmarkCase) -> bool:
+    if case.requires_baseline_failure is not None:
+        return case.requires_baseline_failure
+    metadata = case.metadata or {}
+    explicit = metadata.get("requires_baseline_failure")
+    if isinstance(explicit, bool):
+        return explicit
+    return str(metadata.get("verification_kind", "")) in _BASELINE_FAILURE_KINDS
 
 
 INTERNAL_AGENT_BENCHMARK_CASES = (
@@ -471,6 +496,9 @@ def run_homllm_agent_benchmark(
     smoke_safe: bool = True,
     index_skip_vectors: bool = False,
     edit_provider_mode: str = "live",
+    verification_timeout_seconds: int | None = None,
+    verify_baseline: bool = False,
+    baseline_command_service: object | None = None,
     agent_runner=run_homllm_agent,
 ) -> EvaluationRunResult:
     config_path = Path(config_path)
@@ -506,8 +534,21 @@ def run_homllm_agent_benchmark(
             "case_count": len(cases),
         },
     )
-    case_results = tuple(
-        _run_case(
+    baseline_service = baseline_command_service or _default_baseline_command_service()
+    case_results: list[EvaluationCaseResult] = []
+    for case in cases:
+        baseline: BaselineCheck | None = None
+        if verify_baseline:
+            baseline = _check_case_baseline(
+                case=case,
+                source_workspace_root=case.source_workspace_root or source_workspace_root,
+                command_service=baseline_service,
+                timeout_seconds=verification_timeout_seconds,
+            )
+            if not baseline.healthy:
+                case_results.append(_baseline_case_result(case, baseline))
+                continue
+        case_result = _run_case(
             case=case,
             benchmark_run_id=resolved_run_id,
             config_path=Path(config_path),
@@ -524,10 +565,12 @@ def run_homllm_agent_benchmark(
             smoke_safe=smoke_safe,
             index_skip_vectors=index_skip_vectors,
             edit_provider_mode=edit_provider_mode,
+            verification_timeout_seconds=verification_timeout_seconds,
             agent_runner=agent_runner,
         )
-        for case in cases
-    )
+        if baseline is not None:
+            case_result = _merge_baseline_metrics(case_result, baseline)
+        case_results.append(case_result)
     passed_cases = sum(1 for case_result in case_results if case_result.passed)
     result = EvaluationRunResult(
         run_id=resolved_run_id,
@@ -564,6 +607,7 @@ def _run_case(
     smoke_safe: bool,
     index_skip_vectors: bool,
     edit_provider_mode: str,
+    verification_timeout_seconds: int | None,
     agent_runner,
 ) -> EvaluationCaseResult:
     case_workspace = _copy_case_workspace(
@@ -603,6 +647,7 @@ def _run_case(
                 index_skip_vectors=index_skip_vectors,
                 edit_provider_builder=edit_provider_builder,
                 edit_require_live_api_key=edit_require_live_api_key,
+                verification_timeout_seconds=verification_timeout_seconds,
             )
         )
         metrics = _case_metrics(case, result)
@@ -722,6 +767,11 @@ def _case_metrics(
             metrics_payload,
             "provider_tokens_out",
         )
+        planner_metrics = metrics_payload.get("planner")
+        if isinstance(planner_metrics, dict):
+            for key in _CASE_PLANNER_METRIC_KEYS:
+                if key in planner_metrics:
+                    metrics[key] = planner_metrics[key]
         index_metrics = metrics_payload.get("index")
         if isinstance(index_metrics, dict) and isinstance(
             index_metrics.get("source_file_count"),
@@ -737,13 +787,33 @@ def _case_metrics(
     return metrics
 
 
+_CASE_PLANNER_METRIC_KEYS = (
+    "target_evidence_retrieved",
+    "target_file_retrieval_score",
+    "retrieved_evidence_count",
+    "current_content_truncated",
+    "current_content_char_count",
+    "prompt_char_count",
+    "evidence_context_truncated",
+    "provider_repair_attempt_count",
+    "target_selection_decision",
+    "resolved_target_file",
+)
+
+
 def _summary_metrics(results: tuple[EvaluationCaseResult, ...]) -> dict[str, object]:
     stop_reason_counts: dict[str, int] = {}
     error_code_counts: dict[str, int] = {}
     numeric_totals: dict[str, float] = {}
     numeric_counts: dict[str, int] = {}
     categorical_counts: dict[str, dict[str, int]] = {}
+    baseline_counts: dict[str, int] = {"checked": 0, "healthy": 0, "stale": 0, "error": 0}
     for result in results:
+        baseline_status = result.metrics.get("baseline_status")
+        if isinstance(baseline_status, str):
+            baseline_counts["checked"] += 1
+            if baseline_status in baseline_counts:
+                baseline_counts[baseline_status] += 1
         if result.actual_stop_reason is not None:
             stop_reason_counts[result.actual_stop_reason] = (
                 stop_reason_counts.get(result.actual_stop_reason, 0) + 1
@@ -774,8 +844,197 @@ def _summary_metrics(results: tuple[EvaluationCaseResult, ...]) -> dict[str, obj
             key: dict(sorted(value.items()))
             for key, value in sorted(categorical_counts.items())
         },
-        "baseline_case_count": 0,
+        "baseline_counts": dict(sorted(baseline_counts.items())),
     }
+
+
+def _default_baseline_command_service() -> LocalCommandService:
+    return LocalCommandService(
+        policy=CommandPolicy(
+            allowed_executables=(Path(sys.executable).name,),
+            default_timeout_seconds=30,
+            max_timeout_seconds=60,
+        )
+    )
+
+
+def _check_case_baseline(
+    *,
+    case: AgentBenchmarkCase,
+    source_workspace_root: Path,
+    command_service: object,
+    timeout_seconds: int | None,
+) -> BaselineCheck:
+    """Verify a fixture reproduces its bug before spending a model call.
+
+    A healthy SWE-bench-style fixture must FAIL its target verification on
+    the pristine repo (the bug is present) and, when configured, PASS its
+    regression tests. A stale fixture (tests already pass) would let a no-op
+    patch "verify" and silently inflate benchmark scores, so it is flagged
+    and skipped instead of run.
+    """
+    checks: list[dict[str, object]] = []
+    must_fail_argv = _baseline_must_fail_argv(case)
+    must_pass_argv = _baseline_must_pass_argv(case)
+    started = perf_counter()
+
+    if must_fail_argv is not None:
+        result = _run_baseline_command(
+            command_service=command_service,
+            workspace_root=source_workspace_root,
+            argv=must_fail_argv,
+            timeout_seconds=timeout_seconds,
+        )
+        checks.append(
+            {
+                "role": "must_fail",
+                "argv": list(must_fail_argv),
+                "exit_code": result.exit_code,
+                "timed_out": result.timed_out,
+                "denied": result.denied,
+            }
+        )
+        if result.exit_code == 0:
+            return BaselineCheck(
+                healthy=False,
+                error_code="baseline_stale",
+                checks=tuple(checks),
+                duration_ms=int((perf_counter() - started) * 1000),
+            )
+        if result.exit_code is None:
+            return BaselineCheck(
+                healthy=False,
+                error_code="baseline_error",
+                checks=tuple(checks),
+                duration_ms=int((perf_counter() - started) * 1000),
+            )
+
+    if must_pass_argv is not None:
+        result = _run_baseline_command(
+            command_service=command_service,
+            workspace_root=source_workspace_root,
+            argv=must_pass_argv,
+            timeout_seconds=timeout_seconds,
+        )
+        checks.append(
+            {
+                "role": "must_pass",
+                "argv": list(must_pass_argv),
+                "exit_code": result.exit_code,
+                "timed_out": result.timed_out,
+                "denied": result.denied,
+            }
+        )
+        if result.exit_code != 0:
+            return BaselineCheck(
+                healthy=False,
+                error_code=(
+                    "baseline_error" if result.exit_code is None else "baseline_stale"
+                ),
+                checks=tuple(checks),
+                duration_ms=int((perf_counter() - started) * 1000),
+            )
+
+    return BaselineCheck(
+        healthy=True,
+        error_code=None,
+        checks=tuple(checks),
+        duration_ms=int((perf_counter() - started) * 1000),
+    )
+
+
+class _BaselineCommandResult:
+    exit_code: int | None = None
+    timed_out: bool = False
+    denied: bool = False
+
+
+def _run_baseline_command(
+    *,
+    command_service: object,
+    workspace_root: Path,
+    argv: tuple[str, ...],
+    timeout_seconds: int | None,
+) -> _BaselineCommandResult:
+    timeout = 60 if timeout_seconds is None else max(1, int(timeout_seconds))
+    capability = command_service.run(
+        CommandRunRequest(
+            task_id="baseline",
+            workspace_root=str(Path(workspace_root).resolve()),
+            cwd=".",
+            argv=argv,
+            timeout_seconds=timeout,
+        )
+    )
+    result = _BaselineCommandResult()
+    if not capability.ok or capability.output is None:
+        result.exit_code = None
+        result.denied = True
+        return result
+    output = capability.output
+    result.exit_code = output.exit_code
+    result.timed_out = bool(output.timed_out)
+    result.denied = bool(output.denied)
+    return result
+
+
+def _baseline_must_fail_argv(case: AgentBenchmarkCase) -> tuple[str, ...] | None:
+    metadata = case.metadata or {}
+    explicit = metadata.get("baseline_must_fail_argv")
+    if explicit is not None:
+        return tuple(str(item) for item in explicit)
+    if not _case_requires_baseline_failure(case):
+        return None
+    return case.verification_argv
+
+
+def _baseline_must_pass_argv(case: AgentBenchmarkCase) -> tuple[str, ...] | None:
+    metadata = case.metadata or {}
+    explicit = metadata.get("baseline_must_pass_argv")
+    if explicit is None:
+        return None
+    return tuple(str(item) for item in explicit)
+
+
+def _baseline_case_result(
+    case: AgentBenchmarkCase,
+    baseline: BaselineCheck,
+) -> EvaluationCaseResult:
+    error_code = baseline.error_code or "baseline_error"
+    return EvaluationCaseResult(
+        case_id=case.case_id,
+        runner_id="homllm-agent",
+        task_type="mvp_coding_agent",
+        expected_stop_reason=case.expected_stop_reason,
+        actual_stop_reason=None,
+        passed=False,
+        metrics={
+            "baseline_status": "stale" if error_code == "baseline_stale" else "error",
+            "baseline_check_count": len(baseline.checks),
+            "baseline_duration_ms": baseline.duration_ms,
+        },
+        error_code=error_code,
+    )
+
+
+def _merge_baseline_metrics(
+    case_result: EvaluationCaseResult,
+    baseline: BaselineCheck,
+) -> EvaluationCaseResult:
+    metrics = dict(case_result.metrics)
+    metrics["baseline_status"] = "healthy"
+    metrics["baseline_check_count"] = len(baseline.checks)
+    metrics["baseline_duration_ms"] = baseline.duration_ms
+    return EvaluationCaseResult(
+        case_id=case_result.case_id,
+        runner_id=case_result.runner_id,
+        task_type=case_result.task_type,
+        expected_stop_reason=case_result.expected_stop_reason,
+        actual_stop_reason=case_result.actual_stop_reason,
+        passed=case_result.passed,
+        metrics=metrics,
+        error_code=case_result.error_code,
+    )
 
 
 def _select_cases(case_ids: tuple[str, ...] | None) -> tuple[AgentBenchmarkCase, ...]:

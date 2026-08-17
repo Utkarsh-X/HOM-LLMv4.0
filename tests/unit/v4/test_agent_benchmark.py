@@ -1,11 +1,91 @@
 import json
+import sys
 from pathlib import Path
 
+from homllm_v4.contracts.capability import CapabilityResult
+from homllm_v4.contracts.command import CommandRunResult
+from homllm_v4.contracts.errors import CapabilityError
+from homllm_v4.contracts.telemetry import CapabilityTelemetry
 from homllm_v4.evaluation.agent_benchmark import (
+    AgentBenchmarkCase,
     INTERNAL_AGENT_BENCHMARK_CASES,
+    _case_requires_baseline_failure,
     run_homllm_agent_benchmark,
 )
 from homllm_v4.runtime.agent_run import HomllmAgentRunResult
+
+
+class FakeBaselineService:
+    """Returns a configured exit code for the first argv marker match."""
+
+    def __init__(
+        self,
+        *,
+        exit_codes: dict[str, int],
+        timed_out: bool = False,
+        denied: bool = False,
+    ) -> None:
+        self.exit_codes = exit_codes
+        self.timed_out = timed_out
+        self.denied = denied
+        self.requests: list = []
+
+    def run(self, request):
+        self.requests.append(request)
+        if self.denied:
+            return CapabilityResult(
+                capability_name="command.run",
+                ok=False,
+                output=None,
+                error=CapabilityError(
+                    code="command_denied",
+                    message="denied",
+                    recoverable=True,
+                    retryable=False,
+                ),
+                telemetry=_empty_telemetry(),
+                artifacts=(),
+            )
+        argv_text = " ".join(request.argv)
+        exit_code = None
+        for marker, code in self.exit_codes.items():
+            if marker in argv_text:
+                exit_code = code
+                break
+        if self.timed_out:
+            exit_code = None
+        output = CommandRunResult(
+            argv=tuple(request.argv),
+            cwd=request.cwd,
+            exit_code=exit_code,
+            stdout="",
+            stderr="",
+            duration_ms=3,
+            timed_out=self.timed_out,
+            denied=False,
+        )
+        return CapabilityResult(
+            capability_name="command.run",
+            ok=True,
+            output=output,
+            error=None,
+            telemetry=_empty_telemetry(),
+            artifacts=(),
+        )
+
+
+def _empty_telemetry() -> CapabilityTelemetry:
+    return CapabilityTelemetry(
+        started_at="",
+        ended_at="",
+        duration_ms=0,
+        input_summary={},
+        output_summary={},
+        token_usage={},
+        model_usage={},
+        degraded=False,
+        degradation_reason=None,
+    )
 
 
 def test_internal_agent_benchmark_suite_has_mvp_case_count() -> None:
@@ -72,7 +152,14 @@ def test_run_homllm_agent_benchmark_aggregates_trajectory_metrics(
                     ],
                     "metrics": {
                         "answer": {"provider_tokens_in": 3, "provider_tokens_out": 2},
-                        "planner": {"provider_tokens_in": 7, "provider_tokens_out": 5},
+                        "planner": {
+                            "provider_tokens_in": 7,
+                            "provider_tokens_out": 5,
+                            "target_evidence_retrieved": True,
+                            "retrieved_evidence_count": 3,
+                            "target_file_retrieval_score": 0.9,
+                            "current_content_truncated": False,
+                        },
                         "index": {"source_file_count": 4},
                         "provider_repair_attempt_count": 1,
                     },
@@ -129,7 +216,12 @@ def test_run_homllm_agent_benchmark_aggregates_trajectory_metrics(
     assert summary["numeric_metric_totals"]["provider_tokens_in"] == 20.0
     assert summary["numeric_metric_totals"]["provider_tokens_out"] == 14.0
     assert summary["numeric_metric_totals"]["index_source_file_count"] == 8.0
+    assert summary["numeric_metric_totals"]["retrieved_evidence_count"] == 6.0
+    assert summary["numeric_metric_totals"]["target_file_retrieval_score"] == 1.8
     assert summary["categorical_metric_counts"]["trajectory_verification_status"] == {"passed": 2}
+    assert summary["categorical_metric_counts"]["target_evidence_retrieved"] == {"True": 2}
+    assert result.case_results[0].metrics["retrieved_evidence_count"] == 3
+    assert result.case_results[0].metrics["target_evidence_retrieved"] is True
     assert (
         tmp_path / "runs" / "bench" / "evaluation" / "summary.json"
     ).is_file()
@@ -418,6 +510,192 @@ def test_run_homllm_agent_benchmark_checks_live_api_key_presence(tmp_path: Path)
             answer_provider_mode="live",
             live_api_key=None,
         )
+
+
+def test_case_requires_baseline_failure_derivation() -> None:
+    def case(kind: str, *, explicit: bool | None = None) -> AgentBenchmarkCase:
+        return AgentBenchmarkCase(
+            case_id="x",
+            query="q",
+            edit_intent="e",
+            expected_behavior="b",
+            target_file="m.py",
+            verification_argv=(sys.executable, "-c", "pass"),
+            requires_baseline_failure=explicit,
+            metadata={"verification_kind": kind},
+        )
+
+    assert _case_requires_baseline_failure(case("behavior")) is True
+    assert _case_requires_baseline_failure(case("hidden_test")) is True
+    assert _case_requires_baseline_failure(case("compile")) is False
+    assert _case_requires_baseline_failure(case("compile", explicit=True)) is True
+
+
+def test_verify_baseline_skips_stale_fixture_without_calling_agent(
+    tmp_path: Path,
+) -> None:
+    source_workspace = tmp_path / "source"
+    source_workspace.mkdir()
+    (source_workspace / "module.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "config.yaml").write_text("{}", encoding="utf-8")
+    called: list = []
+
+    def unexpected_agent_runner(request):
+        called.append(request)
+        raise AssertionError("agent must not run on a stale fixture")
+
+    service = FakeBaselineService(exit_codes={"pytest": 0})
+    result = run_homllm_agent_benchmark(
+        config_path=tmp_path / "config.yaml",
+        source_workspace_root=source_workspace,
+        workspace_root=tmp_path / "work",
+        artifact_root=tmp_path / "runs",
+        run_id="bench-stale",
+        case_ids=("hashing-needs-rehash-hidden-test",),
+        edit_provider_mode="fake",
+        verify_baseline=True,
+        baseline_command_service=service,
+        agent_runner=unexpected_agent_runner,
+    )
+
+    assert called == []
+    assert result.total_cases == 1
+    assert result.failed_cases == 1
+    assert result.case_results[0].error_code == "baseline_stale"
+    assert result.case_results[0].metrics["baseline_status"] == "stale"
+    assert len(service.requests) == 1
+    assert result.summary_metrics["baseline_counts"] == {
+        "checked": 1,
+        "healthy": 0,
+        "stale": 1,
+        "error": 0,
+    }
+
+
+def test_verify_baseline_healthy_fixture_runs_agent_and_records_metrics(
+    tmp_path: Path,
+) -> None:
+    source_workspace = tmp_path / "source"
+    source_workspace.mkdir()
+    (source_workspace / "module.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "config.yaml").write_text("{}", encoding="utf-8")
+
+    service = FakeBaselineService(exit_codes={"pytest": 1})
+    result = run_homllm_agent_benchmark(
+        config_path=tmp_path / "config.yaml",
+        source_workspace_root=source_workspace,
+        workspace_root=tmp_path / "work",
+        artifact_root=tmp_path / "runs",
+        run_id="bench-healthy",
+        case_ids=("hashing-needs-rehash-hidden-test",),
+        edit_provider_mode="fake",
+        verify_baseline=True,
+        baseline_command_service=service,
+        agent_runner=_FakeVerifiedAgentRunner(),
+    )
+
+    assert result.passed_cases == 1
+    assert result.case_results[0].metrics["baseline_status"] == "healthy"
+    assert result.case_results[0].metrics["baseline_check_count"] == 1
+    assert result.summary_metrics["baseline_counts"]["healthy"] == 1
+    assert result.summary_metrics["baseline_counts"]["checked"] == 1
+
+
+def test_verify_baseline_timeout_skips_case_as_error(tmp_path: Path) -> None:
+    source_workspace = tmp_path / "source"
+    source_workspace.mkdir()
+    (source_workspace / "module.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "config.yaml").write_text("{}", encoding="utf-8")
+
+    service = FakeBaselineService(exit_codes={"pytest": 1}, timed_out=True)
+    result = run_homllm_agent_benchmark(
+        config_path=tmp_path / "config.yaml",
+        source_workspace_root=source_workspace,
+        workspace_root=tmp_path / "work",
+        artifact_root=tmp_path / "runs",
+        run_id="bench-timeout",
+        case_ids=("hashing-needs-rehash-hidden-test",),
+        edit_provider_mode="fake",
+        verify_baseline=True,
+        baseline_command_service=service,
+        agent_runner=_FakeVerifiedAgentRunner(),
+    )
+
+    assert result.failed_cases == 1
+    assert result.case_results[0].error_code == "baseline_error"
+    assert result.summary_metrics["baseline_counts"]["error"] == 1
+
+
+def test_verify_baseline_must_pass_check_flags_broken_regression_tests(
+    tmp_path: Path,
+) -> None:
+    source_workspace = tmp_path / "source"
+    source_workspace.mkdir()
+    (source_workspace / "module.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "config.yaml").write_text("{}", encoding="utf-8")
+    pytest_argv = (sys.executable, "-m", "pytest", "test_x.py", "-q")
+    p2p_argv = (sys.executable, "-m", "pytest", "test_p2p.py", "-q")
+    case = AgentBenchmarkCase(
+        case_id="p2p-broken",
+        query="q",
+        edit_intent="e",
+        expected_behavior="b",
+        target_file="module.py",
+        verification_argv=pytest_argv,
+        metadata={
+            "verification_kind": "hidden_test",
+            "baseline_must_fail_argv": pytest_argv,
+            "baseline_must_pass_argv": p2p_argv,
+        },
+    )
+
+    # FAIL_TO_PASS reproduces (exit 1) but PASS_TO_PASS already fails on the
+    # pristine repo (exit 1) -- the regression set is broken, so skip the case.
+    service = FakeBaselineService(exit_codes={"test_x.py": 1, "test_p2p.py": 1})
+    result = run_homllm_agent_benchmark(
+        config_path=tmp_path / "config.yaml",
+        source_workspace_root=source_workspace,
+        workspace_root=tmp_path / "work",
+        artifact_root=tmp_path / "runs",
+        run_id="bench-p2p",
+        cases=(case,),
+        edit_provider_mode="fake",
+        verify_baseline=True,
+        baseline_command_service=service,
+        agent_runner=_FakeVerifiedAgentRunner(),
+    )
+
+    assert result.failed_cases == 1
+    assert result.case_results[0].error_code == "baseline_stale"
+    assert len(service.requests) == 2
+
+
+def test_verify_baseline_compile_kind_runs_without_must_fail_check(
+    tmp_path: Path,
+) -> None:
+    source_workspace = tmp_path / "source"
+    source_workspace.mkdir()
+    (source_workspace / "module.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "config.yaml").write_text("{}", encoding="utf-8")
+
+    service = FakeBaselineService(exit_codes={})
+    result = run_homllm_agent_benchmark(
+        config_path=tmp_path / "config.yaml",
+        source_workspace_root=source_workspace,
+        workspace_root=tmp_path / "work",
+        artifact_root=tmp_path / "runs",
+        run_id="bench-compile",
+        case_ids=("admin-routes-compile",),
+        edit_provider_mode="fake",
+        verify_baseline=True,
+        baseline_command_service=service,
+        agent_runner=_FakeVerifiedAgentRunner(),
+    )
+
+    assert result.passed_cases == 1
+    assert result.case_results[0].metrics["baseline_status"] == "healthy"
+    assert result.case_results[0].metrics["baseline_check_count"] == 0
+    assert service.requests == []
 
 
 def test_run_homllm_agent_benchmark_checks_case_workspace_exists_upfront(tmp_path: Path) -> None:
