@@ -33,6 +33,7 @@ class SwebenchLiteFixture:
     fail_to_pass: tuple[str, ...]
     pass_to_pass: tuple[str, ...]
     target_files: tuple[str, ...]
+    gold_patch: str
     source_root: Path
 
 
@@ -71,6 +72,7 @@ def load_swebench_lite_fixtures(
                 fail_to_pass=tuple(manifest.get("fail_to_pass", [])),
                 pass_to_pass=pass_to_pass_node_ids,
                 target_files=tuple(manifest.get("target_files", [])),
+                gold_patch=str(manifest.get("patch", "")),
                 source_root=fixture_dir,
             )
         )
@@ -133,6 +135,8 @@ def _case_for_fixture(
         "source_repo": fixture.repo,
         "base_commit": fixture.base_commit,
         "requires_localization": True,
+        "provider_mode": "swebench_gold",
+        "gold_patch": fixture.gold_patch,
         "fail_to_pass_count": len(fixture.fail_to_pass),
         "pass_to_pass_count": len(fixture.pass_to_pass),
         "regression_check": bool(include_pass_to_pass and fixture.pass_to_pass),

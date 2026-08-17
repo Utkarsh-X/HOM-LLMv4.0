@@ -630,7 +630,10 @@ def _run_case(
     edit_require_live_api_key = True
     if edit_provider_mode == "fake":
         provider_mode = _case_provider_mode(case)
-        edit_provider_builder = _canned_provider_builder(provider_mode)
+        edit_provider_builder = _canned_provider_builder(
+            provider_mode,
+            gold_patch=_case_gold_patch(case),
+        )
         edit_require_live_api_key = False
     try:
         result: HomllmAgentRunResult = agent_runner(
@@ -741,8 +744,18 @@ def _case_provider_mode(case: AgentBenchmarkCase) -> str:
     return str(metadata.get("provider_mode", "noop"))
 
 
-def _canned_provider_builder(provider_mode: str):
-    provider = PromptAwareCannedProvider(provider_mode=provider_mode)
+def _case_gold_patch(case: AgentBenchmarkCase) -> str | None:
+    """Gold patch for SWE-bench-style cases (``swebench_gold`` fake mode)."""
+    metadata = case.metadata or {}
+    gold_patch = metadata.get("gold_patch")
+    return str(gold_patch) if gold_patch else None
+
+
+def _canned_provider_builder(provider_mode: str, gold_patch: str | None = None):
+    provider = PromptAwareCannedProvider(
+        provider_mode=provider_mode,
+        gold_patch=gold_patch,
+    )
 
     def builder(**kwargs):
         return provider

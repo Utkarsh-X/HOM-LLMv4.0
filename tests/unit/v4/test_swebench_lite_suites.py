@@ -203,3 +203,40 @@ def test_swebench_lite_fixtures_validation(tmp_path: Path) -> None:
     empty_root.mkdir()
     with pytest.raises(ValueError, match="no_swebench_fixtures_found"):
         load_swebench_lite_fixtures(empty_root)
+
+
+def test_gold_patch_loaded_into_fixture_and_case_metadata(tmp_path: Path) -> None:
+    gold_patch = (
+        "diff --git a/sympy/functions/elementary/complexes.py "
+        "b/sympy/functions/elementary/complexes.py\n"
+        "@@ -1,1 +1,2 @@\n"
+        " old\n"
+        "+new\n"
+    )
+    fixtures_root = tmp_path / "fixtures"
+    fixture_dir = fixtures_root / "sympy__sympy-21627"
+    fixture_dir.mkdir(parents=True, exist_ok=True)
+    (fixture_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "instance_id": "sympy__sympy-21627",
+                "repo": "sympy/sympy",
+                "base_commit": "abcdef123456",
+                "problem_statement": "Recursion error in complexes.py",
+                "fail_to_pass": [
+                    "sympy/functions/elementary/tests/test_complexes.py::test_issue_21627"
+                ],
+                "target_files": ["sympy/functions/elementary/complexes.py"],
+                "patch": gold_patch,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (fixture_dir / "module.py").write_text("VALUE = 1\n", encoding="utf-8")
+
+    fixture = load_swebench_lite_fixtures(fixtures_root)[0]
+    assert fixture.gold_patch == gold_patch
+
+    case = swebench_lite_cases(fixtures_root)[0]
+    assert case.metadata["provider_mode"] == "swebench_gold"
+    assert case.metadata["gold_patch"] == gold_patch
