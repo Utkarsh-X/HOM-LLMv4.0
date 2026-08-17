@@ -1,4 +1,4 @@
-# Python
+# Python & Build
 __pycache__/
 *.py[cod]
 *$py.class
@@ -15,30 +15,32 @@ lib64/
 parts/
 sdist/
 var/
-temp/
 wheels/
 *.egg-info/
 .installed.cfg
 *.egg
 
-# Virtual environments
+# Virtual Environments
+.venv/
 venv/
 env/
 ENV/
 
-# IDE
+# IDE & Editor Files
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
+.DS_Store
+Thumbs.db
 
-# Project specific
+# Project Index & Storage Artifacts
 indexes/
+temp/
 artifacts/
 !src/homllm_v4/artifacts/
 !src/homllm_v4/artifacts/*.py
-x/
 *.duckdb
 *.duckdb.wal
 *.lance/
@@ -46,50 +48,32 @@ x/
 *.tantivy/
 fixtures/v4/swebench_lite/
 
-# Testing
+# Testing & Coverage
 .pytest_cache/
 .coverage
 htmlcov/
 .tox/
 
-# OS
-.DS_Store
-Thumbs.db
-
-# keys / secrets
+# Secrets & Local Configurations
 eval/judge_config.json
 configs/secrets.yaml
 configs/key_usage_state.json
+configs/agentic/
 
-# --- Production Execution Outputs ---
-
-# Application runtime logs
+# Runtime Logs & Evaluation Traces
 logs/
 diagnostics/
 SpecialRun/
-
-# Evaluation outputs and traces
 eval/runs/
 eval/folder*_run_score*/
 eval/folder*_run_scores*/
 discussion/
-.agents
-.venv
-plugins
-skills
-.freebuff/
-skills-lock.json
-configs/agentic/
-docs/
 
-# Internal Agentic & Architecture Documents
-AI_ENGINEERING_RULES.md
-ARCHITECTURE_BOUNDARIES.md
-ENGINEERING_CODEX.md
-HOM-LLM_Agentic_Integration_Roadmap.md
-HOM-LLM_Architectural_Audit_and_Agentic_Integration_Foundation.md
-RULES.md
-TDD_WORKFLOW.md
-V4_COMPREHENSIVE_PROJECT_AUDIT.md
-Visual-Architecture-Report.md
-COPY_PASTE_COMMIT_STAGES.md
+# Agent State & Internal Development Docs
+.agents/
+.freebuff/
+skills/
+plugins/
+skills-lock.json
+docs/
+internal_docs/
