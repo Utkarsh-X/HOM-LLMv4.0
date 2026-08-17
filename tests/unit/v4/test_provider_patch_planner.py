@@ -438,8 +438,8 @@ def test_provider_proposed_patch_planner_falls_back_to_direct_read_when_retrieva
         response_text=(
             '{"target_file":"calculator.py",'
             '"new_content":"def add(a, b):\\n    return a + b\\n",'
-            '"rationale":"Fallback direct read used.",'
-            '"evidence_ids":["fallback-calculator_py"],'
+            '"rationale":"Section-scan fallback used.",'
+            '"evidence_ids":["target-section-0"],'
             '"risk_flags":[]}'
         )
     )
@@ -455,15 +455,155 @@ def test_provider_proposed_patch_planner_falls_back_to_direct_read_when_retrieva
     assert result.ok is True
     assert result.output is not None
     assert result.output.patch_plan.target_files == ("calculator.py",)
-    assert result.output.patch_plan.evidence_ids == ("fallback-calculator_py",)
+    # The fallback is now a query-relevant *section* of the target file, not a
+    # whole-file blob, so the evidence the model sees has a real line span.
+    assert result.output.patch_plan.evidence_ids == ("target-section-0",)
     assert provider.last_request is not None
-    assert "fallback-calculator_py" in provider.last_request.prompt
+    assert "target-section-0" in provider.last_request.prompt
     assert "def add(a, b)" in provider.last_request.prompt
+    assert "[target-section-0] calculator.py:" in provider.last_request.prompt
     # The retrieval miss that triggered the fallback must be visible in
     # telemetry: the model saw no retrieved evidence for its target file.
     assert result.telemetry.output_summary["target_evidence_retrieved"] is False
     assert "target_file_retrieval_score" not in result.telemetry.output_summary
     assert result.telemetry.output_summary["retrieved_evidence_count"] == 0
+
+
+def test_fallback_emits_multiple_section_candidates_with_spans(
+    tmp_path: Path,
+) -> None:
+    original = "\n".join(
+        [
+            "# header",
+            "import os",
+            "",
+            "def helper():",
+            "    return 1",
+            "",
+            "class AbsHandler:",
+            "    def eval_conjugate(self, arg):",
+            "        # recursion bug when arg is zero",
+            "        return arg",
+            "",
+            "def unrelated():",
+            "    return 2",
+            "",
+            "class Other:",
+            "    def compute(self, arg):",
+            "        return arg * 2",
+        ]
+    )
+    (tmp_path / "calculator.py").write_text(original, encoding="utf-8")
+
+    empty_retrieval = EvidenceSet(
+        evidence_set_id="empty-evidence",
+        query="recursion in eval_conjugate when arg is zero",
+        candidates=(),
+        diagnostics=RetrievalDiagnostics(
+            bm25_count=0,
+            vector_count=0,
+            graph_added_count=0,
+            coverage_added_count=0,
+            precision_added_count=0,
+            retrieval_disagreement=None,
+            degraded=False,
+            degradation_reason=None,
+        ),
+    )
+    provider = FakeProvider(
+        response_text=(
+            '{"target_file":"calculator.py",'
+            '"new_content":"def add(a, b):\\n    return a + b\\n",'
+            '"rationale":"r",'
+            '"evidence_ids":["target-section-0"],'
+            '"risk_flags":[]}'
+        )
+    )
+    planner = ProviderProposedPatchPlanner(
+        retrieval_service=FakeRetrievalService(output=empty_retrieval),
+        direct_read_service=DirectReadService(workspace_root=tmp_path),
+        edit_proposer=ProviderBackedEditProposer(provider=provider),
+    )
+    req = ProviderProposedPatchPlanRequest(
+        task_id="task-1",
+        workspace_root=str(tmp_path),
+        query="recursion in eval_conjugate when arg is zero",
+        task_class="python_patch",
+        index_id="idx",
+        target_file="calculator.py",
+        intent="fix the recursion in eval_conjugate",
+        expected_behavior="conjugate of zero returns 0",
+        verification_argv=(sys.executable, "-m", "pytest", ".", "-q"),
+        retrieval_policy={"intent": "EXPLAIN", "top_k": 5},
+        expected_content_hash=content_hash(original),
+    )
+
+    result = planner.plan(req)
+
+    assert result.ok is True
+    assert result.output is not None
+    assert provider.last_request is not None
+    # The evidence context must carry the relevant section with a real span
+    # and the actual buggy code, not a truncated whole-file header.
+    assert "target-section-0" in provider.last_request.prompt
+    assert "eval_conjugate" in provider.last_request.prompt
+    assert "calculator.py:" in provider.last_request.prompt
+    assert result.telemetry.output_summary["target_evidence_retrieved"] is False
+
+
+def test_fallback_keeps_full_file_when_scan_has_no_signal(
+    tmp_path: Path,
+) -> None:
+    original = "def foo():\n    return 42\n"
+    (tmp_path / "calculator.py").write_text(original, encoding="utf-8")
+    empty_retrieval = EvidenceSet(
+        evidence_set_id="empty-evidence",
+        query="fix add",
+        candidates=(),
+        diagnostics=RetrievalDiagnostics(
+            bm25_count=0,
+            vector_count=0,
+            graph_added_count=0,
+            coverage_added_count=0,
+            precision_added_count=0,
+            retrieval_disagreement=None,
+            degraded=False,
+            degradation_reason=None,
+        ),
+    )
+    provider = FakeProvider(
+        response_text=(
+            '{"target_file":"calculator.py",'
+            '"new_content":"def foo():\\n    return 43\\n",'
+            '"rationale":"r",'
+            '"evidence_ids":["fallback-calculator_py"],'
+            '"risk_flags":[]}'
+        )
+    )
+    planner = ProviderProposedPatchPlanner(
+        retrieval_service=FakeRetrievalService(output=empty_retrieval),
+        direct_read_service=DirectReadService(workspace_root=tmp_path),
+        edit_proposer=ProviderBackedEditProposer(provider=provider),
+    )
+    req = ProviderProposedPatchPlanRequest(
+        task_id="task-1",
+        workspace_root=str(tmp_path),
+        query="fix add",
+        task_class="python_patch",
+        index_id="idx",
+        target_file="calculator.py",
+        intent="fix add",
+        expected_behavior="add returns a sum",
+        verification_argv=(sys.executable, "-m", "pytest", ".", "-q"),
+        retrieval_policy={"intent": "EXPLAIN", "top_k": 5},
+        expected_content_hash=content_hash(original),
+    )
+
+    result = planner.plan(req)
+
+    assert result.ok is True
+    assert result.output is not None
+    assert result.output.patch_plan.evidence_ids == ("fallback-calculator_py",)
 
 
 def test_best_retrieval_score_picks_strongest_candidate_for_target_file() -> None:

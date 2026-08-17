@@ -20,6 +20,7 @@ from homllm_v4.planning.target_file_selector import (
     TargetFileSelectionRequest,
     TargetFileSelectionResult,
 )
+from homllm_v4.planning.target_section_scanner import scan_target_sections
 from homllm_v4.services.direct_read_service import DirectReadService
 from homllm_v4.services.retrieval_service import EvidenceRetrievalService
 
@@ -111,26 +112,17 @@ class ProviderProposedPatchPlanner:
             target_file,
         )
         if not has_evidence_for_target:
-            safe_target = target_file.replace('/', '_').replace('\\', '_').replace('.', '_')
-            fallback_cand_id = f"fallback-{safe_target}"
-            fallback_candidate = EvidenceCandidate(
-                candidate_id=fallback_cand_id,
-                file_path=target_file,
-                symbol_id=None,
-                span_start=1,
-                span_end=None,
-                content_hash=direct_read.output.content_hash or "",
-                source_channels=("direct_read_fallback",),
-                bm25_score=1.0,
-                vector_score=None,
-                graph_score=None,
-                retrieval_score=1.0,
-                metadata={"content": direct_read.output.content_excerpt},
+            fallback_candidates = _target_section_fallback_candidates(
+                target_file=target_file,
+                content=direct_read.output.content_excerpt or "",
+                query=request.query,
+                context=" ".join((request.intent, request.expected_behavior)),
+                full_content_hash=direct_read.output.content_hash or "",
             )
             evidence_set = EvidenceSet(
                 evidence_set_id=retrieval.output.evidence_set_id,
                 query=retrieval.output.query,
-                candidates=retrieval.output.candidates + (fallback_candidate,),
+                candidates=retrieval.output.candidates + fallback_candidates,
                 diagnostics=retrieval.output.diagnostics,
             )
         else:
@@ -194,6 +186,76 @@ class ProviderProposedPatchPlanner:
             target_file_retrieval_score=target_file_retrieval_score,
             retrieved_evidence_count=len(retrieval.output.candidates),
         )
+
+
+def _target_section_fallback_candidates(
+    *,
+    target_file: str,
+    content: str,
+    query: str,
+    context: str,
+    full_content_hash: str,
+) -> tuple[EvidenceCandidate, ...]:
+    """Build target-file evidence from a section scan when retrieval missed it.
+
+    The previous fallback was a single candidate holding the *entire* file,
+    which the evidence renderer truncated to its first ~2000 chars (the
+    import header). Instead, scan the file for query-relevant sections and
+    emit each as a candidate with a real line span, so the model sees e.g.
+    ``[target-section-1] complexes.py:400-479`` with actual code rather than
+    a useless header. Falls back to the old full-file candidate only when the
+    scan finds nothing (e.g. no query token appears in the file).
+    """
+    sections = scan_target_sections(
+        content,
+        query=query,
+        context=context,
+    )
+    if sections:
+        return tuple(
+            EvidenceCandidate(
+                candidate_id=f"target-section-{index}",
+                file_path=target_file,
+                symbol_id=None,
+                span_start=section.span_start,
+                span_end=section.span_end,
+                content_hash=_hash_text(section.content),
+                source_channels=("target_section_scan",),
+                bm25_score=None,
+                vector_score=None,
+                graph_score=None,
+                retrieval_score=float(section.score),
+                metadata={
+                    "content": section.content,
+                    "target_section_scan": True,
+                    "section_score": section.score,
+                },
+            )
+            for index, section in enumerate(sections)
+        )
+    safe_target = target_file.replace('/', '_').replace('\\', '_').replace('.', '_')
+    return (
+        EvidenceCandidate(
+            candidate_id=f"fallback-{safe_target}",
+            file_path=target_file,
+            symbol_id=None,
+            span_start=1,
+            span_end=None,
+            content_hash=full_content_hash,
+            source_channels=("direct_read_fallback",),
+            bm25_score=1.0,
+            vector_score=None,
+            graph_score=None,
+            retrieval_score=1.0,
+            metadata={"content": content},
+        ),
+    )
+
+
+def _hash_text(text: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(text.replace("\r\n", "\n").encode("utf-8")).hexdigest()
 
 
 def _best_retrieval_score(
