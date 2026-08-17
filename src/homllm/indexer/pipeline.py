@@ -423,7 +423,15 @@ class IndexerPipeline:
 
         # 4. Index text (BM25)
         logger.info(f"Indexing {len(documents_for_bm25)} documents in BM25")
-        self.tantivy.index(iter(documents_for_bm25))
+        try:
+            self.tantivy.index(iter(documents_for_bm25))
+        except RuntimeError as exc:
+            # Tantivy commit failures can leave the index half-committed and
+            # unsearchable; reset and retry once so a transient failure does
+            # not silently poison the whole index.
+            logger.warning(f"BM25 indexing failed ({exc}); resetting and retrying once")
+            self.tantivy.reset()
+            self.tantivy.index(iter(documents_for_bm25))
 
         # 5. Index vectors
         if self.config.vector_indexing_enabled:
