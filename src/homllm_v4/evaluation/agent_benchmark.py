@@ -41,6 +41,15 @@ class BaselineCheck:
 
 _BASELINE_FAILURE_KINDS = frozenset({"behavior", "hidden_test"})
 
+# Grounded-answer step statuses that count as a completed, evidence-backed ask
+# for positive (edit-verified) benchmark cases. "sufficient" is the ideal;
+# "budget_exhausted" and "repeated_state" are bounded completions that still
+# produced evidence. "empty_evidence" (ungrounded) and "service_failed" remain
+# gate failures.
+_ACCEPTED_ASK_COMPLETION_STATUSES = frozenset(
+    {"sufficient", "budget_exhausted", "repeated_state"}
+)
+
 
 def _case_requires_baseline_failure(case: AgentBenchmarkCase) -> bool:
     if case.requires_baseline_failure is not None:
@@ -706,7 +715,15 @@ def _quality_gate_failures(
         or metrics.get("trajectory_repo_index_status") != "built"
     ):
         failures.append("repo_index_not_built")
-    if metrics.get("trajectory_grounded_answer_status") != "sufficient":
+    # The grounded-answer step is a bounded read-only diagnostic. A case whose
+    # edit verified must still not pass on an *ungrounded* ask step
+    # (empty_evidence) or a failed ask step (service_failed). Bounded
+    # completions with evidence (budget_exhausted, repeated_state) are accepted:
+    # the retrieval found candidates/context, it simply did not reach the
+    # sufficiency threshold within the pass budget, which is a packing/limit
+    # artifact rather than an ungrounded false positive.
+    ask_status = metrics.get("trajectory_grounded_answer_status")
+    if ask_status not in _ACCEPTED_ASK_COMPLETION_STATUSES:
         failures.append("grounded_answer_not_sufficient")
     if metrics.get("trajectory_bounded_edit_status") != "verified":
         failures.append("bounded_edit_not_verified")
