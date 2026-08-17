@@ -3,6 +3,12 @@
 Used only for regression and safety tests, never for live benchmarking.
 The content mapping mirrors the fixture bugs in ``test_repo`` so a fake
 provider can propose the exact fix each benchmark case expects.
+
+For external SWE-bench fixtures, ``provider_mode="swebench_gold"`` applies
+the fixture's gold patch (from its manifest) to the current content, so the
+whole external suite is regression-runnable headlessly -- the harness then
+proves the full loop (index, patch, hidden-test verify, rollback, gate)
+without spending tokens on a live model.
 """
 
 from __future__ import annotations
@@ -12,13 +18,22 @@ import json
 from homllm_v4.planning.provider_edit_proposer import (
     ProviderEditProposalResponse,
 )
+from homllm_v4.utils.unified_diff import apply_unified_diff
 
 
-def canned_provider_content(*, provider_mode: str, target_content: str) -> str:
+def canned_provider_content(
+    *,
+    provider_mode: str,
+    target_content: str,
+    gold_patch: str | None = None,
+) -> str:
     """Return the fixed file content a deterministic provider would propose.
 
     Raises ``ValueError`` when the expected buggy pattern is not present, so a
     fixture/case mismatch fails loudly instead of silently passing.
+
+    ``gold_patch`` is required for ``provider_mode="swebench_gold"`` and is
+    ignored otherwise.
     """
     if provider_mode == "truncate_guard":
         old = (
@@ -234,6 +249,10 @@ def canned_provider_content(*, provider_mode: str, target_content: str) -> str:
         return _replace_or_raise(provider_mode, target_content, old, new)
     if provider_mode == "noop":
         return target_content
+    if provider_mode == "swebench_gold":
+        if not gold_patch:
+            raise ValueError("swebench_gold_requires_gold_patch")
+        return apply_unified_diff(target_content, gold_patch)
     raise ValueError(f"unsupported_provider_mode: {provider_mode}")
 
 
@@ -249,9 +268,16 @@ class PromptAwareCannedProvider:
     tokens_in = 1
     tokens_out = 1
 
-    def __init__(self, *, provider_mode: str, target_file: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        provider_mode: str,
+        target_file: str | None = None,
+        gold_patch: str | None = None,
+    ) -> None:
         self.provider_mode = provider_mode
         self.target_file = target_file
+        self.gold_patch = gold_patch
 
     def propose_edit(self, request) -> ProviderEditProposalResponse:
         evidence_ids: tuple[str, ...] = ()
@@ -275,6 +301,7 @@ class PromptAwareCannedProvider:
         new_content = canned_provider_content(
             provider_mode=self.provider_mode,
             target_content=current_content,
+            gold_patch=self.gold_patch,
         )
         return ProviderEditProposalResponse(
             text=json.dumps(
