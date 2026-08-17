@@ -6,7 +6,19 @@ import logging
 from pathlib import Path
 from typing import Optional
 
-from tree_sitter import Language, Node, Parser
+try:
+    from tree_sitter import Language, Node, Parser
+
+    TREE_SITTER_AVAILABLE = True
+except ImportError:
+    # tree-sitter is only required for the fast native parser; without it the
+    # indexer falls back to the stdlib-AST parser below. Making the import
+    # lazy lets downstream modules (and the v4 runtime) import cleanly when
+    # the native dependency is not installed.
+    TREE_SITTER_AVAILABLE = False
+    Language = None  # type: ignore[assignment, misc]
+    Node = None  # type: ignore[assignment, misc]
+    Parser = None  # type: ignore[assignment, misc]
 
 from homllm.common.types import SymbolInfo, SymbolKind
 from homllm.indexer.interfaces import CodeParser, ParseResult
@@ -320,6 +332,10 @@ class TreeSitterParser(CodeParser):
 
     def _init_languages(self) -> None:
         """Initialize Tree-Sitter languages."""
+        if not TREE_SITTER_AVAILABLE:
+            logger.warning("tree-sitter not available, using stdlib-AST fallback parser")
+            self.parsers["python"] = _PythonAstParser()
+            return
         try:
             from tree_sitter_language_pack import get_language
 

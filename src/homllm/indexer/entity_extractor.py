@@ -19,7 +19,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from tree_sitter import Node
+try:
+    from tree_sitter import Node
+except ImportError:
+    # tree-sitter is optional; Node is only used in type annotations here, so
+    # the module imports cleanly when the native dependency is not installed.
+    Node = None  # type: ignore[assignment, misc]
 
 from homllm.common.config import EntityConfidenceConfig, IndexerConfig
 from homllm.common.types import EntityInfo, GranularityLevel, SymbolKind

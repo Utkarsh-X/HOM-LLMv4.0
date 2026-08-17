@@ -15,7 +15,12 @@ import re
 from collections import defaultdict
 from typing import Optional
 
-from tree_sitter import Node
+try:
+    from tree_sitter import Node
+except ImportError:
+    # tree-sitter is optional; Node is only used in type annotations here, so
+    # the module imports cleanly when the native dependency is not installed.
+    Node = None  # type: ignore[assignment, misc]
 
 from homllm.common.types import CallEdge, EntityInfo, RelationInfo, RelationType, SymbolInfo
 from homllm.indexer.interfaces import ParseResult
