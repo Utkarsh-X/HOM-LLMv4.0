@@ -50,6 +50,7 @@ class AgentTaskRequest:
     provider_builder: Any = build_v3_provider_edit_adapter_from_params
     planner_builder: Any = build_v3_provider_proposed_patch_planner
     require_live_api_key: bool = True
+    verification_timeout_seconds: int | None = None
 
 
 @dataclass(frozen=True)
@@ -155,6 +156,7 @@ def run_agent_task(request: AgentTaskRequest) -> AgentTaskResult:
                 expected_behavior=request.expected_behavior,
                 verification_argv=request.verification_argv,
                 retrieval_policy={"intent": "PATCH", "top_k": 20},
+                verification_timeout_seconds=request.verification_timeout_seconds,
             ),
             max_verification_commands=1,
             provider_repair_attempts=request.provider_repair_attempts,

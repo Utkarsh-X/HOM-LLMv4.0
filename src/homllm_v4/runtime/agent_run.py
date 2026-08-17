@@ -36,6 +36,7 @@ class HomllmAgentRunRequest:
     session_runner: Any = run_agent_session
     edit_provider_builder: Any = None
     edit_require_live_api_key: bool = True
+    verification_timeout_seconds: int | None = None
 
 
 @dataclass(frozen=True)
@@ -91,6 +92,7 @@ def run_homllm_agent(request: HomllmAgentRunRequest) -> HomllmAgentRunResult:
             index_skip_vectors=request.index_skip_vectors,
             edit_provider_builder=request.edit_provider_builder,
             edit_require_live_api_key=request.edit_require_live_api_key,
+            verification_timeout_seconds=request.verification_timeout_seconds,
         )
     )
     artifact_root = Path(session_result.artifact_root)

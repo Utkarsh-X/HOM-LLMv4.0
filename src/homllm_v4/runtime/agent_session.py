@@ -51,6 +51,7 @@ class AgentSessionRequest:
     index_builder: Any = build_v3_agent_task_index
     read_only_runner: Any = None
     edit_runner: Any = run_agent_task
+    verification_timeout_seconds: int | None = None
 
 
 @dataclass(frozen=True)
@@ -163,6 +164,7 @@ def run_agent_session(request: AgentSessionRequest) -> AgentSessionResult:
                     else build_v3_provider_edit_adapter_from_params
                 ),
                 require_live_api_key=request.edit_require_live_api_key,
+                verification_timeout_seconds=request.verification_timeout_seconds,
             )
         )
 
