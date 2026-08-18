@@ -640,3 +640,214 @@ def test_provider_backed_edit_proposer_rejects_unknown_evidence_id() -> None:
     assert result.ok is False
     assert result.error is not None
     assert result.error.code == "proposal_evidence_scope_denied"
+
+
+def _diff_mode_request() -> EditProposalRequest:
+    return EditProposalRequest(
+        task_id="task-1",
+        target_file="calculator.py",
+        intent="fix add",
+        expected_behavior="add returns a sum",
+        current_content="def add(a, b):\n    return a - b\n",
+        evidence_ids=("cand-1",),
+        allowed_file_paths=("calculator.py",),
+        verification_summary="pytest . -q",
+        proposal_mode="unified_diff",
+    )
+
+
+def _diff_payload_text() -> str:
+    import json as json_module
+
+    diff_text = (
+        "--- a/calculator.py\n"
+        "+++ b/calculator.py\n"
+        "@@ -1,2 +1,2 @@\n"
+        " def add(a, b):\n"
+        "-    return a - b\n"
+        "+    return a + b\n"
+    )
+    payload = {
+        "target_file": "calculator.py",
+        "rationale": "fix sign via diff",
+        "evidence_ids": ["cand-1"],
+        "risk_flags": [],
+    }
+    return (
+        "```json\n"
+        + json_module.dumps(payload)
+        + "\n```\n```diff\n"
+        + diff_text
+        + "```"
+    )
+
+
+def test_diff_mode_prompt_requests_unified_diff() -> None:
+    provider = FakeProvider(_diff_payload_text())
+
+    ProviderBackedEditProposer(provider=provider).propose(_diff_mode_request())
+
+    assert provider.last_request is not None
+    prompt = provider.last_request.prompt
+    assert (
+        "Return a JSON object with keys: target_file, rationale, evidence_ids, risk_flags inside a ```json fence."
+        in prompt
+    )
+    assert (
+        "Then return the unified diff inside a separate ```diff fence, with NO JSON escaping of the diff."
+        in prompt
+    )
+    assert "diff must be a unified diff against the Current content section below." in prompt
+    assert "@@ -old_start,old_count +new_start,new_count @@" in prompt
+    assert "Make the smallest set of hunks that fixes the bug" in prompt
+    assert (
+        "new_content must be the complete replacement content for the entire target file"
+        not in prompt
+    )
+    assert "Do not return a snippet, diff, patch, or partial function body" not in prompt
+
+
+def test_diff_mode_applies_provider_diff() -> None:
+    proposer = ProviderBackedEditProposer(provider=FakeProvider(_diff_payload_text()))
+
+    result = proposer.propose(_diff_mode_request())
+
+    assert result.ok is True
+    assert result.output is not None
+    assert result.output.new_content == "def add(a, b):\n    return a + b\n"
+    assert result.output.diff is not None
+    assert "+    return a + b" in result.output.diff
+
+
+def test_diff_mode_accepts_unescaped_diff_fence_with_quotes() -> None:
+    # The live milestone failure: models cannot be trusted to JSON-escape a
+    # code diff (raw quotes and newlines inside the JSON string broke
+    # parsing). The ```diff fence must carry the diff raw.
+    import json as json_module
+
+    diff_text = (
+        "--- a/calculator.py\n"
+        "+++ b/calculator.py\n"
+        "@@ -1,2 +1,2 @@\n"
+        " def add(a, b):\n"
+        '-    return "a" - b\n'
+        '+    return "a" + b\n'
+    )
+    payload = {
+        "target_file": "calculator.py",
+        "rationale": "raw fence diff",
+        "evidence_ids": ["cand-1"],
+        "risk_flags": [],
+    }
+    response = (
+        "```json\n"
+        + json_module.dumps(payload)
+        + "\n```\n```diff\n"
+        + diff_text
+        + "```"
+    )
+    request = EditProposalRequest(
+        task_id="task-1",
+        target_file="calculator.py",
+        intent="fix add",
+        expected_behavior="add returns a sum",
+        current_content='def add(a, b):\n    return "a" - b\n',
+        evidence_ids=("cand-1",),
+        allowed_file_paths=("calculator.py",),
+        verification_summary="pytest . -q",
+        proposal_mode="unified_diff",
+    )
+
+    result = ProviderBackedEditProposer(provider=FakeProvider(response)).propose(request)
+
+    assert result.ok is True
+    assert result.output is not None
+    assert result.output.new_content == 'def add(a, b):\n    return "a" + b\n'
+
+
+def test_diff_mode_accepts_full_new_content_fallback() -> None:
+    import json as json_module
+
+    payload = {
+        "target_file": "calculator.py",
+        "new_content": "def add(a, b):\n    return a + b\n",
+        "rationale": "fallback to full content",
+        "evidence_ids": ["cand-1"],
+        "risk_flags": [],
+    }
+    proposer = ProviderBackedEditProposer(
+        provider=FakeProvider(json_module.dumps(payload))
+    )
+
+    result = proposer.propose(_diff_mode_request())
+
+    assert result.ok is True
+    assert result.output is not None
+    assert result.output.new_content == "def add(a, b):\n    return a + b\n"
+    assert result.output.diff is None
+
+
+def test_diff_mode_reports_unapplicable_diff_as_retryable() -> None:
+    import json as json_module
+
+    # The hunk context does not match the current content (wrong function
+    # name), so the tolerant applier must reject it loudly instead of
+    # corrupting the file silently.
+    diff_text = (
+        "--- a/calculator.py\n"
+        "+++ b/calculator.py\n"
+        "@@ -1,2 +1,2 @@\n"
+        " def subtract(a, b):\n"
+        "-    return a - b\n"
+        "+    return a + b\n"
+    )
+    payload = {
+        "target_file": "calculator.py",
+        "diff": diff_text,
+        "rationale": "wrong context",
+        "evidence_ids": ["cand-1"],
+        "risk_flags": [],
+    }
+    proposer = ProviderBackedEditProposer(
+        provider=FakeProvider(json_module.dumps(payload))
+    )
+
+    result = proposer.propose(_diff_mode_request())
+
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.code == "provider_diff_not_applicable"
+    assert result.error.retryable is True
+    assert "hunk_context_mismatch" in result.error.message
+
+
+def test_parse_provider_edit_response_diff_mode_requires_diff_or_new_content() -> None:
+    with pytest.raises(ValueError):
+        parse_provider_edit_response(
+            '{"target_file":"calculator.py",'
+            '"rationale":"x",'
+            '"evidence_ids":[],'
+            '"risk_flags":[]}',
+            mode="unified_diff",
+        )
+
+
+def test_proposer_persists_per_attempt_artifacts(tmp_path: Path) -> None:
+    manager = ArtifactManager(workspace_root=tmp_path, artifact_root=tmp_path / "runs")
+    manager.create_run("run-1", {"test": "per-attempt artifacts"})
+    provider = FakeProvider(_diff_payload_text())
+    proposer = ProviderBackedEditProposer(provider=provider, artifact_manager=manager)
+
+    proposer.propose(_diff_mode_request())
+    proposer.propose(_diff_mode_request())
+
+    expected_paths = (
+        "runs/run-1/provider/task-1/prompt.txt",
+        "runs/run-1/provider/task-1/response.txt",
+        "runs/run-1/provider/task-1/attempt_0/prompt.txt",
+        "runs/run-1/provider/task-1/attempt_0/response.txt",
+        "runs/run-1/provider/task-1/attempt_1/prompt.txt",
+        "runs/run-1/provider/task-1/attempt_1/response.txt",
+    )
+    for path in expected_paths:
+        assert (tmp_path / path).is_file(), f"missing artifact: {path}"

@@ -2,17 +2,32 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from time import perf_counter
 from typing import Protocol
 
 from homllm_v4.artifacts.manager import ArtifactManager
 from homllm_v4.contracts.artifacts import ArtifactRef
 from homllm_v4.contracts.capability import CapabilityResult
-from homllm_v4.contracts.edit_proposal import EditProposalRequest, EditProposalResult
+from homllm_v4.contracts.edit_proposal import (
+    PROPOSAL_MODE_FULL_CONTENT,
+    PROPOSAL_MODE_UNIFIED_DIFF,
+    EditProposalRequest,
+    EditProposalResult,
+    validate_proposal_mode,
+)
 from homllm_v4.contracts.errors import CapabilityError
 from homllm_v4.contracts.telemetry import CapabilityTelemetry
 from homllm_v4.planning.bounded_edit_proposer import BoundedEditProposer
+from homllm_v4.utils.unified_diff import apply_unified_diff
+
+# Provider-output failures that a fresh provider call can plausibly fix.
+_RETRYABLE_FAILURE_CODES = frozenset(
+    {
+        "provider_invocation_failed",
+        "provider_diff_not_applicable",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -73,13 +88,17 @@ class ProviderBackedEditProposer:
         self.max_evidence_item_chars = max(1, int(max_evidence_item_chars))
         self.max_evidence_context_chars = max(1, int(max_evidence_context_chars))
         self.max_prompt_chars = None if max_prompt_chars is None else max(1, int(max_prompt_chars))
+        self._attempt = 0
 
     def propose(self, request: EditProposalRequest) -> CapabilityResult[EditProposalResult]:
+        validate_proposal_mode(request.proposal_mode)
         started = perf_counter()
+        attempt_index = self._attempt
+        self._attempt += 1
         provider_response: ProviderEditProposalResponse | None = None
         prompt_build = self._build_within_budget(request)
         prompt = prompt_build.prompt
-        artifacts = self._write_prompt_artifact(request, prompt)
+        artifacts = self._write_prompt_artifact(request, prompt, attempt_index)
         if (
             self.max_prompt_chars is not None
             and prompt_build.prompt_char_count > self.max_prompt_chars
@@ -117,9 +136,16 @@ class ProviderBackedEditProposer:
                 artifacts=artifacts,
             )
 
-        artifacts += self._write_response_artifact(request, provider_response.text)
+        artifacts += self._write_response_artifact(
+            request,
+            provider_response.text,
+            attempt_index,
+        )
         try:
-            proposal = parse_provider_edit_response(provider_response.text)
+            proposal = parse_provider_edit_response(
+                provider_response.text,
+                mode=request.proposal_mode,
+            )
         except Exception as exc:
             finish_reason = str(
                 getattr(provider_response, "metadata", {}).get("finish_reason", "")
@@ -153,6 +179,22 @@ class ProviderBackedEditProposer:
                 details={"unknown_evidence_ids": unknown_evidence},
                 artifacts=artifacts,
             )
+
+        if proposal.diff is not None:
+            try:
+                applied = apply_unified_diff(request.current_content, proposal.diff)
+            except ValueError as exc:
+                return _failed(
+                    request=request,
+                    started=started,
+                    provider_response=provider_response,
+                    prompt_build=prompt_build,
+                    code="provider_diff_not_applicable",
+                    message=str(exc),
+                    details={"proposal_mode": request.proposal_mode},
+                    artifacts=artifacts,
+                )
+            proposal = replace(proposal, new_content=applied)
 
         bounded = BoundedEditProposer(proposer=lambda _: proposal).propose(request)
         return _with_provider_usage(
@@ -200,33 +242,51 @@ class ProviderBackedEditProposer:
         self,
         request: EditProposalRequest,
         prompt: str,
+        attempt_index: int,
     ) -> tuple[ArtifactRef, ...]:
         if self.artifact_manager is None:
             return ()
-        return (
+        segment = _safe_segment(request.task_id)
+        refs = [
             self.artifact_manager.write_text(
-                f"provider/{_safe_segment(request.task_id)}/prompt.txt",
+                f"provider/{segment}/prompt.txt",
                 prompt,
                 "provider_prompt",
-                "provider edit proposal prompt",
+                "provider edit proposal prompt (latest attempt)",
             ),
-        )
+            self.artifact_manager.write_text(
+                f"provider/{segment}/attempt_{attempt_index}/prompt.txt",
+                prompt,
+                "provider_prompt",
+                "provider edit proposal prompt (per-attempt history)",
+            ),
+        ]
+        return tuple(refs)
 
     def _write_response_artifact(
         self,
         request: EditProposalRequest,
         response_text: str,
+        attempt_index: int,
     ) -> tuple[ArtifactRef, ...]:
         if self.artifact_manager is None:
             return ()
-        return (
+        segment = _safe_segment(request.task_id)
+        refs = [
             self.artifact_manager.write_text(
-                f"provider/{_safe_segment(request.task_id)}/response.txt",
+                f"provider/{segment}/response.txt",
                 response_text,
                 "provider_response",
-                "provider edit proposal raw response",
+                "provider edit proposal raw response (latest attempt)",
             ),
-        )
+            self.artifact_manager.write_text(
+                f"provider/{segment}/attempt_{attempt_index}/response.txt",
+                response_text,
+                "provider_response",
+                "provider edit proposal raw response (per-attempt history)",
+            ),
+        ]
+        return tuple(refs)
 
 
 def build_edit_proposal_prompt(
@@ -260,22 +320,8 @@ def _build_edit_proposal_prompt_with_metadata(
         _render_current_content(request.current_content, max_current_content_chars)
     )
     prompt = "\n".join(
-        (
-            "You are proposing a bounded single-file edit.",
-            "Return only JSON with keys: target_file, new_content, rationale, evidence_ids, risk_flags.",
-            "new_content must be the complete replacement content for the entire target file.",
-            "new_content must be a valid JSON string with escaped newlines and quotes.",
-            "After JSON parsing, new_content must be normal source text with normal quotes.",
-            "Do not include literal backslash-escaped quote characters in source code unless they already exist.",
-            "Do not return a snippet, diff, patch, or partial function body.",
-            "Do not use Python triple-quoted strings for new_content.",
-            "For no-op or validation-only tasks, return current content unchanged.",
-            "Exact examples in Expected behavior are mandatory acceptance criteria.",
-            "The proposed new_content must satisfy the Verification command.",
-            "Do not use a plausible generic fix if it violates an exact expected output.",
-            "Do not call a helper that re-acquires a non-reentrant lock while inside that lock.",
-            "Do not modify files outside the allowed file list.",
-            "Do not cite evidence ids that are not listed in this request.",
+        _prompt_instruction_lines(request)
+        + (
             f"Task ID: {request.task_id}",
             f"Target file: {request.target_file}",
             f"Allowed files: {', '.join(request.allowed_file_paths)}",
@@ -297,6 +343,45 @@ def _build_edit_proposal_prompt_with_metadata(
         evidence_context_truncated=evidence_render.truncated,
         current_content_char_count=current_content_char_count,
         current_content_truncated=current_content_truncated,
+    )
+
+
+def _prompt_instruction_lines(request: EditProposalRequest) -> tuple[str, ...]:
+    if request.proposal_mode == PROPOSAL_MODE_UNIFIED_DIFF:
+        return (
+            "You are proposing a bounded single-file edit.",
+            "Return a JSON object with keys: target_file, rationale, evidence_ids, risk_flags inside a ```json fence.",
+            "Then return the unified diff inside a separate ```diff fence, with NO JSON escaping of the diff.",
+            "diff must be a unified diff against the Current content section below.",
+            "Include '--- a/<target_file>' and '+++ b/<target_file>' header lines.",
+            "Hunks use '@@ -old_start,old_count +new_start,new_count @@' with line numbers that match the Current content exactly.",
+            "Context lines start with a single space; additions start with '+'; deletions start with '-'.",
+            "Make the smallest set of hunks that fixes the bug; do not touch unrelated lines.",
+            "If you cannot express the fix as a diff, you may instead return the complete file as new_content inside the JSON object.",
+            "For no-op or validation-only tasks, return current content unchanged as new_content.",
+            "Exact examples in Expected behavior are mandatory acceptance criteria.",
+            "The proposed change must satisfy the Verification command.",
+            "Do not use a plausible generic fix if it violates an exact expected output.",
+            "Do not call a helper that re-acquires a non-reentrant lock while inside that lock.",
+            "Do not modify files outside the allowed file list.",
+            "Do not cite evidence ids that are not listed in this request.",
+        )
+    return (
+        "You are proposing a bounded single-file edit.",
+        "Return only JSON with keys: target_file, new_content, rationale, evidence_ids, risk_flags.",
+        "new_content must be the complete replacement content for the entire target file.",
+        "new_content must be a valid JSON string with escaped newlines and quotes.",
+        "After JSON parsing, new_content must be normal source text with normal quotes.",
+        "Do not include literal backslash-escaped quote characters in source code unless they already exist.",
+        "Do not return a snippet, diff, patch, or partial function body.",
+        "Do not use Python triple-quoted strings for new_content.",
+        "For no-op or validation-only tasks, return current content unchanged.",
+        "Exact examples in Expected behavior are mandatory acceptance criteria.",
+        "The proposed new_content must satisfy the Verification command.",
+        "Do not use a plausible generic fix if it violates an exact expected output.",
+        "Do not call a helper that re-acquires a non-reentrant lock while inside that lock.",
+        "Do not modify files outside the allowed file list.",
+        "Do not cite evidence ids that are not listed in this request.",
     )
 
 
@@ -401,7 +486,12 @@ def _format_location(file_path: str, span_start: int | None, span_end: int | Non
     return f"{file_path}:?-{span_end}"
 
 
-def parse_provider_edit_response(text: str) -> EditProposalResult:
+def parse_provider_edit_response(
+    text: str,
+    *,
+    mode: str = PROPOSAL_MODE_FULL_CONTENT,
+) -> EditProposalResult:
+    validate_proposal_mode(mode)
     raw_text = _json_text_from_provider_response(text)
     try:
         data = json.loads(raw_text)
@@ -418,7 +508,9 @@ def parse_provider_edit_response(text: str) -> EditProposalResult:
     if not isinstance(data, dict):
         raise ValueError("provider response must be a JSON object")
 
-    required = ("target_file", "new_content", "rationale", "evidence_ids", "risk_flags")
+    required = ("target_file", "rationale", "evidence_ids", "risk_flags")
+    if mode == PROPOSAL_MODE_FULL_CONTENT:
+        required = ("target_file", "new_content", "rationale", "evidence_ids", "risk_flags")
     missing = [key for key in required if key not in data]
     if missing:
         raise ValueError(f"provider response missing keys: {', '.join(missing)}")
@@ -428,12 +520,29 @@ def parse_provider_edit_response(text: str) -> EditProposalResult:
     if not isinstance(data["risk_flags"], list):
         raise ValueError("provider response risk_flags must be a list")
 
+    diff: str | None = None
+    if mode == PROPOSAL_MODE_UNIFIED_DIFF:
+        fenced_diff = _extract_fenced_diff(text)
+        if fenced_diff is not None:
+            new_content = ""
+            diff = fenced_diff
+        elif "new_content" in data:
+            new_content = _string_field(data, "new_content")
+        elif "diff" in data:
+            new_content = ""
+            diff = _string_field(data, "diff")
+        else:
+            raise ValueError("provider response missing keys: diff")
+    else:
+        new_content = _string_field(data, "new_content")
+
     return EditProposalResult(
         target_file=_string_field(data, "target_file"),
-        new_content=_string_field(data, "new_content"),
+        new_content=new_content,
         rationale=_string_field(data, "rationale"),
         evidence_ids=tuple(str(item) for item in data["evidence_ids"]),
         risk_flags=tuple(str(item) for item in data["risk_flags"]),
+        diff=diff,
     )
 
 
@@ -443,6 +552,27 @@ def _json_text_from_provider_response(text: str) -> str:
     if fenced is not None:
         return fenced
     return _extract_balanced_json_object(stripped)
+
+
+def _extract_fenced_diff(text: str) -> str | None:
+    """Return the first `````diff``/`````patch`` fence, or None when absent.
+
+    Diff fences carry the raw unified diff so the model does not have to
+    JSON-escape code (which small models do unreliably). The JSON metadata
+    object is parsed separately from the rest of the response.
+    """
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        candidate = line.strip()
+        if not candidate.startswith("```"):
+            continue
+        language = candidate[3:].strip().lower()
+        if language not in ("diff", "patch"):
+            continue
+        for close_index in range(index + 1, len(lines)):
+            if lines[close_index].strip() == "```":
+                return "\n".join(lines[index + 1 : close_index]).strip()
+    return None
 
 
 def _extract_fenced_json(text: str) -> str | None:
@@ -564,7 +694,7 @@ def _failed(
             code=code,
             message=message,
             recoverable=True,
-            retryable=code == "provider_invocation_failed",
+            retryable=code in _RETRYABLE_FAILURE_CODES,
             details={"target_file": request.target_file, **(details or {})},
         ),
         telemetry=_telemetry(
