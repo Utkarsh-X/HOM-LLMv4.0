@@ -565,7 +565,7 @@ class Config(BaseModel):
 
         return GenerationConfig(
             default_provider=gen_cfg.get("default_provider", "gemini"),
-            default_model=gen_cfg.get("default_model", "gemini-2.5-flash"),
+            default_model=gen_cfg.get("default_model", "gemini-3.5-flash-lite"),
             default_temperature=gen_cfg.get("temperature", 0.0),
             default_max_output_tokens=gen_cfg.get("max_output_tokens", 2000),
             default_template=gen_cfg.get("default_template", "explain"),

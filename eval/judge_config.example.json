@@ -3,7 +3,7 @@
   "providers": {
     "gemini": {
       "provider": "gemini",
-      "model": "gemini-2.5-flash",
+      "model": "gemini-3.5-flash-lite",
       "api_key": "PASTE_GEMINI_API_KEY_HERE",
       "requests_per_minute": 4,
       "temperature": 0.0

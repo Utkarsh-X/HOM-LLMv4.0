@@ -222,7 +222,7 @@ class GenerationAdapter:
         model = self.default_model
         if model is None:
             # Use fallback default (should come from config in production)
-            model = "gemini-2.5-flash"
+            model = "gemini-3.5-flash-lite"
 
         return ProviderRequest(
             prompt=prompt,

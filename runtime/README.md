@@ -65,7 +65,7 @@ python runtime/run_query.py --query "How does authentication work?" --provider g
 [RETRIEVAL] start=2024-01-01T12:00:00 duration_ms=150 candidates=50 bm25_count=25 vector_count=25 merged_count=50
 [RANKING] start=2024-01-01T12:00:00 duration_ms=200 candidates=50 reranker=true reranker_unavailable=false
 [CONTEXT] start=2024-01-01T12:00:00 duration_ms=50 blocks=8 tokens=3200 token_budget=4000
-[GENERATION] start=2024-01-01T12:00:00 duration_ms=1200 provider=gemini model=gemini-2.5-flash tokens_in=3200 tokens_out=500 status=OK
+[GENERATION] start=2024-01-01T12:00:00 duration_ms=1200 provider=gemini model=gemini-3.5-flash-lite tokens_in=3200 tokens_out=500 status=OK
 ```
 
 ---

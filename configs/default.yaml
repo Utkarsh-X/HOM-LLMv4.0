@@ -431,7 +431,7 @@ intelligence:
   abrm_disable_on_cold_start: true
 generation:
   default_provider: gemini
-  default_model: gemini-2.5-flash
+  default_model: gemini-3.5-flash-lite
   temperature: 0.15
   max_output_tokens: 12000
   default_template: explain
