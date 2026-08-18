@@ -240,6 +240,7 @@ _PLAN_RETRYABLE_CODES = frozenset(
         "provider_response_invalid",
         "provider_response_truncated",
         "proposal_evidence_scope_denied",
+        "proposal_missing_evidence",
     }
 )
 

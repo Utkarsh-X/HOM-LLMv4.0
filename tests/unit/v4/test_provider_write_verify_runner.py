@@ -72,6 +72,7 @@ def successful_plan(
     expected_content: str,
     tokens_in: int,
     tokens_out: int,
+    verification_argv: tuple[str, ...] | None = None,
 ) -> CapabilityResult[EvidenceBackedPatchPlanResult]:
     patch_request = PatchApplyRequest(
         task_id="task-1",
@@ -82,7 +83,8 @@ def successful_plan(
         task_id="task-1",
         workspace_root=str(tmp_path),
         cwd=".",
-        argv=(
+        argv=verification_argv
+        or (
             sys.executable,
             "-c",
             "from pathlib import Path; "
@@ -343,6 +345,44 @@ def test_provider_write_verify_runner_plan_retry_budget_exhausted(
     assert result.verification_results == ()
 
 
+def test_provider_write_verify_runner_replans_after_empty_evidence_proposal(
+    tmp_path: Path,
+) -> None:
+    # A provider that drops evidence_ids (e.g. a repair attempt that
+    # over-corrects) must be replanned with a repair prompt instead of
+    # hard-stopping the case.
+    (tmp_path / "demo.py").write_text("VALUE = 1\n", encoding="utf-8")
+    planner = SequencePlanner(
+        (
+            failed_plan("proposal_missing_evidence"),
+            successful_plan(
+                tmp_path,
+                new_content="VALUE = 3\n",
+                expected_content="VALUE = 1\n",
+                tokens_in=101,
+                tokens_out=11,
+            ),
+        )
+    )
+
+    result = ProviderWriteVerifyRunner(
+        planner=planner,
+        write_verify_loop=make_loop(tmp_path),
+    ).run(
+        ProviderWriteVerifyRunRequest(
+            task_id="task-1",
+            run_id="run-1",
+            workspace_root=str(tmp_path),
+            plan_request=plan_request(tmp_path),
+            provider_repair_attempts=1,
+        )
+    )
+
+    assert result.stop_reason == "verified"
+    assert result.provider_repair_attempt_count == 1
+    assert "proposal_missing_evidence" in planner.repair_contexts[0]
+
+
 def test_provider_write_verify_runner_replans_after_truncated_plan_response(
     tmp_path: Path,
 ) -> None:
@@ -510,3 +550,63 @@ def test_provider_write_verify_runner_plan_retry_then_verification_repair(
     assert len(planner.repair_contexts) == 2
     assert "provider_response_invalid" in planner.repair_contexts[0]
     assert "verification_failed" in planner.repair_contexts[1]
+
+
+def test_provider_write_verify_runner_converges_from_pytest_failure_summary(
+    tmp_path: Path,
+) -> None:
+    # Prove the repair loop can converge from a *pytest failure summary*
+    # (the live SWE-bench milestone found the model repeating wrong edits
+    # despite the summary being present). The first attempt fails a real
+    # pytest run; the repair plan must receive the extracted "Failing tests:"
+    # block and the second attempt must verify.
+    (tmp_path / "demo.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "test_demo.py").write_text(
+        "from pathlib import Path\n"
+        "def test_value():\n"
+        "    assert Path('demo.py').read_text(encoding='utf-8') == 'VALUE = 3\\n'\n",
+        encoding="utf-8",
+    )
+    pytest_argv = (sys.executable, "-m", "pytest", "test_demo.py", "-q")
+    planner = SequencePlanner(
+        (
+            successful_plan(
+                tmp_path,
+                new_content="VALUE = 2\n",
+                expected_content="VALUE = 1\n",
+                tokens_in=101,
+                tokens_out=11,
+                verification_argv=pytest_argv,
+            ),
+            successful_plan(
+                tmp_path,
+                new_content="VALUE = 3\n",
+                expected_content="VALUE = 1\n",
+                tokens_in=102,
+                tokens_out=12,
+                verification_argv=pytest_argv,
+            ),
+        )
+    )
+
+    result = ProviderWriteVerifyRunner(
+        planner=planner,
+        write_verify_loop=make_loop(tmp_path),
+    ).run(
+        ProviderWriteVerifyRunRequest(
+            task_id="task-1",
+            run_id="run-1",
+            workspace_root=str(tmp_path),
+            plan_request=plan_request(tmp_path),
+            provider_repair_attempts=1,
+        )
+    )
+
+    assert result.stop_reason == "verified"
+    assert result.patch_attempt_count == 2
+    assert result.provider_repair_attempt_count == 1
+    assert len(planner.repair_contexts) == 1
+    repair_context = planner.repair_contexts[0]
+    assert "Failing tests:" in repair_context
+    assert "test_demo.py::test_value" in repair_context
+    assert (tmp_path / "demo.py").read_text(encoding="utf-8") == "VALUE = 3\n"
