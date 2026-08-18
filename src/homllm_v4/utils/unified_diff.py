@@ -69,14 +69,19 @@ def _find_hunk_position(
     old_start: int,
     old_body: Sequence[str],
     *,
-    search_window: int = 30,
+    search_window: int = 60,
 ) -> int | None:
     """Locate the hunk body in ``lines``, anchored on the header start line.
 
     ``old_start`` is 1-based (a 0 start means insertion before line 1). The
     body is matched exactly at the expected position first; if that fails
     (wrong header counts or trimmed context), the body is searched within a
-    small window around it.
+    window around it. The default window tolerates the line-number drift
+    small models produce when they count hunks by hand. When even the window
+    misses (models counting lines in a multi-thousand-line file can drift by
+    hundreds), fall back to a full-file exact-body scan and apply only when
+    the body is unambiguous -- line numbers become advisory, the body is
+    authoritative, and ambiguity fails loudly instead of corrupting.
     """
     if not old_body:
         # Pure insertion: position is the header start (0 = before line 1).
@@ -89,6 +94,13 @@ def _find_hunk_position(
     for pos in range(lo, hi):
         if lines[pos : pos + len(old_body)] == list(old_body):
             return pos
+    full_matches = [
+        pos
+        for pos in range(0, len(lines) - len(old_body) + 1)
+        if lines[pos : pos + len(old_body)] == list(old_body)
+    ]
+    if len(full_matches) == 1:
+        return full_matches[0]
     return None
 
 

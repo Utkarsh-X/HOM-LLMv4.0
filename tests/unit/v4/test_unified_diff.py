@@ -150,3 +150,88 @@ def test_raises_on_context_mismatch() -> None:
 def test_raises_on_empty_patch() -> None:
     with pytest.raises(ValueError, match="no_hunks_found"):
         apply_unified_diff("abc\n", "diff --git a/x b/x\n--- a/x\n+++ b/x\n")
+
+
+def test_finds_hunk_with_model_scale_line_number_drift() -> None:
+    # Small models count hunk line numbers by hand and drift by tens of
+    # lines. The default search window must absorb that drift while the
+    # exact body match keeps the position unambiguous.
+    lines = [f"line_{index:03d}" for index in range(90)]
+    content = "\n".join(lines) + "\n"
+    patch = _patch(
+        "--- a/file.py",
+        "+++ b/file.py",
+        "@@ -70,3 +70,4 @@",
+        " line_030",
+        " line_031",
+        "-line_032",
+        "+line_032-fixed",
+    )
+    # Header claims line 70 but the body lives at line 31: a 39-line drift
+    # beyond the old 30-line window. Must apply.
+    expected = lines[:32] + ["line_032-fixed"] + lines[33:]
+    assert apply_unified_diff(content, patch) == "\n".join(expected) + "\n"
+
+
+def test_raises_when_hunk_drift_exceeds_search_window() -> None:
+    lines = [f"line_{index:03d}" for index in range(90)]
+    content = "\n".join(lines) + "\n"
+    patch = _patch(
+        "@@ -5,3 +5,3 @@",
+        " line_080",
+        " line_081",
+        " line_082",
+    )
+    # Body absent from the file entirely: the applier must fail loudly, not
+    # corrupt. (A body that exists exactly once far away now applies via the
+    # full-file fallback, covered by the distant-hunk test below.)
+    missing_body = _patch(
+        "@@ -5,3 +5,3 @@",
+        " zzz_not_in_file_080",
+        " zzz_not_in_file_081",
+        " zzz_not_in_file_082",
+    )
+    with pytest.raises(ValueError, match="hunk_context_mismatch"):
+        apply_unified_diff(content, missing_body)
+
+
+def test_falls_back_to_full_file_search_for_distant_hunk() -> None:
+    # A model counting lines in a multi-thousand-line file can drift by
+    # hundreds. When the windowed search misses, an unambiguous exact body
+    # match anywhere in the file must still apply -- line numbers become
+    # advisory, the body is authoritative.
+    lines = [f"line_{index:03d}" for index in range(200)]
+    lines[150:153] = ["def target():", "    return 1", ""]
+    content = "\n".join(lines) + "\n"
+    patch = _patch(
+        "@@ -5,4 +5,7 @@",
+        " def target():",
+        "     return 1",
+        " ",
+        "+    return 2",
+    )
+    # Header claims line 5; the body lives near line 150 -- far beyond the
+    # window. The single exact body match must win.
+    applied = apply_unified_diff(content, patch)
+    assert "def target():\n    return 1\n\n    return 2\n" in applied
+
+
+def test_full_file_fallback_refuses_ambiguous_body() -> None:
+    # A two-line body that appears in several places must fail loudly rather
+    # than guess which occurrence the model meant.
+    lines = [f"filler_{index:03d}" for index in range(300)]
+    lines[100] = "def f():"
+    lines[101] = "    pass"
+    lines[200] = "def f():"
+    lines[201] = "    pass"
+    content = "\n".join(lines) + "\n"
+    patch = _patch(
+        "@@ -1,2 +1,2 @@",
+        " def f():",
+        "     pass",
+    )
+    # Header points at line 1: both occurrences (lines 100 and 200) sit far
+    # outside the search window, and the full-file scan finds two identical
+    # bodies, so the applier must refuse rather than guess.
+    with pytest.raises(ValueError, match="hunk_context_mismatch"):
+        apply_unified_diff(content, patch)
