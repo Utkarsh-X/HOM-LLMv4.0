@@ -37,6 +37,7 @@ class HomllmAgentRunRequest:
     edit_provider_builder: Any = None
     edit_require_live_api_key: bool = True
     verification_timeout_seconds: int | None = None
+    proposal_mode: str = "full_content"
 
 
 @dataclass(frozen=True)
@@ -93,6 +94,7 @@ def run_homllm_agent(request: HomllmAgentRunRequest) -> HomllmAgentRunResult:
             edit_provider_builder=request.edit_provider_builder,
             edit_require_live_api_key=request.edit_require_live_api_key,
             verification_timeout_seconds=request.verification_timeout_seconds,
+            proposal_mode=request.proposal_mode,
         )
     )
     artifact_root = Path(session_result.artifact_root)

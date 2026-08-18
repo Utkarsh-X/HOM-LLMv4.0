@@ -509,6 +509,7 @@ def run_homllm_agent_benchmark(
     verify_baseline: bool = False,
     baseline_command_service: object | None = None,
     agent_runner=run_homllm_agent,
+    proposal_mode: str = "full_content",
 ) -> EvaluationRunResult:
     config_path = Path(config_path)
     if not config_path.exists():
@@ -576,6 +577,7 @@ def run_homllm_agent_benchmark(
             edit_provider_mode=edit_provider_mode,
             verification_timeout_seconds=verification_timeout_seconds,
             agent_runner=agent_runner,
+            proposal_mode=proposal_mode,
         )
         if baseline is not None:
             case_result = _merge_baseline_metrics(case_result, baseline)
@@ -618,6 +620,7 @@ def _run_case(
     edit_provider_mode: str,
     verification_timeout_seconds: int | None,
     agent_runner,
+    proposal_mode: str,
 ) -> EvaluationCaseResult:
     case_workspace = _copy_case_workspace(
         source_workspace_root=source_workspace_root,
@@ -660,6 +663,7 @@ def _run_case(
                 edit_provider_builder=edit_provider_builder,
                 edit_require_live_api_key=edit_require_live_api_key,
                 verification_timeout_seconds=verification_timeout_seconds,
+                proposal_mode=proposal_mode,
             )
         )
         metrics = _case_metrics(case, result)

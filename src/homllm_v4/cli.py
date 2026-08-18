@@ -95,6 +95,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     homllm_agent_run.add_argument("--index-incremental", action="store_true")
     homllm_agent_run.add_argument("--index-skip-vectors", action="store_true")
     homllm_agent_run.add_argument("--verification-timeout", type=int)
+    homllm_agent_run.add_argument(
+        "--proposal-mode",
+        choices=("full_content", "unified_diff"),
+        default="full_content",
+        help="provider proposal contract: full-file new_content or bounded unified diff",
+    )
     agent_session = subparsers.add_parser(
         "agent-session",
         help="run a v4 local session: grounded ask plus optional bounded edit",
@@ -126,6 +132,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     agent_session.add_argument("--index-incremental", action="store_true")
     agent_session.add_argument("--index-skip-vectors", action="store_true")
     agent_session.add_argument("--verification-timeout", type=int)
+    agent_session.add_argument(
+        "--proposal-mode",
+        choices=("full_content", "unified_diff"),
+        default="full_content",
+    )
     agent_task = subparsers.add_parser(
         "agent-task",
         help="run one bounded v4 MVP coding-agent task",
@@ -151,6 +162,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     agent_task.add_argument("--index-incremental", action="store_true")
     agent_task.add_argument("--index-skip-vectors", action="store_true")
     agent_task.add_argument("--verification-timeout", type=int)
+    agent_task.add_argument(
+        "--proposal-mode",
+        choices=("full_content", "unified_diff"),
+        default="full_content",
+    )
     fixture_patch = subparsers.add_parser(
         "eval-fixture-patch",
         help="run the v4 deterministic Python patch fixture suite",
@@ -196,6 +212,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     agent_benchmark.add_argument("--index-skip-vectors", action="store_true")
     agent_benchmark.add_argument("--verification-timeout", type=int)
     agent_benchmark.add_argument(
+        "--proposal-mode",
+        choices=("full_content", "unified_diff"),
+        default="full_content",
+    )
+    agent_benchmark.add_argument(
         "--verify-baseline",
         action="store_true",
         help="run verification against the pristine fixture first and skip stale/broken cases",
@@ -240,6 +261,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="also verify SWE-bench PASS_TO_PASS tests (slower; guards against regressions)",
     )
     swebench_lite.add_argument("--verification-timeout", type=int)
+    swebench_lite.add_argument(
+        "--proposal-mode",
+        choices=("full_content", "unified_diff"),
+        default="full_content",
+    )
     swebench_lite.add_argument(
         "--verify-baseline",
         action="store_true",
@@ -298,6 +324,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         default="actual",
     )
     real_index_provider_patch.add_argument("--case-id", action="append")
+    real_index_provider_patch.add_argument(
+        "--proposal-mode",
+        choices=("full_content", "unified_diff"),
+        default="full_content",
+    )
 
     args = parser.parse_args(argv)
     if args.command == "read-only":
@@ -402,6 +433,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     index_incremental=bool(args.index_incremental),
                     index_skip_vectors=bool(args.index_skip_vectors),
                     verification_timeout_seconds=args.verification_timeout,
+                    proposal_mode=args.proposal_mode,
                 )
             )
         except ValueError as exc:
@@ -526,6 +558,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     index_incremental=bool(args.index_incremental),
                     index_skip_vectors=bool(args.index_skip_vectors),
                     verification_timeout_seconds=args.verification_timeout,
+                    proposal_mode=args.proposal_mode,
                 )
             )
         except ValueError as exc:
@@ -606,6 +639,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     index_incremental=bool(args.index_incremental),
                     index_skip_vectors=bool(args.index_skip_vectors),
                     verification_timeout_seconds=args.verification_timeout,
+                    proposal_mode=args.proposal_mode,
                 )
             )
         except ValueError as exc:
@@ -754,6 +788,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 edit_provider_mode=args.edit_provider_mode,
                 verification_timeout_seconds=args.verification_timeout,
                 verify_baseline=bool(args.verify_baseline),
+                proposal_mode=args.proposal_mode,
             )
         except ValueError as exc:
             print(
@@ -861,6 +896,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 edit_provider_mode=args.edit_provider_mode,
                 verification_timeout_seconds=args.verification_timeout,
                 verify_baseline=bool(args.verify_baseline),
+                proposal_mode=args.proposal_mode,
             )
         except ValueError as exc:
             print(
@@ -1002,6 +1038,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     provider_repair_attempts=args.provider_repair_attempts,
                     planner_context_mode=args.planner_context_mode.replace("-", "_"),
                     direct_provider_target_source=args.direct_provider_target_source,
+                    proposal_mode=args.proposal_mode,
                 )
             except ValueError as exc:
                 print(
@@ -1055,6 +1092,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 provider_repair_attempts=args.provider_repair_attempts,
                 planner_context_mode=args.planner_context_mode.replace("-", "_"),
                 direct_provider_target_source=args.direct_provider_target_source,
+                proposal_mode=args.proposal_mode,
             )
         except ValueError as exc:
             print(

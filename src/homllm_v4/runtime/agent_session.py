@@ -52,6 +52,7 @@ class AgentSessionRequest:
     read_only_runner: Any = None
     edit_runner: Any = run_agent_task
     verification_timeout_seconds: int | None = None
+    proposal_mode: str = "full_content"
 
 
 @dataclass(frozen=True)
@@ -165,6 +166,7 @@ def run_agent_session(request: AgentSessionRequest) -> AgentSessionResult:
                 ),
                 require_live_api_key=request.edit_require_live_api_key,
                 verification_timeout_seconds=request.verification_timeout_seconds,
+                proposal_mode=request.proposal_mode,
             )
         )
 
