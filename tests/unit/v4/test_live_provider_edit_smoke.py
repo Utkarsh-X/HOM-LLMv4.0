@@ -88,7 +88,7 @@ def test_live_provider_can_return_bounded_edit_proposal_json() -> None:
         pytest.skip("set HOMLLM_V4_RUN_LIVE_PROVIDER_SMOKE=1 to run live provider smoke")
 
     provider_name = os.getenv("HOMLLM_V4_LIVE_PROVIDER", "gemini")
-    model = os.getenv("HOMLLM_V4_LIVE_MODEL", "gemini-2.5-flash")
+    model = os.getenv("HOMLLM_V4_LIVE_MODEL", "gemini-3.5-flash-lite")
     api_key = os.getenv("HOMLLM_V4_LIVE_PROVIDER_API_KEY")
     adapter = build_v3_provider_edit_adapter(
         provider_name=provider_name,
@@ -126,7 +126,7 @@ def test_live_provider_patch_can_apply_and_verify_in_fixture_workspace(
         pytest.skip("set HOMLLM_V4_RUN_LIVE_PROVIDER_SMOKE=1 to run live provider smoke")
 
     provider_name = os.getenv("HOMLLM_V4_LIVE_PROVIDER", "gemini")
-    model = os.getenv("HOMLLM_V4_LIVE_MODEL", "gemini-2.5-flash")
+    model = os.getenv("HOMLLM_V4_LIVE_MODEL", "gemini-3.5-flash-lite")
     api_key = os.getenv("HOMLLM_V4_LIVE_PROVIDER_API_KEY")
     fixture_root = Path("fixtures/v4/python_patch_repo").resolve()
     workspace_root = tmp_path / "workspace"

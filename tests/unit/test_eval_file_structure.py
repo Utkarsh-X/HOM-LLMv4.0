@@ -58,7 +58,7 @@ def test_answers_written_to_run_directory():
         response = {
             "query_id": 5,
             "run_id": "abc123",
-            "model_name": "gemini-2.5-flash",
+            "model_name": "gemini-3.5-flash-lite",
             "provider": "gemini",
             "status": "OK",
         }
@@ -73,7 +73,7 @@ def test_answers_written_to_run_directory():
         content = expected_path.read_text()
         assert "QUERY_ID   : 05" in content
         assert "RUN_ID     : abc123" in content
-        assert "MODEL      : gemini-2.5-flash" in content
+        assert "MODEL      : gemini-3.5-flash-lite" in content
         assert "Test answer for query 5" in content
 
 

@@ -373,7 +373,7 @@ def run_real_index_provider_patch_suite(
     planner_builder=build_v3_provider_proposed_patch_planner,
     edit_provider_mode: str = "fake",
     live_provider_name: str = "gemini",
-    live_model: str = "gemini-2.5-flash",
+    live_model: str = "gemini-3.5-flash-lite",
     live_max_output_tokens: int = 2048,
     live_api_key: str | None = None,
     live_provider_builder=build_v3_provider_edit_adapter_from_params,
@@ -383,6 +383,7 @@ def run_real_index_provider_patch_suite(
     planner_context_mode: str = "retrieval",
     direct_provider_target_source: str = "actual",
     case_suite: str = "core",
+    proposal_mode: str = "full_content",
 ) -> EvaluationRunResult:
     resolved_run_id = run_id or str(uuid4())
     config_path = Path(config_path).resolve()
@@ -501,6 +502,7 @@ def run_real_index_provider_patch_suite(
                         expected_behavior=str(payload["expected_behavior"]),
                         verification_argv=verification_argv,
                         retrieval_policy={"intent": "PATCH", "top_k": 20},
+                        proposal_mode=proposal_mode,
                     ),
                     max_verification_commands=1,
                     provider_repair_attempts=provider_repair_attempts,

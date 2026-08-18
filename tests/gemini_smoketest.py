@@ -21,7 +21,7 @@ class GeminiSmokeTestConfig:
 
     # Accepts either short names (e.g. "gemini-1.5-flash") or full resource names
     # (e.g. "models/gemini-1.5-flash"). We'll normalize automatically.
-    model: str = "gemini-1.5-flash"
+    model: str = "gemini-3.5-flash-lite"
     temperature: float = 0.0
     max_output_tokens: int = 256
     prompt: str = "Reply with exactly: OK"
@@ -86,7 +86,7 @@ def main() -> int:
         print("HINTS:")
         print("- If you see 404/NotFound: your key may not have access to that model name.")
         print("- Flip `list_models=True` to print model names visible to your key.")
-        print("- Try a newer generally-available model like `gemini-2.0-flash` or `gemini-2.5-flash`.")
+        print("- Try a newer generally-available model like `gemini-3.5-flash-lite`.")
         return 1
 
     dt_ms = (time.perf_counter() - t0) * 1000

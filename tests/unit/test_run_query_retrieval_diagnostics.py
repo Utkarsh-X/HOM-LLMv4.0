@@ -89,7 +89,7 @@ def test_write_generation_diagnostics_artifact(tmp_path, monkeypatch):
     generation_result = SimpleNamespace(
         status="OK",
         provider="GeminiProvider",
-        model="gemini-2.5-flash",
+        model="gemini-3.5-flash-lite",
         tokens_in=123,
         tokens_out=456,
         latency_ms=789,
@@ -106,6 +106,6 @@ def test_write_generation_diagnostics_artifact(tmp_path, monkeypatch):
     out = Path("artifacts") / "runs" / "run456" / "generation_diagnostics.json"
     assert out.exists()
     data = json.loads(out.read_text(encoding="utf-8"))
-    assert data["model"] == "gemini-2.5-flash"
+    assert data["model"] == "gemini-3.5-flash-lite"
     assert data["hallucination_flags"] == ["citation_not_in_context: api/routes.py:999"]
     assert data["parse_warnings"] == ["warn1"]
