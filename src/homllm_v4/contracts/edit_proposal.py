@@ -10,6 +10,18 @@ class EditProposalEvidenceContext:
     content: str
 
 
+PROPOSAL_MODE_FULL_CONTENT = "full_content"
+PROPOSAL_MODE_UNIFIED_DIFF = "unified_diff"
+
+PROPOSAL_MODES = (PROPOSAL_MODE_FULL_CONTENT, PROPOSAL_MODE_UNIFIED_DIFF)
+
+
+def validate_proposal_mode(mode: str) -> str:
+    if mode not in PROPOSAL_MODES:
+        raise ValueError(f"unsupported_proposal_mode: {mode}")
+    return mode
+
+
 @dataclass(frozen=True)
 class EditProposalRequest:
     task_id: str
@@ -22,6 +34,7 @@ class EditProposalRequest:
     verification_summary: str
     evidence_context: tuple[EditProposalEvidenceContext, ...] = ()
     repair_context: str = ""
+    proposal_mode: str = PROPOSAL_MODE_FULL_CONTENT
 
 
 @dataclass(frozen=True)
@@ -31,3 +44,4 @@ class EditProposalResult:
     rationale: str
     evidence_ids: tuple[str, ...]
     risk_flags: tuple[str, ...]
+    diff: str | None = None
