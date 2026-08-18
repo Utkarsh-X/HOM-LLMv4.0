@@ -40,6 +40,7 @@ class ProviderProposedPatchPlanRequest:
     expected_content_hash: str | None = None
     repair_context: str = ""
     verification_timeout_seconds: int | None = None
+    proposal_mode: str = "full_content"
 
 
 class ProviderProposedPatchPlanner:
@@ -147,6 +148,7 @@ class ProviderProposedPatchPlanner:
                     target_file,
                 ),
                 repair_context=request.repair_context,
+                proposal_mode=request.proposal_mode,
             )
         )
         if not proposal.ok or proposal.output is None:
