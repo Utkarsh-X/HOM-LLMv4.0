@@ -64,7 +64,7 @@ def test_run_homllm_agent_writes_trajectory_and_session_state_path(tmp_path: Pat
     assert payload["steps"] == [
         {"name": "repo_index", "status": "built", "config_path": result.index_config_path},
         {"name": "grounded_answer", "status": "sufficient", "provider_mode": "live"},
-        {"name": "bounded_edit", "status": "verified", "patch_attempt_count": 1},
+        {"name": "bounded_edit", "status": "verified", "patch_attempt_count": 1, "planner_mode": "single_shot"},
         {"name": "verification", "status": "passed", "verification_count": 1},
         {
             "name": "rollback",

@@ -5,7 +5,10 @@ from typing import Any
 from uuid import uuid4
 
 from homllm_v4.adapters.v3_provider_factory import build_v3_provider_edit_adapter_from_params
-from homllm_v4.adapters.v3_provider_patch_factory import build_v3_provider_proposed_patch_planner
+from homllm_v4.adapters.v3_provider_patch_factory import (
+    build_v3_agentic_patch_planner,
+    build_v3_provider_proposed_patch_planner,
+)
 from homllm_v4.artifacts.manager import ArtifactManager
 from homllm_v4.contracts.command import CommandPolicy
 from homllm_v4.ledger.writer import EventWriter
@@ -51,7 +54,9 @@ class AgentTaskRequest:
     planner_builder: Any = build_v3_provider_proposed_patch_planner
     require_live_api_key: bool = True
     verification_timeout_seconds: int | None = None
-    proposal_mode: str = "full_content"
+    proposal_mode: str = "unified_diff"
+    planner_mode: str = "single_shot"
+    max_agent_turns: int = 10
 
 
 @dataclass(frozen=True)
@@ -111,6 +116,7 @@ def run_agent_task(request: AgentTaskRequest) -> AgentTaskResult:
             )
         )
         config_path = index_prep_result.config_path
+    event_writer = EventWriter(artifact_root / run_id / "events.jsonl")
     write_verify_loop = WriteVerifyLoop(
         patch_service=WorkspacePatchService(),
         command_service=LocalCommandService(
@@ -121,7 +127,7 @@ def run_agent_task(request: AgentTaskRequest) -> AgentTaskResult:
             )
         ),
         artifact_manager=artifact_manager,
-        event_writer=EventWriter(artifact_root / run_id / "events.jsonl"),
+        event_writer=event_writer,
     )
     provider = request.provider_builder(
         provider_name=request.live_provider_name,
@@ -130,14 +136,25 @@ def run_agent_task(request: AgentTaskRequest) -> AgentTaskResult:
         temperature=0.0,
         max_output_tokens=request.live_max_output_tokens,
     )
-    planner = request.planner_builder(
+    if request.planner_mode not in ("single_shot", "agentic_loop"):
+        raise ValueError(f"unsupported_planner_mode: {request.planner_mode}")
+    planner_builder = request.planner_builder
+    if request.planner_mode == "agentic_loop" and planner_builder is build_v3_provider_proposed_patch_planner:
+        planner_builder = build_v3_agentic_patch_planner
+    planner_kwargs: dict[str, object] = dict(
         config_path=config_path,
         workspace_root=workspace_root,
         edit_provider=provider,
         smoke_safe=request.smoke_safe,
         artifact_manager=artifact_manager,
         max_prompt_chars=request.max_prompt_chars,
+        max_agent_turns=request.max_agent_turns,
     )
+    if request.planner_mode == "agentic_loop":
+        # The loop emits per-turn tool_call/loop_stopped events; single-shot
+        # planners have no sink, so only thread the writer there.
+        planner_kwargs["event_writer"] = event_writer
+    planner = planner_builder(**planner_kwargs)
     result = ProviderWriteVerifyRunner(
         planner=planner,
         write_verify_loop=write_verify_loop,
@@ -159,6 +176,7 @@ def run_agent_task(request: AgentTaskRequest) -> AgentTaskResult:
                 retrieval_policy={"intent": "PATCH", "top_k": 20},
                 verification_timeout_seconds=request.verification_timeout_seconds,
                 proposal_mode=request.proposal_mode,
+                max_agent_turns=request.max_agent_turns,
             ),
             max_verification_commands=1,
             provider_repair_attempts=request.provider_repair_attempts,

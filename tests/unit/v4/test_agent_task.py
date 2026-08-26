@@ -260,3 +260,103 @@ evaluation: {}
     config_text = generated_config.read_text(encoding="utf-8")
     assert "agent-task-index-test/index/metadata.duckdb" in config_text.replace("\\", "/")
     assert "vector_indexing_enabled: false" in config_text
+
+
+def test_agent_task_rejects_unknown_planner_mode(tmp_path: Path) -> None:
+    request = AgentTaskRequest(
+        config_path=tmp_path / "config.yaml",
+        workspace_root=tmp_path,
+        artifact_root=tmp_path / "runs",
+        query="q",
+        intent="i",
+        expected_behavior="e",
+        target_file="a.py",
+        verification_argv=(sys.executable, "-c", "raise SystemExit(0)"),
+        live_api_key="k",
+        planner_mode="turbo",
+    )
+    try:
+        run_agent_task(request)
+    except ValueError as exc:
+        assert "unsupported_planner_mode" in str(exc)
+    else:
+        raise AssertionError("expected ValueError for unsupported planner mode")
+
+
+def test_agentic_loop_mode_selects_default_agentic_builder(tmp_path: Path) -> None:
+    import homllm_v4.runtime.agent_task as agent_task_module
+    from homllm_v4.adapters.v3_provider_patch_factory import (
+        build_v3_agentic_patch_planner,
+    )
+
+    captured: dict[str, object] = {}
+
+    def fake_builder(**kwargs):
+        captured.update(kwargs)
+        raise AssertionError("builder should not run in this test")
+
+    original = agent_task_module.build_v3_agentic_patch_planner
+    agent_task_module.build_v3_agentic_patch_planner = fake_builder
+    try:
+        request = AgentTaskRequest(
+            config_path=tmp_path / "config.yaml",
+            workspace_root=tmp_path,
+            artifact_root=tmp_path / "runs",
+            query="q",
+            intent="i",
+            expected_behavior="e",
+            target_file="a.py",
+            verification_argv=(sys.executable, "-c", "raise SystemExit(0)"),
+            live_api_key="k",
+            planner_mode="agentic_loop",
+            max_agent_turns=6,
+        )
+        try:
+            run_agent_task(request)
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError("fake builder should have been invoked")
+    finally:
+        agent_task_module.build_v3_agentic_patch_planner = original
+
+    assert captured["max_agent_turns"] == 6
+
+
+def test_agentic_loop_builder_receives_event_writer(tmp_path: Path) -> None:
+    import homllm_v4.runtime.agent_task as agent_task_module
+    from homllm_v4.ledger.writer import EventWriter
+
+    captured: dict[str, object] = {}
+
+    def fake_builder(**kwargs):
+        captured.update(kwargs)
+        raise AssertionError("builder should not run in this test")
+
+    original = agent_task_module.build_v3_agentic_patch_planner
+    agent_task_module.build_v3_agentic_patch_planner = fake_builder
+    try:
+        request = AgentTaskRequest(
+            config_path=tmp_path / "config.yaml",
+            workspace_root=tmp_path,
+            artifact_root=tmp_path / "runs",
+            query="q",
+            intent="i",
+            expected_behavior="e",
+            target_file="a.py",
+            verification_argv=(sys.executable, "-c", "raise SystemExit(0)"),
+            live_api_key="k",
+            planner_mode="agentic_loop",
+        )
+        try:
+            run_agent_task(request)
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError("fake builder should have been invoked")
+    finally:
+        agent_task_module.build_v3_agentic_patch_planner = original
+
+    writer = captured["event_writer"]
+    assert isinstance(writer, EventWriter)
+    assert str(writer.path).replace("\\", "/").endswith("events.jsonl")
