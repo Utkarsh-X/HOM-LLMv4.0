@@ -15,6 +15,7 @@ internal suite is the *source repo* each case works on.
 from __future__ import annotations
 
 import json
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -97,18 +98,43 @@ def _resolve_test_node_ids(
 ) -> tuple[str, ...]:
     """Resolve bare SWE-bench test names to pytest node ids.
 
-    Bare entries (e.g. ``test_Abs``) are joined with every test file the
-    hidden test patch touches, mirroring the materializer's FAIL_TO_PASS
-    resolution. Entries that already carry a path or ``::`` pass through.
+    Handles already-resolved ids (``::``/``/`` present), unittest-style
+    verbose ids (``test_x (pkg.mod.Class)``), and bare names (joined with
+    every test file the hidden test patch touches), mirroring the
+    materializer's FAIL_TO_PASS resolution.
     """
     resolved: list[str] = []
     for name in names:
         if "::" in name or "/" in name:
             resolved.append(name)
-        else:
-            for test_file in test_files:
-                resolved.append(f"{test_file}::{name}")
+            continue
+        verbose = _VERBOSE_TEST_NAME_RE.match(name.strip())
+        if verbose:
+            node = _verbose_to_node_id(verbose.group(1), verbose.group(2), test_files)
+            if node:
+                resolved.append(node)
+            continue
+        for test_file in test_files:
+            resolved.append(f"{test_file}::{name}")
     return tuple(resolved)
+
+
+_VERBOSE_TEST_NAME_RE = re.compile(r"^(\S+)\s+\(([\w.]+)\)$")
+
+
+def _verbose_to_node_id(test_name: str, dotted: str, test_files: tuple[str, ...]) -> str | None:
+    parts = dotted.split(".")
+    for split in range(len(parts)):
+        module = ".".join(parts[: len(parts) - split]) if split else dotted
+        classes = parts[len(parts) - split :] if split else []
+        candidate_suffix = module.replace(".", "/") + ".py"
+        matches = [tf for tf in test_files if tf.endswith(candidate_suffix)]
+        if matches:
+            node = matches[0]
+            for cls in classes:
+                node = f"{node}::{cls}"
+            return f"{node}::{test_name}"
+    return None
 
 
 def _case_for_fixture(

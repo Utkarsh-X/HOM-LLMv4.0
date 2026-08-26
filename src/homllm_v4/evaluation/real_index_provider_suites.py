@@ -383,7 +383,7 @@ def run_real_index_provider_patch_suite(
     planner_context_mode: str = "retrieval",
     direct_provider_target_source: str = "actual",
     case_suite: str = "core",
-    proposal_mode: str = "full_content",
+    proposal_mode: str = "unified_diff",
 ) -> EvaluationRunResult:
     resolved_run_id = run_id or str(uuid4())
     config_path = Path(config_path).resolve()

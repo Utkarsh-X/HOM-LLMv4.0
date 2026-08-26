@@ -9,7 +9,10 @@ from uuid import uuid4
 from homllm_v4.artifacts.manager import ArtifactManager
 from homllm_v4.contracts.command import CommandPolicy, CommandRunRequest
 from homllm_v4.contracts.evaluation import EvaluationCaseResult, EvaluationRunResult
-from homllm_v4.evaluation.canned_provider import PromptAwareCannedProvider
+from homllm_v4.evaluation.canned_provider import (
+    AgentActionCannedProvider,
+    PromptAwareCannedProvider,
+)
 from homllm_v4.runtime.agent_run import HomllmAgentRunRequest, HomllmAgentRunResult
 from homllm_v4.runtime.agent_run import run_homllm_agent
 from homllm_v4.services.command_service import LocalCommandService
@@ -509,7 +512,9 @@ def run_homllm_agent_benchmark(
     verify_baseline: bool = False,
     baseline_command_service: object | None = None,
     agent_runner=run_homllm_agent,
-    proposal_mode: str = "full_content",
+    proposal_mode: str = "unified_diff",
+    planner_mode: str = "single_shot",
+    max_agent_turns: int = 10,
 ) -> EvaluationRunResult:
     config_path = Path(config_path)
     if not config_path.exists():
@@ -578,6 +583,8 @@ def run_homllm_agent_benchmark(
             verification_timeout_seconds=verification_timeout_seconds,
             agent_runner=agent_runner,
             proposal_mode=proposal_mode,
+            planner_mode=planner_mode,
+            max_agent_turns=max_agent_turns,
         )
         if baseline is not None:
             case_result = _merge_baseline_metrics(case_result, baseline)
@@ -621,6 +628,8 @@ def _run_case(
     verification_timeout_seconds: int | None,
     agent_runner,
     proposal_mode: str,
+    planner_mode: str = "single_shot",
+    max_agent_turns: int = 10,
 ) -> EvaluationCaseResult:
     case_workspace = _copy_case_workspace(
         source_workspace_root=source_workspace_root,
@@ -633,10 +642,16 @@ def _run_case(
     edit_require_live_api_key = True
     if edit_provider_mode == "fake":
         provider_mode = _case_provider_mode(case)
-        edit_provider_builder = _canned_provider_builder(
-            provider_mode,
-            gold_patch=_case_gold_patch(case),
-        )
+        if planner_mode == "agentic_loop":
+            edit_provider_builder = _canned_action_provider_builder(
+                provider_mode,
+                gold_patch=_case_gold_patch(case),
+            )
+        else:
+            edit_provider_builder = _canned_provider_builder(
+                provider_mode,
+                gold_patch=_case_gold_patch(case),
+            )
         edit_require_live_api_key = False
     try:
         result: HomllmAgentRunResult = agent_runner(
@@ -664,6 +679,8 @@ def _run_case(
                 edit_require_live_api_key=edit_require_live_api_key,
                 verification_timeout_seconds=verification_timeout_seconds,
                 proposal_mode=proposal_mode,
+                planner_mode=planner_mode,
+                max_agent_turns=max_agent_turns,
             )
         )
         metrics = _case_metrics(case, result)
@@ -757,6 +774,19 @@ def _case_gold_patch(case: AgentBenchmarkCase) -> str | None:
 
 def _canned_provider_builder(provider_mode: str, gold_patch: str | None = None):
     provider = PromptAwareCannedProvider(
+        provider_mode=provider_mode,
+        gold_patch=gold_patch,
+    )
+
+    def builder(**kwargs):
+        return provider
+
+    return builder
+
+
+def _canned_action_provider_builder(provider_mode: str, gold_patch: str | None = None):
+    """Canned provider for fake-mode ``planner_mode="agentic_loop"`` runs."""
+    provider = AgentActionCannedProvider(
         provider_mode=provider_mode,
         gold_patch=gold_patch,
     )

@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import random
 import shlex
 from pathlib import Path
 from typing import Sequence
@@ -23,10 +24,42 @@ from homllm_v4.api import (
     swebench_lite_case_metadata,
     swebench_lite_cases,
 )
+from homllm_v4.evaluation.swebench_lite_suites import load_swebench_lite_fixtures
 
 
 def _error_code(exc: ValueError) -> str:
     return str(exc).split(":", 1)[0]
+
+
+def _flatten_case_ids(raw_values: Sequence[str] | None) -> tuple[str, ...] | None:
+    """Flatten repeated/comma-separated ``--case-id`` values.
+
+    Accepts ``--case-id a --case-id b`` and ``--case-id a,b,c`` interchangeably
+    so single-task runs and explicit batch selections share one flag.
+    """
+    if raw_values is None:
+        return None
+    flattened = tuple(
+        stripped
+        for raw in raw_values
+        for stripped in (part.strip() for part in str(raw).split(","))
+        if stripped
+    )
+    return flattened or None
+
+
+def _deterministic_subset(
+    case_ids: Sequence[str],
+    limit: int | None,
+    sample_seed: int,
+) -> tuple[str, ...]:
+    """Deterministically down-select ``case_ids`` to at most ``limit`` entries."""
+    if limit is None or limit <= 0 or len(case_ids) <= limit:
+        return tuple(case_ids)
+    ordered = sorted(case_ids)
+    sampled = random.Random(sample_seed).sample(ordered, limit)
+    sampled_set = set(sampled)
+    return tuple(cid for cid in case_ids if cid in sampled_set)
 
 
 def _split_verification_cmd(command: str) -> tuple[str, ...]:
@@ -96,9 +129,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     homllm_agent_run.add_argument("--index-skip-vectors", action="store_true")
     homllm_agent_run.add_argument("--verification-timeout", type=int)
     homllm_agent_run.add_argument(
+        "--planner-mode",
+        choices=("single_shot", "agentic_loop"),
+        default="single_shot",
+        help="edit planning strategy: single-shot proposal or bounded agentic tool loop",
+    )
+    homllm_agent_run.add_argument("--max-agent-turns", type=int, default=10)
+    homllm_agent_run.add_argument(
         "--proposal-mode",
         choices=("full_content", "unified_diff"),
-        default="full_content",
+        default="unified_diff",
         help="provider proposal contract: full-file new_content or bounded unified diff",
     )
     agent_session = subparsers.add_parser(
@@ -133,9 +173,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     agent_session.add_argument("--index-skip-vectors", action="store_true")
     agent_session.add_argument("--verification-timeout", type=int)
     agent_session.add_argument(
+        "--planner-mode",
+        choices=("single_shot", "agentic_loop"),
+        default="single_shot",
+        help="edit planning strategy: single-shot proposal or bounded agentic tool loop",
+    )
+    agent_session.add_argument("--max-agent-turns", type=int, default=10)
+    agent_session.add_argument(
         "--proposal-mode",
         choices=("full_content", "unified_diff"),
-        default="full_content",
+        default="unified_diff",
     )
     agent_task = subparsers.add_parser(
         "agent-task",
@@ -163,9 +210,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     agent_task.add_argument("--index-skip-vectors", action="store_true")
     agent_task.add_argument("--verification-timeout", type=int)
     agent_task.add_argument(
+        "--planner-mode",
+        choices=("single_shot", "agentic_loop"),
+        default="single_shot",
+        help="edit planning strategy: single-shot proposal or bounded agentic tool loop",
+    )
+    agent_task.add_argument("--max-agent-turns", type=int, default=10)
+    agent_task.add_argument(
         "--proposal-mode",
         choices=("full_content", "unified_diff"),
-        default="full_content",
+        default="unified_diff",
     )
     fixture_patch = subparsers.add_parser(
         "eval-fixture-patch",
@@ -212,9 +266,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     agent_benchmark.add_argument("--index-skip-vectors", action="store_true")
     agent_benchmark.add_argument("--verification-timeout", type=int)
     agent_benchmark.add_argument(
+        "--planner-mode",
+        choices=("single_shot", "agentic_loop"),
+        default="single_shot",
+        help="edit planning strategy: single-shot proposal or bounded agentic tool loop",
+    )
+    agent_benchmark.add_argument("--max-agent-turns", type=int, default=10)
+    agent_benchmark.add_argument(
         "--proposal-mode",
         choices=("full_content", "unified_diff"),
-        default="full_content",
+        default="unified_diff",
     )
     agent_benchmark.add_argument(
         "--verify-baseline",
@@ -237,7 +298,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     swebench_lite.add_argument("--artifact-root")
     swebench_lite.add_argument("--run-id")
     swebench_lite.add_argument("--list-cases", action="store_true")
-    swebench_lite.add_argument("--case-id", action="append")
+    swebench_lite.add_argument(
+        "--case-id",
+        action="append",
+        help="restrict to specific instance ids; repeat the flag and/or use commas: --case-id a,b,c",
+    )
+    swebench_lite.add_argument(
+        "--limit",
+        type=int,
+        help="deterministically down-select to at most N cases (use with --sample-seed)",
+    )
+    swebench_lite.add_argument(
+        "--sample-seed",
+        type=int,
+        default=20260824,
+        help="seed for deterministic --limit sampling (default 20260824)",
+    )
     swebench_lite.add_argument(
         "--answer-provider-mode",
         choices=("summary", "live"),
@@ -262,9 +338,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     swebench_lite.add_argument("--verification-timeout", type=int)
     swebench_lite.add_argument(
+        "--planner-mode",
+        choices=("single_shot", "agentic_loop"),
+        default="single_shot",
+        help="edit planning strategy: single-shot proposal or bounded agentic tool loop",
+    )
+    swebench_lite.add_argument("--max-agent-turns", type=int, default=10)
+    swebench_lite.add_argument(
         "--proposal-mode",
         choices=("full_content", "unified_diff"),
-        default="full_content",
+        default="unified_diff",
     )
     swebench_lite.add_argument(
         "--verify-baseline",
@@ -327,7 +410,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     real_index_provider_patch.add_argument(
         "--proposal-mode",
         choices=("full_content", "unified_diff"),
-        default="full_content",
+        default="unified_diff",
     )
 
     args = parser.parse_args(argv)
@@ -434,6 +517,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     index_skip_vectors=bool(args.index_skip_vectors),
                     verification_timeout_seconds=args.verification_timeout,
                     proposal_mode=args.proposal_mode,
+                    planner_mode=args.planner_mode,
+                    max_agent_turns=args.max_agent_turns,
                 )
             )
         except ValueError as exc:
@@ -559,6 +644,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     index_skip_vectors=bool(args.index_skip_vectors),
                     verification_timeout_seconds=args.verification_timeout,
                     proposal_mode=args.proposal_mode,
+                    planner_mode=args.planner_mode,
+                    max_agent_turns=args.max_agent_turns,
                 )
             )
         except ValueError as exc:
@@ -640,6 +727,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     index_skip_vectors=bool(args.index_skip_vectors),
                     verification_timeout_seconds=args.verification_timeout,
                     proposal_mode=args.proposal_mode,
+                    planner_mode=args.planner_mode,
+                    max_agent_turns=args.max_agent_turns,
                 )
             )
         except ValueError as exc:
@@ -789,6 +878,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 verification_timeout_seconds=args.verification_timeout,
                 verify_baseline=bool(args.verify_baseline),
                 proposal_mode=args.proposal_mode,
+                    planner_mode=args.planner_mode,
+                    max_agent_turns=args.max_agent_turns,
             )
         except ValueError as exc:
             print(
@@ -872,9 +963,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return 2
         try:
+            selected_case_ids = _flatten_case_ids(args.case_id)
+            if args.limit is not None:
+                available_ids = tuple(
+                    fixture.instance_id
+                    for fixture in load_swebench_lite_fixtures(Path(args.fixtures_root))
+                )
+                pool = selected_case_ids or available_ids
+                selected_case_ids = _deterministic_subset(
+                    pool,
+                    args.limit,
+                    args.sample_seed,
+                )
             cases = swebench_lite_cases(
                 Path(args.fixtures_root),
-                case_ids=tuple(args.case_id) if args.case_id else None,
+                case_ids=selected_case_ids,
                 include_pass_to_pass=bool(args.include_pass_to_pass),
             )
             result = run_homllm_agent_benchmark(
@@ -897,6 +1000,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 verification_timeout_seconds=args.verification_timeout,
                 verify_baseline=bool(args.verify_baseline),
                 proposal_mode=args.proposal_mode,
+                    planner_mode=args.planner_mode,
+                    max_agent_turns=args.max_agent_turns,
             )
         except ValueError as exc:
             print(

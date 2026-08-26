@@ -29,10 +29,159 @@ from __future__ import annotations
 import argparse
 import ast
 import json
+import re
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+
+# Flask fixtures are src-layout checkouts: the package under test lives in
+# ./src/ and plain pytest never puts it on sys.path, so `import flask`
+# resolves to site-packages and verification measures the wrong Flask.
+# Upstream's runner installs the workspace package first; restore that view.
+_FLASK_CONFTEST_SOURCE = '''import os
+import sys
+
+_ROOT = os.path.dirname(os.path.abspath(__file__))
+_SRC = os.path.join(_ROOT, 'src')
+if os.path.isdir(_SRC):
+    while _SRC in sys.path:
+        sys.path.remove(_SRC)
+    sys.path.insert(0, _SRC)
+'''
+
+
+# Django fixtures get a root conftest restoring tests/runtests.py's
+# environment: plain pytest otherwise skips both runtests.py settings
+# injection and DiscoverRunner's pre-test database bootstrap.
+_DJANGO_CONFTEST_SOURCE = '''import os
+import sys
+
+_ROOT = os.path.dirname(os.path.abspath(__file__))
+for _p in (_ROOT, os.path.join(_ROOT, 'tests')):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'tests.test_sqlite')
+
+import django
+from django.conf import settings
+
+
+def _apply_runtests_defaults(settings_obj):
+    if getattr(settings_obj, 'INSTALLED_APPS', None):
+        return
+    settings_obj.INSTALLED_APPS = [
+        'django.contrib.contenttypes',
+        'django.contrib.auth',
+        'django.contrib.sites',
+        'django.contrib.sessions',
+        'django.contrib.messages',
+        'django.contrib.admin.apps.SimpleAdminConfig',
+        'django.contrib.staticfiles',
+    ]
+    # runtests.py also registers the requested test packages themselves
+    # (get_apps_to_install) so their models get an app_label. Plain pytest
+    # never does, so derive them from the .py paths on the command line.
+    # Args may be bare files or node ids (file.py::Class::test); both name
+    # a path inside tests/, and verification runs use the node-id form.
+    _tests_root = os.path.normpath(os.path.join(_ROOT, 'tests'))
+    for _raw in sys.argv[1:]:
+        _arg = _raw.strip()
+        if _arg.startswith('-'):
+            continue
+        _path_arg = _arg.split('::', 1)[0]
+        if not _path_arg.lower().endswith('.py'):
+            continue
+        _path = _path_arg if os.path.isabs(_path_arg) else os.path.normpath(
+            os.path.join(os.getcwd(), _path_arg)
+        )
+        if not _path.startswith(_tests_root + os.sep):
+            continue
+        _parts = os.path.relpath(_path, _tests_root).split(os.sep)
+        if len(_parts) >= 2 and _parts[0] not in settings_obj.INSTALLED_APPS:
+            settings_obj.INSTALLED_APPS.append(_parts[0])
+    settings_obj.MIDDLEWARE = [
+        'django.contrib.sessions.middleware.SessionMiddleware',
+        'django.middleware.common.CommonMiddleware',
+        'django.middleware.csrf.CsrfViewMiddleware',
+        'django.contrib.auth.middleware.AuthenticationMiddleware',
+        'django.contrib.messages.middleware.MessageMiddleware',
+    ]
+    settings_obj.TEMPLATES = [{
+        'BACKEND': 'django.template.backends.django.DjangoTemplates',
+        'DIRS': [os.path.join(_ROOT, 'tests', 'templates')],
+        'APP_DIRS': True,
+        'OPTIONS': {
+            'context_processors': [
+                'django.template.context_processors.debug',
+                'django.template.context_processors.request',
+                'django.contrib.auth.context_processors.auth',
+                'django.contrib.messages.context_processors.messages',
+            ],
+        },
+    }]
+    settings_obj.ROOT_URLCONF = 'urls'
+    settings_obj.STATIC_URL = 'static/'
+    settings_obj.LANGUAGE_CODE = 'en'
+    settings_obj.SITE_ID = 1
+    settings_obj.MIGRATION_MODULES = {
+        'auth': None,
+        'contenttypes': None,
+        'sessions': None,
+    }
+
+
+try:
+    _apply_runtests_defaults(settings)
+    django.setup()
+except Exception:
+    os.environ['DJANGO_SETTINGS_MODULE'] = 'test_sqlite'
+    django.setup()
+
+
+# Canonical runners build their test databases BEFORE any test executes
+# (DiscoverRunner.run_tests -> setup_databases): Django's own test_sqlite
+# settings deliberately omit DATABASES NAME, and connections are expected to
+# point at populated in-memory test databases created up front. Plain pytest
+# skips that step, so DB-backed TestCase.setUpClass dies with
+# ImproperlyConfigured ("Please supply the NAME value") regardless of the code
+# under test -- an environment gap, not a task result. Restore the canonical
+# order here: create the in-memory test databases (migrations + run_syncdb)
+# once at conftest import, exactly as runtests.py would have done by then.
+try:
+    import contextlib
+    import inspect
+
+    from django.test.utils import setup_databases, setup_test_environment
+
+    setup_test_environment()
+    # The signature drifted across Django versions: checkouts from late 2020
+    # demand a keyword-only ``time_keeper`` wrapping database-creation steps
+    # that older/newer releases do not accept (or default). Pass exactly what
+    # this checkout's signature requires.
+    _params = inspect.signature(setup_databases).parameters
+    _kwargs = {'verbosity': 0, 'interactive': False}
+    if 'time_keeper' in _params and _params['time_keeper'].default is inspect.Parameter.empty:
+        class _NullTimeKeeper:
+            def timed(self, label):
+                return contextlib.nullcontext()
+
+        _kwargs['time_keeper'] = _NullTimeKeeper()
+    setup_databases(**_kwargs)
+except Exception:
+    # Non-database suites must keep working if database bootstrapping is
+    # impossible here; affected tests will surface the original error
+    # themselves at setup, and the traceback stays visible in stderr.
+    import traceback
+
+    print(
+        "[fixture-conftest] test database bootstrap failed:",
+        file=sys.stderr,
+    )
+    traceback.print_exc()
+'''
 
 
 def _task_rows() -> list[dict]:
@@ -109,19 +258,61 @@ def _test_files_from_patch(patch: str) -> tuple[str, ...]:
 def _resolve_node_ids(f2p: tuple[str, ...], test_files: tuple[str, ...]) -> tuple[str, ...]:
     """Resolve bare SWE-bench test names to full pytest node ids.
 
-    SWE-bench Lite FAIL_TO_PASS entries are usually bare names (e.g.
-    ``test_Abs``) that must be joined with the test file the patch touches
-    (``sympy/.../test_complexes.py::test_Abs``). Entries that already carry a
-    path or ``::`` are passed through unchanged.
+    Handles three entry shapes seen in the dataset:
+    - already-resolved ids (contain ``::`` or ``/``): passed through;
+    - unittest-style verbose ids ``test_x (pkg.mod.ClassName)``: mapped to
+      ``<file-for-module>::ClassName::test_x``;
+    - bare names ``test_x``: joined with every test file touched by the
+      hidden patch. Non-identifier names (unittest picks up method
+      docstrings as test titles) cannot form node ids, so fall back to the
+      whole file — running the file is a strictly stronger check.
     """
     resolved: list[str] = []
+    seen: set[str] = set()
     for name in f2p:
+        candidates: list[str] = []
         if "::" in name or "/" in name:
-            resolved.append(name)
+            candidates.append(name)
         else:
-            for tf in test_files:
-                resolved.append(f"{tf}::{name}")
+            verbose = _VERBOSE_TEST_NAME_RE.match(name.strip())
+            if verbose:
+                test_name, dotted = verbose.group(1), verbose.group(2)
+                node = _verbose_to_node_id(test_name, dotted, test_files)
+                if node:
+                    candidates.append(node)
+            elif name.isidentifier():
+                candidates.extend(f"{tf}::{name}" for tf in test_files)
+            else:
+                candidates.extend(test_files)
+        for candidate in candidates:
+            if candidate not in seen:
+                seen.add(candidate)
+                resolved.append(candidate)
     return tuple(resolved)
+
+
+_VERBOSE_TEST_NAME_RE = re.compile(r"^(\S+)\s+\(([\w.]+)\)$")
+
+
+def _verbose_to_node_id(test_name: str, dotted: str, test_files: tuple[str, ...]) -> str | None:
+    parts = dotted.split(".")
+    # Longest suffix of the dotted path matching a patched test file wins;
+    # the remaining leading components are the class chain.
+    for split in range(len(parts)):
+        module = ".".join(parts[: len(parts) - split]) if split else dotted
+        classes = list(parts[len(parts) - split :]) if split else []
+        candidate_suffix = module.replace(".", "/") + ".py"
+        matches = [tf for tf in test_files if tf.endswith(candidate_suffix)]
+        if matches:
+            # unittest sometimes repeats the method name (or its docstring
+            # title) as the last "class" component; drop those echoes.
+            while classes and classes[-1] == test_name:
+                classes.pop()
+            node = matches[0]
+            for cls in classes:
+                node = f"{node}::{cls}"
+            return f"{node}::{test_name}"
+    return None
 
 
 def _applies_cleanly(checkout: Path, patch: str) -> None:
@@ -151,21 +342,36 @@ def _collect_node_ids(work_root: Path, node_ids: tuple[str, ...]) -> tuple[str, 
     """Return only node ids pytest can actually collect (validates resolution)."""
     if not node_ids:
         return ()
-    collected: list[str] = []
+    # Collect by FILE, never by node id: when any node-id argument fails to
+    # resolve, pytest exits non-zero and prints no id list at all, masking
+    # the ids that do collect. File arguments always resolve, and each
+    # resolved node id is then matched against the collected descendants.
+    files: list[str] = []
+    seen_files: set[str] = set()
+    for node in node_ids:
+        path = node.split("::", 1)[0]
+        if path not in seen_files:
+            seen_files.add(path)
+            files.append(path)
     proc = subprocess.run(
-        [sys.executable, "-m", "pytest", "--collect-only", "-q", *node_ids],
+        [sys.executable, "-m", "pytest", "--collect-only", "-q",
+         "--rootdir=.", *files],
         cwd=work_root,
         capture_output=True,
         text=True,
         timeout=600,
     )
     stdout_lines = set(proc.stdout.splitlines())
+    collected: list[str] = []
     for node in node_ids:
-        # A collected node id appears in --collect-only -q output (possibly
-        # with parametrization suffixes, so match by prefix before '[').
-        key = node.split("[", 1)[0]
-        if any(ln.startswith(key) for ln in stdout_lines):
-            collected.append(node)
+        # Collected lines carry parametrization suffixes, so compare the
+        # pre-'[' prefix; file-level ids match their collected descendants.
+        key = node.split("[", 1)[0].replace("\\", "/")
+        for line in stdout_lines:
+            base = line.split("[", 1)[0].replace("\\", "/")
+            if base == key or base.startswith(key + "::"):
+                collected.append(node)
+                break
     return tuple(collected)
 
 
@@ -195,6 +401,61 @@ def _materialize_one(row: dict, fixtures_root: Path, checkout_root: Path) -> Pat
     test_files = _test_files_from_patch(test_patch)
     f2p = _parse_test_list(row.get("FAIL_TO_PASS"))
     node_ids = _resolve_node_ids(f2p, test_files)
+
+    # Repo-specific collection shims: our harness runs plain pytest inside the
+    # copied workspace, while some projects' own test suites expect their
+    # canonical runner's environment setup. The shim only restores that
+    # environment (paths/settings); it never touches task content or tests.
+    if repo in ("sympy/sympy", "psf/requests", "pydata/xarray"):
+        # Historical commits import the ABCs from ``collections`` and use
+        # NumPy aliases that NumPy 2 removed. SWE-bench ran these on older
+        # interpreters where they existed; a root conftest restores that
+        # view before the project package (or its own conftest) imports.
+        # Environment restoration only — no task content touched.
+        (fixture_dir / "conftest.py").write_text(
+            '''import collections
+import collections.abc
+
+for _name in (
+    "Mapping", "MutableMapping", "Sequence", "MutableSequence",
+    "Set", "MutableSet", "Iterable", "Iterator", "Callable",
+    "Hashable", "Sized", "Container", "Reversible",
+):
+    if not hasattr(collections, _name):
+        setattr(collections, _name, getattr(collections.abc, _name))
+
+try:
+    import numpy as _np
+except ImportError:
+    pass
+else:
+    for _alias, _target in (
+        ("unicode_", "str_"),
+        ("string_", "bytes_"),
+        ("bool8", "bool_"),
+        ("float_", "float64"),
+        ("complex_", "complex128"),
+        ("object0", "object_"),
+        ("int0", "int_"),
+        ("uint0", "uint"),
+    ):
+        if not hasattr(_np, _alias) and hasattr(_np, _target):
+            setattr(_np, _alias, getattr(_np, _target))
+''',
+            encoding="utf-8",
+        )
+    if repo == "django/django":
+        # Django's own suite expects the environment tests/runtests.py builds;
+        # _DJANGO_CONFTEST_SOURCE restores it (settings defaults derived from
+        # argv, then DiscoverRunner-style in-memory test database creation).
+        (fixture_dir / "conftest.py").write_text(
+            _DJANGO_CONFTEST_SOURCE, encoding="utf-8"
+        )
+    if repo == "pallets/flask":
+        (fixture_dir / "conftest.py").write_text(
+            _FLASK_CONFTEST_SOURCE, encoding="utf-8"
+        )
+
     valid_ids = _collect_node_ids(fixture_dir, node_ids)
     if not valid_ids:
         raise SystemExit(
@@ -230,22 +491,164 @@ def _materialize_one(row: dict, fixtures_root: Path, checkout_root: Path) -> Pat
     return fixture_dir
 
 
+def _validate_gold_fixture(fixture_dir: Path) -> tuple[bool, str]:
+    """Apply the manifest gold patch and require FAIL_TO_PASS to pass.
+
+    Baseline-only validation cannot distinguish a genuine pre-fix failure from
+    an environment error at setup: both make FAIL_TO_PASS fail before the patch.
+    A poisoned fixture like that scores real proposals as verification_failed
+    (django-14017 did exactly that against a byte-exact gold patch). Requiring
+    the gold patch itself to turn FAIL_TO_PASS green closes the gap. Every file
+    the patch touches is restored byte-exact afterwards.
+    """
+    import contextlib
+
+    manifest = json.loads((fixture_dir / "manifest.json").read_text(encoding="utf-8"))
+    gold_patch = manifest.get("patch") or ""
+    f2p_ids = list(manifest.get("fail_to_pass") or [])
+    if not gold_patch or not f2p_ids:
+        return False, "manifest lacks gold patch or fail_to_pass ids"
+
+    touched = [
+        line.split(" b/", 1)[-1]
+        for line in gold_patch.splitlines()
+        if line.startswith("diff --git")
+    ]
+    if not touched:
+        return False, "gold patch declares no files"
+
+    repo_root = Path(__file__).resolve().parents[1]
+    rel_dir = fixture_dir.resolve().relative_to(repo_root)
+
+    # Back up pre-patch state so the fixture returns pristine even on failure.
+    # Patch-header paths are fixture-relative; resolve them against the
+    # fixture's own directory inside the repo worktree.
+    backups: dict[str, bytes | None] = {}
+    targets: dict[str, Path] = {}
+    try:
+        for rel in touched:
+            target = repo_root / rel_dir / rel
+            targets[rel] = target
+            backups[rel] = target.read_bytes() if target.exists() else None
+
+        patch_file = fixture_dir / "_gold_validation.patch"
+        patch_file.write_text(gold_patch, encoding="utf-8")
+        try:
+            applied = subprocess.run(
+                ["git", "apply", f"--directory={rel_dir.as_posix()}", str(patch_file)],
+                cwd=str(repo_root), capture_output=True, text=True,
+            )
+            if applied.returncode != 0:
+                return False, f"gold patch does not apply: {applied.stderr.strip()[:200]}"
+        finally:
+            with contextlib.suppress(OSError):
+                patch_file.unlink()
+
+        proc = subprocess.run(
+            [sys.executable, "-m", "pytest", "-q", "--no-header",
+             "-p", "no:cacheprovider", *f2p_ids],
+            cwd=str(fixture_dir), capture_output=True, text=True, timeout=1800,
+        )
+        tail = next(
+            (l for l in reversed(proc.stdout.splitlines()) if l.strip()),
+            "",
+        )
+    finally:
+        restored_ok = True
+        for rel, data in backups.items():
+            target = targets[rel]
+            try:
+                if data is None:
+                    if target.exists():
+                        target.unlink()
+                else:
+                    target.write_bytes(data)
+            except OSError:
+                restored_ok = False
+
+    if not restored_ok or any(
+        (targets[rel].exists() != (backups[rel] is not None))
+        or (backups[rel] is not None and targets[rel].read_bytes() != backups[rel])
+        for rel in backups
+    ):
+        return True, (
+            "FAIL_TO_PASS green under gold patch, BUT pristine restoration "
+            "could not be verified -- inspect the fixture before trusting it"
+        )
+    if proc.returncode != 0:
+        return False, f"FAIL_TO_PASS not green under gold patch ({tail.strip()[:120]})"
+    return True, f"gold patch turns FAIL_TO_PASS green ({tail.strip()[:120]})"
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--fixtures-root", required=True, type=Path)
     parser.add_argument("--checkout-root", required=True, type=Path)
-    parser.add_argument("--instance-id", action="append", required=True)
+    parser.add_argument("--instance-id", action="append")
+    parser.add_argument(
+        "--manifest",
+        type=Path,
+        help="corpus manifest JSON ({\"tasks\": [{\"instance_id\": ...}, ...]}) "
+        "instead of repeated --instance-id flags",
+    )
+    parser.add_argument(
+        "--tolerant",
+        action="store_true",
+        help="keep going when a single task fails to materialize; report at the end",
+    )
+    parser.add_argument(
+        "--validate-gold",
+        action="append",
+        metavar="INSTANCE_ID",
+        help="skip materialization; apply the existing fixture's gold patch and "
+        "require FAIL_TO_PASS to pass, then restore the fixture (repeatable)",
+    )
     args = parser.parse_args(argv)
     args.fixtures_root = args.fixtures_root.resolve()
     args.checkout_root = args.checkout_root.resolve()
 
-    rows = _selected(tuple(args.instance_id))
+    if args.validate_gold:
+        failures: dict[str, str] = {}
+        for instance_id in args.validate_gold:
+            fixture_dir = args.fixtures_root / instance_id
+            if not (fixture_dir / "manifest.json").exists():
+                failures[instance_id] = "no materialized fixture with a manifest"
+                continue
+            ok, detail = _validate_gold_fixture(fixture_dir)
+            print(f"{'PASS' if ok else 'FAIL'} gold-validation {instance_id}: {detail}", flush=True)
+            if not ok:
+                failures[instance_id] = detail
+        print(f"gold validation done: {len(args.validate_gold) - len(failures)} passed, {len(failures)} failed")
+        if failures:
+            print(json.dumps({"failed": dict(sorted(failures.items()))}, indent=2))
+            return 1
+        return 0
+
+    requested: list[str] = list(args.instance_id or [])
+    if args.manifest is not None:
+        manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
+        for task in manifest.get("tasks", []):
+            requested.append(str(task["instance_id"]))
+    if not requested:
+        parser.error("no tasks requested: pass --instance-id and/or --manifest")
+
+    rows = _selected(tuple(requested))
     fixtures_root = args.fixtures_root
     fixtures_root.mkdir(parents=True, exist_ok=True)
+    failed: dict[str, str] = {}
     for row in rows:
-        fixture_dir = _materialize_one(row, fixtures_root, args.checkout_root)
-        print(f"materialized {row['instance_id']} -> {fixture_dir}")
-    print(f"done: {len(rows)} fixtures under {fixtures_root}")
+        try:
+            fixture_dir = _materialize_one(row, fixtures_root, args.checkout_root)
+        except (Exception, SystemExit) as exc:  # noqa: BLE001 - reported and counted below
+            if not args.tolerant:
+                raise
+            failed[str(row["instance_id"])] = f"{type(exc).__name__}: {exc}"
+            print(f"FAILED {row['instance_id']}: {type(exc).__name__}: {exc}", flush=True)
+            continue
+        print(f"materialized {row['instance_id']} -> {fixture_dir}", flush=True)
+    print(f"done: {len(rows) - len(failed)} materialized, {len(failed)} failed")
+    if failed:
+        print(json.dumps({"failed": dict(sorted(failed.items()))}, indent=2))
     return 0
 
 

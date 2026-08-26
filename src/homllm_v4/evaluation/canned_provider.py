@@ -13,6 +13,7 @@ without spending tokens on a live model.
 
 from __future__ import annotations
 
+import difflib
 import json
 
 from homllm_v4.planning.provider_edit_proposer import (
@@ -318,6 +319,86 @@ class PromptAwareCannedProvider:
             model="canned-provider",
             metadata={"provider": "canned-regression"},
         )
+
+
+class AgentActionCannedProvider:
+    """Deterministic edit provider speaking the bounded-loop action protocol.
+
+    Companion to :class:`PromptAwareCannedProvider` for
+    ``planner_mode="agentic_loop"`` regression runs: instead of a single-shot
+    proposal payload it emits a one-turn ``{"action": "propose_patch", ...}``
+    response, which the loop parses and turns into the same underlying edit
+    proposal. With a ``gold_patch`` (swebench_gold mode) the patch is emitted
+    verbatim; otherwise the canned content transform is converted to a unified
+    diff against the current file content parsed from the prompt.
+
+    Note: the response always uses the ``unified_diff`` proposal shape, so this
+    provider is only meaningful when the loop request's proposal_mode is
+    ``unified_diff`` (the suite default).
+    """
+
+    tokens_in = 1
+    tokens_out = 1
+
+    def __init__(
+        self,
+        *,
+        provider_mode: str,
+        target_file: str | None = None,
+        gold_patch: str | None = None,
+    ) -> None:
+        self.provider_mode = provider_mode
+        self.target_file = target_file
+        self.gold_patch = gold_patch
+
+    def propose_edit(self, request) -> ProviderEditProposalResponse:
+        if self.gold_patch:
+            diff = self.gold_patch
+        else:
+            target_file = self.target_file
+            current_content = ""
+            in_current_content = False
+            for line in request.prompt.splitlines():
+                if in_current_content:
+                    current_content += line + "\n"
+                    continue
+                if line.startswith("Target file: "):
+                    target_file = line.removeprefix("Target file: ").strip()
+                elif line == "Current content:":
+                    in_current_content = True
+            new_content = canned_provider_content(
+                provider_mode=self.provider_mode,
+                target_content=current_content,
+                gold_patch=self.gold_patch,
+            )
+            diff = _content_to_unified_diff(
+                target_file or "target.py",
+                current_content,
+                new_content,
+            )
+        return ProviderEditProposalResponse(
+            text=json.dumps(
+                {
+                    "action": "propose_patch",
+                    "diff": diff,
+                    "rationale": "Deterministic canned agent action.",
+                }
+            ),
+            tokens_in=self.tokens_in,
+            tokens_out=self.tokens_out,
+            model="canned-provider",
+            metadata={"provider": "canned-agent-actions"},
+        )
+
+
+def _content_to_unified_diff(path: str, old: str, new: str) -> str:
+    lines = difflib.unified_diff(
+        old.splitlines(keepends=True),
+        new.splitlines(keepends=True),
+        fromfile=f"a/{path}",
+        tofile=f"b/{path}",
+    )
+    return "".join(lines)
 
 
 def _replace_or_raise(
