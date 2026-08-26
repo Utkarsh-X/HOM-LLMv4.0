@@ -34,7 +34,7 @@ class EditProposalRequest:
     verification_summary: str
     evidence_context: tuple[EditProposalEvidenceContext, ...] = ()
     repair_context: str = ""
-    proposal_mode: str = PROPOSAL_MODE_FULL_CONTENT
+    proposal_mode: str = PROPOSAL_MODE_UNIFIED_DIFF
 
 
 @dataclass(frozen=True)

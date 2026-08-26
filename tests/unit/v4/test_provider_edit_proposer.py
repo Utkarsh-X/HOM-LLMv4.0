@@ -29,7 +29,7 @@ class FakeProvider:
         )
 
 
-def proposal_request() -> EditProposalRequest:
+def proposal_request(proposal_mode: str = "unified_diff") -> EditProposalRequest:
     return EditProposalRequest(
         task_id="task-1",
         target_file="calculator.py",
@@ -39,6 +39,7 @@ def proposal_request() -> EditProposalRequest:
         evidence_ids=("cand-1",),
         allowed_file_paths=("calculator.py",),
         verification_summary="pytest . -q",
+        proposal_mode=proposal_mode,
     )
 
 
@@ -54,7 +55,7 @@ def test_provider_backed_edit_proposer_accepts_valid_json_response() -> None:
     )
     proposer = ProviderBackedEditProposer(provider=provider)
 
-    result = proposer.propose(proposal_request())
+    result = proposer.propose(proposal_request("full_content"))
 
     assert result.ok is True
     assert result.output is not None
@@ -830,6 +831,17 @@ def test_parse_provider_edit_response_diff_mode_requires_diff_or_new_content() -
             '"risk_flags":[]}',
             mode="unified_diff",
         )
+
+
+def test_parse_provider_edit_response_repairs_raw_newlines_in_diff() -> None:
+    diff = "--- a/calculator.py\n+++ b/calculator.py\n@@ -1,1 +1,2 @@\n-old\n+new"
+    raw = (
+        '```json\n{\n  "target_file": "calculator.py",\n'
+        '  "diff": "' + diff + '",\n'
+        '  "rationale": "x",\n  "evidence_ids": [],\n  "risk_flags": []\n}\n```'
+    )
+    result = parse_provider_edit_response(raw, mode="unified_diff")
+    assert result.diff == diff
 
 
 def test_proposer_persists_per_attempt_artifacts(tmp_path: Path) -> None:

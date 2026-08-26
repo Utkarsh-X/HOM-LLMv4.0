@@ -2,12 +2,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from homllm_v4.contracts.capability import CapabilityResult
-from homllm_v4.contracts.edit_proposal import (
-    EditProposalEvidenceContext,
-    EditProposalRequest,
-)
+from homllm_v4.contracts.edit_proposal import EditProposalRequest
 from homllm_v4.contracts.errors import CapabilityError
-from homllm_v4.contracts.evidence import DirectReadRequest, EvidenceCandidate, EvidenceRetrievalRequest, EvidenceSet
+from homllm_v4.contracts.evidence import DirectReadRequest, EvidenceRetrievalRequest, EvidenceSet
 from homllm_v4.contracts.patch_plan import EvidenceBackedPatchPlanResult
 from homllm_v4.contracts.telemetry import CapabilityTelemetry
 from homllm_v4.planning.evidence_patch_planner import (
@@ -15,12 +12,17 @@ from homllm_v4.planning.evidence_patch_planner import (
     EvidenceBackedPatchPlanner,
 )
 from homllm_v4.planning.provider_edit_proposer import ProviderBackedEditProposer
+from homllm_v4.planning.seed_evidence import (
+    best_retrieval_score,
+    build_target_section_fallback_candidates,
+    evidence_context_for_target,
+    preserve_original_trailing_newline,
+)
 from homllm_v4.planning.target_file_selector import (
     EvidenceTargetFileSelector,
     TargetFileSelectionRequest,
     TargetFileSelectionResult,
 )
-from homllm_v4.planning.target_section_scanner import scan_target_sections
 from homllm_v4.services.direct_read_service import DirectReadService
 from homllm_v4.services.retrieval_service import EvidenceRetrievalService
 
@@ -40,7 +42,8 @@ class ProviderProposedPatchPlanRequest:
     expected_content_hash: str | None = None
     repair_context: str = ""
     verification_timeout_seconds: int | None = None
-    proposal_mode: str = "full_content"
+    proposal_mode: str = "unified_diff"
+    max_agent_turns: int = 10
 
 
 class ProviderProposedPatchPlanner:
@@ -108,12 +111,12 @@ class ProviderProposedPatchPlanner:
             candidate.file_path == target_file
             for candidate in retrieval.output.candidates
         )
-        target_file_retrieval_score = _best_retrieval_score(
+        target_file_retrieval_score = best_retrieval_score(
             retrieval.output.candidates,
             target_file,
         )
         if not has_evidence_for_target:
-            fallback_candidates = _target_section_fallback_candidates(
+            fallback_candidates = build_target_section_fallback_candidates(
                 target_file=target_file,
                 content=direct_read.output.content_excerpt or "",
                 query=request.query,
@@ -143,7 +146,7 @@ class ProviderProposedPatchPlanner:
                 ),
                 allowed_file_paths=(target_file,),
                 verification_summary=" ".join(request.verification_argv),
-                evidence_context=_evidence_context_for_target(
+                evidence_context=evidence_context_for_target(
                     evidence_set,
                     target_file,
                 ),
@@ -167,7 +170,7 @@ class ProviderProposedPatchPlanner:
                 evidence_set=evidence_set,
                 direct_reads=(direct_read.output,),
                 expected_content_hash=request.expected_content_hash,
-                new_content=_preserve_original_trailing_newline(
+                new_content=preserve_original_trailing_newline(
                     proposal.output.new_content,
                     direct_read.output.content_excerpt,
                 ),
@@ -188,113 +191,6 @@ class ProviderProposedPatchPlanner:
             target_file_retrieval_score=target_file_retrieval_score,
             retrieved_evidence_count=len(retrieval.output.candidates),
         )
-
-
-def _target_section_fallback_candidates(
-    *,
-    target_file: str,
-    content: str,
-    query: str,
-    context: str,
-    full_content_hash: str,
-) -> tuple[EvidenceCandidate, ...]:
-    """Build target-file evidence from a section scan when retrieval missed it.
-
-    The previous fallback was a single candidate holding the *entire* file,
-    which the evidence renderer truncated to its first ~2000 chars (the
-    import header). Instead, scan the file for query-relevant sections and
-    emit each as a candidate with a real line span, so the model sees e.g.
-    ``[target-section-1] complexes.py:400-479`` with actual code rather than
-    a useless header. Falls back to the old full-file candidate only when the
-    scan finds nothing (e.g. no query token appears in the file).
-    """
-    sections = scan_target_sections(
-        content,
-        query=query,
-        context=context,
-    )
-    if sections:
-        return tuple(
-            EvidenceCandidate(
-                candidate_id=f"target-section-{index}",
-                file_path=target_file,
-                symbol_id=None,
-                span_start=section.span_start,
-                span_end=section.span_end,
-                content_hash=_hash_text(section.content),
-                source_channels=("target_section_scan",),
-                bm25_score=None,
-                vector_score=None,
-                graph_score=None,
-                retrieval_score=float(section.score),
-                metadata={
-                    "content": section.content,
-                    "target_section_scan": True,
-                    "section_score": section.score,
-                },
-            )
-            for index, section in enumerate(sections)
-        )
-    safe_target = target_file.replace('/', '_').replace('\\', '_').replace('.', '_')
-    return (
-        EvidenceCandidate(
-            candidate_id=f"fallback-{safe_target}",
-            file_path=target_file,
-            symbol_id=None,
-            span_start=1,
-            span_end=None,
-            content_hash=full_content_hash,
-            source_channels=("direct_read_fallback",),
-            bm25_score=1.0,
-            vector_score=None,
-            graph_score=None,
-            retrieval_score=1.0,
-            metadata={"content": content},
-        ),
-    )
-
-
-def _hash_text(text: str) -> str:
-    import hashlib
-
-    return hashlib.sha256(text.replace("\r\n", "\n").encode("utf-8")).hexdigest()
-
-
-def _best_retrieval_score(
-    candidates: tuple[EvidenceCandidate, ...],
-    target_file: str,
-) -> float | None:
-    scores = [
-        candidate.retrieval_score
-        for candidate in candidates
-        if candidate.file_path == target_file and candidate.retrieval_score is not None
-    ]
-    if not scores:
-        return None
-    return max(scores)
-
-
-def _preserve_original_trailing_newline(new_content: str, old_content: str) -> str:
-    if old_content.endswith("\n") and not new_content.endswith("\n"):
-        return f"{new_content}\n"
-    return new_content
-
-
-def _evidence_context_for_target(
-    evidence_set: EvidenceSet,
-    target_file: str,
-) -> tuple[EditProposalEvidenceContext, ...]:
-    return tuple(
-        EditProposalEvidenceContext(
-            evidence_id=candidate.candidate_id,
-            file_path=candidate.file_path,
-            span_start=candidate.span_start,
-            span_end=candidate.span_end,
-            content=str(candidate.metadata.get("content") or ""),
-        )
-        for candidate in evidence_set.candidates
-        if candidate.file_path == target_file
-    )
 
 
 def _target_selection_failed(

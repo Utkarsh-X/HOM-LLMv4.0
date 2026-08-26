@@ -607,7 +607,7 @@ def test_fallback_keeps_full_file_when_scan_has_no_signal(
 
 
 def test_best_retrieval_score_picks_strongest_candidate_for_target_file() -> None:
-    from homllm_v4.planning.provider_patch_planner import _best_retrieval_score
+    from homllm_v4.planning.seed_evidence import best_retrieval_score
 
     candidates = (
         EvidenceCandidate(
@@ -654,7 +654,7 @@ def test_best_retrieval_score_picks_strongest_candidate_for_target_file() -> Non
         ),
     )
 
-    assert _best_retrieval_score(candidates, "target.py") == 0.9
-    assert _best_retrieval_score(candidates, "missing.py") is None
-    assert _best_retrieval_score((), "target.py") is None
+    assert best_retrieval_score(candidates, "target.py") == 0.9
+    assert best_retrieval_score(candidates, "missing.py") is None
+    assert best_retrieval_score((), "target.py") is None
 

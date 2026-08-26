@@ -17,6 +17,12 @@ def build_v3_provider_edit_adapter(
         provider = gemini_provider_cls(api_key=api_key)
     elif normalized == "openai":
         provider = openai_provider_cls(api_key=api_key)
+    elif normalized == "openrouter":
+        # OpenRouter exposes an OpenAI-compatible chat-completions API.
+        provider = openai_provider_cls(
+            api_key=api_key,
+            base_url="https://openrouter.ai/api/v1",
+        )
     else:
         raise ValueError(f"unsupported provider for edit proposals: {provider_name}")
 

@@ -371,6 +371,78 @@ def test_write_verify_loop_stops_when_repair_budget_exhausted(tmp_path: Path) ->
     assert target.read_text(encoding="utf-8") == "VALUE = 2\n"
 
 
+def test_write_verify_loop_ignores_dependency_dir_side_effects(tmp_path: Path) -> None:
+    target = tmp_path / "demo.py"
+    original = "VALUE = 1\n"
+    target.write_text(original, encoding="utf-8")
+    (tmp_path / ".venv").mkdir()
+    (tmp_path / ".venv" / "cfg.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "node_modules").mkdir()
+    (tmp_path / "node_modules" / "lib.js").write_text("1", encoding="utf-8")
+    patch = PatchApplyRequest(
+        task_id="task-1",
+        workspace_root=str(tmp_path),
+        patches=(FilePatch("demo.py", content_hash(original), "VALUE = 2\n"),),
+    )
+    command = CommandRunRequest(
+        task_id="task-1",
+        workspace_root=str(tmp_path),
+        cwd=".",
+        argv=(
+            sys.executable,
+            "-c",
+            "from pathlib import Path; Path('.venv/cfg.json').write_text('{\"a\": 1}'); raise SystemExit(0)",
+        ),
+        timeout_seconds=5,
+    )
+
+    result = loop(tmp_path).run(request(tmp_path, patch, (command,), rollback_on_failure=True))
+
+    assert result.stop_reason == "verified"
+    assert result.error is None
+
+
+def test_side_effect_detection_reads_only_candidate_files(tmp_path: Path, monkeypatch) -> None:
+    target = tmp_path / "demo.py"
+    original = "VALUE = 1\n"
+    target.write_text(original, encoding="utf-8")
+    (tmp_path / "big.bin").write_bytes(b"x" * 8192)
+
+    real_read_bytes = Path.read_bytes
+    read_names: list[str] = []
+
+    def counting_read_bytes(self: Path) -> bytes:
+        data = real_read_bytes(self)
+        read_names.append(self.name)
+        return data
+
+    monkeypatch.setattr(Path, "read_bytes", counting_read_bytes)
+
+    patch = PatchApplyRequest(
+        task_id="task-1",
+        workspace_root=str(tmp_path),
+        patches=(FilePatch("demo.py", content_hash(original), "VALUE = 2\n"),),
+    )
+    command = CommandRunRequest(
+        task_id="task-1",
+        workspace_root=str(tmp_path),
+        cwd=".",
+        argv=(
+            sys.executable,
+            "-c",
+            "from pathlib import Path; Path('stray.txt').write_text('bad'); raise SystemExit(0)",
+        ),
+        timeout_seconds=5,
+    )
+
+    result = loop(tmp_path).run(request(tmp_path, patch, (command,), rollback_on_failure=True))
+
+    assert result.stop_reason == "verification_side_effect"
+    assert result.error is not None
+    assert result.error.details["changed_files"] == ("stray.txt",)
+    assert read_names.count("big.bin") == 1
+
+
 def test_write_verify_loop_stops_when_repair_patch_is_stale(tmp_path: Path) -> None:
     target = tmp_path / "demo.py"
     original = "VALUE = 1\n"

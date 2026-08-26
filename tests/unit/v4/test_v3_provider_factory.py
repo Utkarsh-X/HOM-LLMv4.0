@@ -160,3 +160,85 @@ def test_factory_builds_provider_adapter_from_primitive_params() -> None:
     assert response.model == "gemini-live-test"
     assert len(FakeProviderConnector.instances) == 1
     assert FakeProviderConnector.instances[0].api_key == "test-key"
+
+
+class KwargCapturingConnector(FakeProviderConnector):
+    """Same fake behavior, but records every constructor kwarg it receives."""
+
+    def __init__(self, **kwargs) -> None:
+        self.constructor_kwargs = dict(kwargs)
+        self.api_key = kwargs.get("api_key")
+        self.last_request: ProviderRequest | None = None
+        FakeProviderConnector.instances.append(self)
+
+
+def test_factory_openrouter_branch_uses_openai_compatible_base_url() -> None:
+    reset_fake_provider_instances()
+
+    adapter = build_v3_provider_edit_adapter(
+        provider_name="openrouter",
+        model="stealth/ox-alpha",
+        model_config=ModelConfig(temperature=0.0, max_output_tokens=1024),
+        api_key="or-key",
+        openai_provider_cls=KwargCapturingConnector,
+    )
+
+    assert len(KwargCapturingConnector.instances) == 1
+    constructed = KwargCapturingConnector.instances[0]
+    assert constructed.constructor_kwargs == {
+        "api_key": "or-key",
+        "base_url": "https://openrouter.ai/api/v1",
+    }
+    response = adapter.propose_edit(
+        ProviderEditProposalRequest(task_id="task-1", prompt="prompt")
+    )
+    assert response.model == "stealth/ox-alpha"
+
+
+def test_factory_openrouter_name_matching_is_normalized() -> None:
+    reset_fake_provider_instances()
+
+    build_v3_provider_edit_adapter(
+        provider_name="  OpenRouter ",
+        model="model",
+        model_config=ModelConfig(temperature=0.0, max_output_tokens=8),
+        api_key=None,
+        openai_provider_cls=KwargCapturingConnector,
+    )
+
+    constructed = KwargCapturingConnector.instances[0]
+    assert constructed.constructor_kwargs["base_url"] == "https://openrouter.ai/api/v1"
+    assert constructed.api_key is None
+
+
+def test_factory_openai_branch_does_not_receive_base_url() -> None:
+    reset_fake_provider_instances()
+
+    build_v3_provider_edit_adapter(
+        provider_name="openai",
+        model="model",
+        model_config=ModelConfig(temperature=0.0, max_output_tokens=8),
+        api_key="oa-key",
+        openai_provider_cls=KwargCapturingConnector,
+    )
+
+    assert KwargCapturingConnector.instances[0].constructor_kwargs == {"api_key": "oa-key"}
+
+
+def test_factory_from_params_threads_openrouter_base_url() -> None:
+    reset_fake_provider_instances()
+
+    build_v3_provider_edit_adapter_from_params(
+        provider_name="openrouter",
+        model="stealth/ox-alpha",
+        api_key="or-key",
+        temperature=0.0,
+        max_output_tokens=512,
+        openai_provider_cls=KwargCapturingConnector,
+    )
+
+    constructed = KwargCapturingConnector.instances[0]
+    assert constructed.constructor_kwargs == {
+        "api_key": "or-key",
+        "base_url": "https://openrouter.ai/api/v1",
+    }

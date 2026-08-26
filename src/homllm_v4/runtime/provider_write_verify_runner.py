@@ -186,6 +186,7 @@ def _combined_planner_metrics(
         "prompt_char_count",
         "evidence_context_item_count",
         "evidence_context_rendered_char_count",
+        "agent_turn_count",
     ):
         total = 0
         seen = False

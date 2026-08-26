@@ -181,3 +181,21 @@ def test_v3_provider_patch_factory_applies_provider_prompt_limit(tmp_path: Path)
     assert result.error is not None
     assert result.error.code == "provider_prompt_budget_exceeded"
     assert provider.called is False
+
+
+def test_agentic_factory_forwards_event_writer(tmp_path: Path) -> None:
+    from homllm_v4.adapters.v3_provider_patch_factory import (
+        build_v3_agentic_patch_planner,
+    )
+    from homllm_v4.ledger.writer import EventWriter
+
+    writer = EventWriter(tmp_path / "events.jsonl")
+    planner = build_v3_agentic_patch_planner(
+        config_path=tmp_path / "config.yaml",
+        workspace_root=tmp_path,
+        edit_provider=FakeProvider(),
+        component_builder=fake_component_builder,
+        event_writer=writer,
+    )
+
+    assert planner.event_writer is writer

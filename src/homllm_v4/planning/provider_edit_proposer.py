@@ -496,14 +496,14 @@ def parse_provider_edit_response(
     try:
         data = json.loads(raw_text)
     except json.JSONDecodeError as first_error:
-        repaired = _repair_invalid_json_escapes(raw_text)
+        repaired = _repair_model_json(raw_text)
         if repaired == raw_text:
             raise first_error
         try:
             data = json.loads(repaired)
         except json.JSONDecodeError as repair_error:
             raise ValueError(
-                f"provider response JSON invalid after escape repair: {repair_error}"
+                f"provider response JSON invalid after repair: {repair_error}"
             ) from first_error
     if not isinstance(data, dict):
         raise ValueError("provider response must be a JSON object")
@@ -666,6 +666,64 @@ def _repair_invalid_json_escapes(text: str) -> str:
             changed = True
         index += 2
     return "".join(out) if changed else text
+
+
+_CONTROL_ESCAPES = {"\n": "\\n", "\r": "\\r", "\t": "\\t"}
+
+
+def _repair_unescaped_control_chars(text: str) -> str:
+    r"""Repair model output where raw control characters sit inside JSON strings.
+
+    stealth/ox-alpha emits multi-line diffs with literal newlines inside the
+    ``diff`` string instead of ``\n`` escapes, so strict ``json.loads``
+    rejects otherwise well-formed actions ("Invalid control character").
+    This rewrites raw control characters (< 0x20) inside string literals to
+    their JSON escapes; control characters outside strings are structural
+    whitespace (pretty-printing) and are left untouched. Returns the input
+    unchanged when no repair was needed.
+    """
+    out: list[str] = []
+    changed = False
+    in_string = False
+    escaped = False
+    for char in text:
+        code = ord(char)
+        if not in_string:
+            if char == '"':
+                in_string = True
+            out.append(char)
+            continue
+        if escaped:
+            escaped = False
+            if code < 0x20:
+                # A lone backslash directly before a control char cannot be
+                # legal JSON; double the backslash so the emitted escape pair
+                # parses (the value keeps backslash + control character).
+                out.append("\\")
+                out.append(_CONTROL_ESCAPES.get(char, f"\\u{code:04x}"))
+                changed = True
+            else:
+                out.append(char)
+            continue
+        if char == "\\":
+            escaped = True
+            out.append(char)
+            continue
+        if char == '"':
+            in_string = False
+            out.append(char)
+            continue
+        if code < 0x20:
+            out.append(_CONTROL_ESCAPES.get(char, f"\\u{code:04x}"))
+            changed = True
+            continue
+        out.append(char)
+    return "".join(out) if changed else text
+
+
+def _repair_model_json(text: str) -> str:
+    """Apply all known JSON repairs in one pass for second-chance parses."""
+    return _repair_unescaped_control_chars(_repair_invalid_json_escapes(text))
 
 
 def _string_field(data: dict[str, object], key: str) -> str:

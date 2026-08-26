@@ -17,6 +17,7 @@ from homllm_v4.planning.evidence_patch_planner import (
 )
 from homllm_v4.planning.provider_edit_proposer import ProviderBackedEditProposer
 from homllm_v4.planning.provider_patch_planner import ProviderProposedPatchPlanRequest
+from homllm_v4.planning.seed_evidence import preserve_original_trailing_newline
 from homllm_v4.services.direct_read_service import DirectReadService
 
 
@@ -79,7 +80,7 @@ class DirectProviderPatchPlanner:
                 evidence_set=evidence_set,
                 direct_reads=(direct_read.output,),
                 expected_content_hash=request.expected_content_hash,
-                new_content=_preserve_original_trailing_newline(
+                new_content=preserve_original_trailing_newline(
                     proposal.output.new_content,
                     direct_read.output.content_excerpt,
                 ),
@@ -166,12 +167,6 @@ def _synthetic_evidence_set(
             degradation_reason=None,
         ),
     )
-
-
-def _preserve_original_trailing_newline(new_content: str, old_content: str) -> str:
-    if old_content.endswith("\n") and not new_content.endswith("\n"):
-        return f"{new_content}\n"
-    return new_content
 
 
 def _with_direct_provider_telemetry(

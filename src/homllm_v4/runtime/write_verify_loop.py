@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 
@@ -101,17 +102,17 @@ class WriteVerifyLoop:
             )
 
             allowed_side_effect_files = _patch_files(patch_result)
-            before_verification = _workspace_snapshot(
-                Path(request.workspace_root),
+            snapshot_root = Path(request.workspace_root)
+            before_verification, before_stats = _workspace_snapshot(
+                snapshot_root,
                 ignored_files=allowed_side_effect_files,
             )
             verification_results, verification_error, stop_reason = self._run_verification(request)
-            side_effect_files = _changed_files(
-                before_verification,
-                _workspace_snapshot(
-                    Path(request.workspace_root),
-                    ignored_files=allowed_side_effect_files,
-                ),
+            side_effect_files = _changed_files_since(
+                snapshot_root,
+                before_contents=before_verification,
+                before_stats=before_stats,
+                ignored_files=allowed_side_effect_files,
             )
             if side_effect_files:
                 cleaned_files = _cleanup_side_effects(
@@ -338,22 +339,76 @@ def _patch_files(patch_result: PatchApplyResult | None) -> tuple[str, ...]:
     return tuple(file_result.file_path for file_result in patch_result.file_results)
 
 
-def _workspace_snapshot(root: Path, *, ignored_files: tuple[str, ...]) -> dict[str, bytes]:
+@dataclass(frozen=True)
+class _FileStat:
+    size: int
+    mtime_ns: int
+
+
+def _workspace_snapshot(
+    root: Path, *, ignored_files: tuple[str, ...]
+) -> tuple[dict[str, bytes], dict[str, _FileStat]]:
     ignored = {Path(file_path).as_posix() for file_path in ignored_files}
-    snapshot: dict[str, bytes] = {}
+    contents: dict[str, bytes] = {}
+    stats: dict[str, _FileStat] = {}
     for path in root.rglob("*"):
         if not path.is_file():
             continue
         relative = path.relative_to(root).as_posix()
         if relative in ignored or _ignored_snapshot_path(relative):
             continue
-        snapshot[relative] = path.read_bytes()
-    return snapshot
+        stat = path.stat()
+        contents[relative] = path.read_bytes()
+        stats[relative] = _FileStat(stat.st_size, stat.st_mtime_ns)
+    return contents, stats
 
 
-def _changed_files(before: dict[str, bytes], after: dict[str, bytes]) -> tuple[str, ...]:
-    files = set(before) | set(after)
-    return tuple(sorted(file_path for file_path in files if before.get(file_path) != after.get(file_path)))
+def _workspace_index(root: Path, *, ignored_files: tuple[str, ...]) -> dict[str, _FileStat]:
+    ignored = {Path(file_path).as_posix() for file_path in ignored_files}
+    stats: dict[str, _FileStat] = {}
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(root).as_posix()
+        if relative in ignored or _ignored_snapshot_path(relative):
+            continue
+        stat = path.stat()
+        stats[relative] = _FileStat(stat.st_size, stat.st_mtime_ns)
+    return stats
+
+
+def _changed_files_since(
+    root: Path,
+    *,
+    before_contents: dict[str, bytes],
+    before_stats: dict[str, _FileStat],
+    ignored_files: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Detect workspace changes without re-reading unchanged files.
+
+    The after-side walk collects only ``(size, mtime_ns)`` metadata; file
+    bytes are re-read exclusively for entries that are new, missing, or whose
+    metadata differs from the pre-verification snapshot. Entries with
+    identical metadata are assumed unchanged (filesystem mtime granularity
+    makes a silent same-size, same-mtime_ns rewrite vanishingly unlikely,
+    and the pre-verification byte snapshot remains fully eager so rollback
+    restoration is always possible).
+    """
+    after_stats = _workspace_index(root, ignored_files=ignored_files)
+    candidates = {
+        relative
+        for relative, stat in after_stats.items()
+        if relative not in before_stats or before_stats[relative] != stat
+    }
+    candidates.update(relative for relative in before_stats if relative not in after_stats)
+    changed: list[str] = []
+    for relative in sorted(candidates):
+        if relative not in after_stats:
+            changed.append(relative)
+            continue
+        if before_contents.get(relative) != (root / relative).read_bytes():
+            changed.append(relative)
+    return tuple(changed)
 
 
 def _cleanup_side_effects(
@@ -385,8 +440,29 @@ def _cleanup_side_effects(
     return tuple(cleaned)
 
 
+_SNAPSHOT_IGNORED_DIRS = frozenset(
+    {
+        ".git",
+        ".homllm",
+        "__pycache__",
+        ".pytest_cache",
+        ".venv",
+        "venv",
+        "env",
+        "node_modules",
+        "dist",
+        "build",
+        ".tox",
+        ".mypy_cache",
+        ".ruff_cache",
+        ".idea",
+        ".vscode",
+    }
+)
+
+
 def _ignored_snapshot_path(relative_path: str) -> bool:
     parts = set(Path(relative_path).parts)
-    if parts & {".git", ".homllm", "__pycache__", ".pytest_cache"}:
+    if parts & _SNAPSHOT_IGNORED_DIRS:
         return True
     return relative_path.endswith((".pyc", ".pyo"))
