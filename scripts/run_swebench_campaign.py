@@ -15,6 +15,9 @@ Queue priority in auto mode:
   2. paired      - Stage 2 agentic_loop re-runs of the stratified 12 for
                    per-case comparison against their Stage 1 verdicts
   3. breadth     - remaining Stage 1 single_shot corpus cases
+
+Gold-unfit cases (GOLD_UNFIT_CASES: no patch can turn FAIL_TO_PASS green on
+this host) are excluded from every queue; --include-unfit overrides one.
 """
 
 from __future__ import annotations
@@ -64,6 +67,37 @@ KNOWN_ENVIRONMENTAL_CRASHES = (
     "sympy__sympy-12454",
     "sympy__sympy-16106",
 )
+
+# Certified unfit for scoring on this host (findings doc §6.1; raw evidence:
+# temp/mvp/campaign/gold_validation_results.json). For each, NO patch can turn
+# FAIL_TO_PASS green here because the blocker sits outside the task diff —
+# interpreter-era semantics, Windows path handling, or assertions inside
+# unpatched test-helper code. Dropped from every queue so a window cannot burn
+# API tokens on an unscoreable fixture; --include-unfit restores one by name
+# (e.g. the Windows-only entry may be scoreable on a Linux host).
+GOLD_UNFIT_CASES = {
+    "django__django-11133": (
+        "interpreter-era mismatch: py3.11 memoryview is iterable, so "
+        "HttpResponse content iteration chunks differently than the "
+        "checkout-era Python; even the upstream one-line fix (#30294) cannot "
+        "satisfy the FAIL_TO_PASS assertions on this toolchain"
+    ),
+    "django__django-11583": (
+        "Windows-only OS-layer failure (_getfinalpathname: embedded null "
+        "character in path) inside code the task diff does not touch"
+    ),
+    "django__django-15902": (
+        "whole-file fallback resolution drags ~10 environment-sensitive "
+        "sibling tests into the must-pass set (RemovedInDjango50Warning "
+        "default.html template warnings, Jinja2 renderer variants); the "
+        "targeted fix alone cannot green the file-level FAIL_TO_PASS id"
+    ),
+    "pydata__xarray-3364": (
+        "numpy-era writeable-flag assertion inside unpatched test helper "
+        "create_test_data ('assert all(obj.data.flags.writeable ...)') "
+        "fails on modern numpy; fixing it would mean editing test content"
+    ),
+}
 
 # Windows native fatal exit codes (access violation, stack overflow, abort...)
 CRASH_EXIT_CODES = {
@@ -143,6 +177,65 @@ def process_rss_mb(pid: int) -> int | None:
         ctypes.windll.kernel32.CloseHandle(handle)
 
 
+class _PROCESSENTRY32W(ctypes.Structure):
+    _fields_ = [
+        ("dwSize", wt.DWORD),
+        ("cntUsage", wt.DWORD),
+        ("th32ProcessID", wt.DWORD),
+        ("th32DefaultHeapID", ctypes.c_size_t),
+        ("th32ModuleID", wt.DWORD),
+        ("cntThreads", wt.DWORD),
+        ("th32ParentProcessID", wt.DWORD),
+        ("pcPriClassBase", ctypes.c_long),
+        ("dwFlags", wt.DWORD),
+        ("szExeFile", wt.WCHAR * 260),
+    ]
+
+
+def descendant_pids(root_pid: int) -> list[int]:
+    """All pids below root_pid in the live process tree (snapshot-based).
+
+    Needed because the venv's python.exe is a small launcher that executes
+    the base interpreter as its own child — the real workload's RSS lives
+    one hop down.
+    """
+    TH32CS_SNAPPROCESS = 0x2
+    kernel32 = ctypes.windll.kernel32
+    snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+    if snapshot in (-1, 0xFFFFFFFFFFFFFFFF):
+        return []
+    links: list[tuple[int, int]] = []
+    try:
+        entry = _PROCESSENTRY32W()
+        entry.dwSize = ctypes.sizeof(entry)
+        ok = kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
+        while ok:
+            links.append((entry.th32ProcessID, entry.th32ParentProcessID))
+            ok = kernel32.Process32NextW(snapshot, ctypes.byref(entry))
+    finally:
+        kernel32.CloseHandle(snapshot)
+    family = {root_pid}
+    changed = True
+    while changed:
+        changed = False
+        for pid, parent_pid in links:
+            if parent_pid in family and pid not in family:
+                family.add(pid)
+                changed = True
+    family.discard(root_pid)
+    return sorted(family)
+
+
+def process_tree_rss_mb(pid: int) -> int | None:
+    """Summed working set of pid and all live descendants; None if gone."""
+    total = process_rss_mb(pid)
+    if total is None:
+        return None
+    for child_pid in descendant_pids(pid):
+        total += process_rss_mb(child_pid) or 0
+    return total
+
+
 # --------------------------------------------------------------------------
 # Ledger
 # --------------------------------------------------------------------------
@@ -164,26 +257,41 @@ class CaseRecord:
 
 
 class Ledger:
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, *, read_only: bool = False) -> None:
         self.path = path
+        self.read_only = read_only
         self.path.parent.mkdir(parents=True, exist_ok=True)
         if path.exists():
-            raw = json.loads(path.read_text(encoding="utf-8"))
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+            except ValueError as exc:
+                # Never silently discard accumulated campaign history.
+                raise SystemExit(
+                    f"campaign ledger {path} is corrupt ({exc}); "
+                    f"inspect/restore it manually before running a window"
+                ) from exc
             self.records: dict[str, CaseRecord] = {
                 item["case_id"]: CaseRecord(**item)
                 for item in raw.get("records", [])
             }
+            self.invalidated: set[str] = set(raw.get("invalidated_case_ids", []))
         else:
             self.records = {}
+            self.invalidated = set()
 
     def save(self) -> None:
+        if self.read_only:
+            # Dry-runs must observe state without mutating it.
+            return
         payload = {
             "records": [vars(record) for record in self.records.values()],
+            "invalidated_case_ids": sorted(self.invalidated),
             "updated_at": datetime.now().isoformat(timespec="seconds"),
         }
-        self.path.write_text(
-            json.dumps(payload, indent=2), encoding="utf-8"
-        )
+        # Atomic swap so a mid-write crash cannot truncate campaign history.
+        tmp_path = self.path.with_suffix(self.path.suffix + ".tmp")
+        tmp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        os.replace(tmp_path, self.path)
 
     def has_verdict(self, case_id: str, stage: str) -> bool:
         record = self.records.get(case_id)
@@ -191,6 +299,9 @@ class Ledger:
 
     def put(self, record: CaseRecord) -> None:
         self.records[record.case_id] = record
+        # A completed attempt under the current harness supersedes any
+        # earlier invalidation of this case.
+        self.invalidated.discard(record.case_id)
         self.save()
 
 
@@ -199,14 +310,21 @@ def invalidate_records(ledger: Ledger, case_ids: list[str]) -> list[str]:
 
     A verdict recorded under an older harness revision is not evidence about
     the current one (e.g. django-14017 scored verification_failed against a
-    byte-exact gold patch before the fixture DB-bootstrap fix). Returns one
-    human-readable line per requested id.
+    byte-exact gold patch before the fixture DB-bootstrap fix). The drop is
+    DURABLE: each id is also tombstoned in the ledger so a later start's
+    seed pass cannot resurrect the stale run-dir verdict before the case
+    gets to re-run. Tombstones clear when a fresh completed record lands
+    (Ledger.put). Returns one human-readable line per requested id.
     """
     dropped = []
+    changed = False
     for case_id in case_ids:
         record = ledger.records.pop(case_id, None)
         dropped.append(case_id if record else f"{case_id} (no record)")
-    if dropped:
+        if case_id not in ledger.invalidated:
+            ledger.invalidated.add(case_id)
+            changed = True
+    if changed or dropped:
         ledger.save()
     return dropped
 
@@ -214,11 +332,21 @@ def invalidate_records(ledger: Ledger, case_ids: list[str]) -> list[str]:
 def seed_ledger_from_runs(ledger: Ledger, log) -> None:
     """Import verdicts from earlier per-case run dirs (Stage 1 families)."""
     seeded = 0
+    skipped_invalidated = [
+        case_id for case_id in sorted(ledger.invalidated) if case_id not in ledger.records
+    ]
+    if skipped_invalidated:
+        log(
+            "invalidation tombstones honored (stale verdicts NOT re-imported): "
+            + ", ".join(skipped_invalidated)
+        )
     # Crash stubs go in AFTER the disk scan so a recovered verdict from a
     # later window always wins over its placeholder.
     def _seed_crash_stubs() -> int:
         stubs = 0
         for case_id in KNOWN_ENVIRONMENTAL_CRASHES:
+            if case_id in ledger.invalidated:
+                continue
             if case_id not in ledger.records:
                 ledger.records[case_id] = CaseRecord(
                     case_id=case_id,
@@ -250,7 +378,7 @@ def seed_ledger_from_runs(ledger: Ledger, log) -> None:
             org_start = stripped.rfind("-", 0, marker)
             candidate = stripped[org_start + 1 :] if org_start != -1 else stripped
             case_id = candidate
-        if case_id in ledger.records:
+        if case_id in ledger.records or case_id in ledger.invalidated:
             continue
         try:
             result = json.loads(result_path.read_text(encoding="utf-8"))
@@ -285,17 +413,33 @@ def corpus_ids() -> list[str]:
     )
 
 
-def build_queue(stage_mode: str, ledger: Ledger, limit: int | None) -> list[tuple[str, str]]:
-    """Return ordered (queue_name, case_id) work items."""
+def build_queue(
+    stage_mode: str,
+    ledger: Ledger,
+    limit: int | None,
+    unfit_cases: frozenset[str] | set[str] = frozenset(),
+    first: tuple[str, ...] | list[str] = (),
+) -> list[tuple[str, str]]:
+    """Return ordered (queue_name, case_id) work items.
+
+    Ids named in ``unfit_cases`` are dropped from every queue before the
+    limit cut — they are gold-validation-certified unscoreable (see
+    GOLD_UNFIT_CASES), so spending a window slot on one is pure waste.
+    Ids named in ``first`` are hoisted ahead of everything else, in the
+    exact order given (each keeps its earliest natural occurrence's queue
+    tag; later duplicate occurrences stay in place), so a short window
+    spends its minutes on the scientifically urgent re-scores first.
+    """
     items: list[tuple[str, str]] = []
-    casualties = [
-        case_id
-        for case_id in STRATIFIED_12
-        if case_id in ledger.records
-        and ledger.records[case_id].crash
-        and not ledger.has_verdict(case_id, "s1")
-    ]
-    items += [("casualties", case_id) for case_id in casualties]
+    if stage_mode in ("auto", "casualties"):
+        casualties = [
+            case_id
+            for case_id in STRATIFIED_12
+            if case_id in ledger.records
+            and ledger.records[case_id].crash
+            and not ledger.has_verdict(case_id, "s1")
+        ]
+        items += [("casualties", case_id) for case_id in casualties]
     if stage_mode in ("auto", "paired"):
         items += [
             ("paired", case_id)
@@ -313,6 +457,26 @@ def build_queue(stage_mode: str, ledger: Ledger, limit: int | None) -> list[tupl
             for case_id in corpus_ids()
             if case_id not in done_s1
         ]
+    if unfit_cases:
+        items = [item for item in items if item[1] not in unfit_cases]
+    if first:
+        first_occurrence: dict[str, tuple[int, tuple[str, str]]] = {}
+        for index, item in enumerate(items):
+            first_occurrence.setdefault(item[1], (index, item))
+        hoisted: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for name in first:  # user-specified priority order wins
+            entry = first_occurrence.get(name)
+            if entry is not None and name not in seen:
+                hoisted.append(entry[1])
+                seen.add(name)
+        # Remove exactly the hoisted occurrences; later duplicates stay put.
+        rest = [
+            item
+            for index, item in enumerate(items)
+            if item[1] not in seen or index != first_occurrence[item[1]][0]
+        ]
+        items = hoisted + rest
     if limit is not None:
         items = items[:limit]
     return items
@@ -346,7 +510,7 @@ class Telemetry:
             writer.writerow(["ts_s", "child_rss_mb", "free_ram_mb", "gpu_util_pct", "gpu_mem_mb"])
             while not self._stop.is_set():
                 pid = self.pid_fn()
-                rss = process_rss_mb(pid) if pid else None
+                rss = process_tree_rss_mb(pid) if pid else None
                 if rss:
                     self.peak_rss_mb = max(self.peak_rss_mb, rss)
                 gpu_util, gpu_mem = _gpu_sample()
@@ -391,6 +555,48 @@ def kill_tree(pid: int) -> None:
 # Runner
 # --------------------------------------------------------------------------
 
+def build_case_cmd(
+    args: argparse.Namespace,
+    stage: str,
+    case_id: str,
+    run_id: str,
+    workspace_root: Path,
+) -> list[str]:
+    """Assemble one eval-swebench-lite invocation.
+
+    The interpreter path MUST be absolute: with ``cwd`` handed to
+    CreateProcess, a relative executable is not resolved against the parent's
+    working directory (WinError 2) — this killed every rehearsal launch until
+    pinned down.
+    """
+    planner_flags = (
+        ["--planner-mode", "agentic_loop", "--max-agent-turns", str(args.max_agent_turns)]
+        if stage == "s2"
+        else []
+    )
+    return [
+        str(REPO_ROOT / ".venv" / "Scripts" / "python.exe"),
+        "runtime/v4_cli.py",
+        "eval-swebench-lite",
+        "--fixtures-root", "fixtures/v4/swebench_lite",
+        "--config", DEFAULT_CONFIG,
+        "--workspace-root", str(workspace_root),
+        "--artifact-root", "temp/mvp/runs",
+        "--run-id", run_id,
+        # fake = deterministic canned provider: exercises the full
+        # orchestrator loop (telemetry, ledger, budgets) with zero API
+        # tokens; live remains the default for real windows.
+        "--edit-provider-mode", args.edit_provider_mode,
+        "--answer-provider-mode", "summary",
+        "--live-api-key-env", "OPENROUTER_API_KEY",
+        "--live-provider", "openrouter",
+        "--live-model", args.live_model,
+        "--provider-repair-attempts", str(args.provider_repair_attempts),
+        "--case-id", case_id,
+        *planner_flags,
+    ]
+
+
 class CampaignRunner:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
@@ -417,30 +623,10 @@ class CampaignRunner:
     def run_case(self, queue: str, case_id: str) -> CaseRecord:
         args = self.args
         stage = "s2" if queue == "paired" else "s1"
-        planner_flags = (
-            ["--planner-mode", "agentic_loop", "--max-agent-turns", str(args.max_agent_turns)]
-            if stage == "s2"
-            else []
-        )
         seq = int(time.time())
         run_id = f"sweep-{seq}-{case_id.split('-')[-1]}"
         workspace_root = REPO_ROOT / "temp" / "mvp" / "work_sweep" / run_id
-        cmd = [
-            ".venv/Scripts/python.exe", "runtime/v4_cli.py", "eval-swebench-lite",
-            "--fixtures-root", "fixtures/v4/swebench_lite",
-            "--config", DEFAULT_CONFIG,
-            "--workspace-root", str(workspace_root),
-            "--artifact-root", "temp/mvp/runs",
-            "--run-id", run_id,
-            "--edit-provider-mode", "live",
-            "--answer-provider-mode", "summary",
-            "--live-api-key-env", "OPENROUTER_API_KEY",
-            "--live-provider", "openrouter",
-            "--live-model", args.live_model,
-            "--provider-repair-attempts", str(args.provider_repair_attempts),
-            "--case-id", case_id,
-            *planner_flags,
-        ]
+        cmd = build_case_cmd(args, stage, case_id, run_id, workspace_root)
         if args.verify_baseline:
             cmd.append("--verify-baseline")
 
@@ -511,17 +697,47 @@ class CampaignRunner:
 
     def run(self) -> None:
         args = self.args
-        ledger = Ledger(Path(args.state))
+        # Dry-runs observe planning without mutating stored campaign state:
+        # seeding and invalidation still shape the in-memory plan, but every
+        # save() becomes a no-op.
+        ledger = Ledger(Path(args.state), read_only=args.dry_run)
         seed_ledger_from_runs(ledger, self.log)
         if args.invalidate:
             dropped = invalidate_records(ledger, list(args.invalidate))
             self.log(f"invalidate: re-queued under current harness -> {', '.join(dropped)}")
-        items = build_queue(args.stages, ledger, args.limit)
+        unfit = {
+            case_id
+            for case_id in GOLD_UNFIT_CASES
+            if case_id not in (args.include_unfit or ())
+        }
+        first = tuple(args.first or ())
+        items = build_queue(
+            args.stages, ledger, args.limit, unfit_cases=unfit, first=first
+        )
+        if unfit:
+            self.log(
+                f"gold-unfit: skipping {len(unfit)} case(s) this window "
+                f"({', '.join(sorted(unfit))}); override via --include-unfit"
+            )
+        if first:
+            # Hoisted items occupy the true prefix; collect distinct members
+            # rather than slicing by count so partially-matched --first lists
+            # report their ignored names correctly.
+            honored: list[str] = []
+            for _queue, case_id in items:
+                if case_id in first and case_id not in honored:
+                    honored.append(case_id)
+            unknown = [name for name in first if name not in honored]
+            if honored:
+                self.log(f"hoisted to front: {', '.join(honored)}")
+            if unknown:
+                self.log(f"note: --first ignored (not in queue): {', '.join(unknown)}")
         est = {"casualties": args.est_single_min, "paired": args.est_agentic_min, "breadth": args.est_single_min}
         self.log(
             f"plan stages={args.stages} budget={args.time_budget_min}min "
             f"items={len(items)} deadline={self.deadline.isoformat(timespec='seconds')}"
         )
+        outcomes = {"verified": 0, "unverified": 0, "crashed": 0, "deferred": 0}
         for index, (queue, case_id) in enumerate(items, 1):
             remaining_budget = (self.deadline - datetime.now()).total_seconds() / 60
             projected = est[queue] + args.buffer_min
@@ -535,6 +751,7 @@ class CampaignRunner:
                 args.min_free_ram_mb, args.ram_wait_min
             ):
                 self.log(f"ram-giveup {case_id}: deferring to next window")
+                outcomes["deferred"] += 1
                 continue
             if args.dry_run:
                 self.log(f"dry-run would execute {queue} {case_id}")
@@ -543,7 +760,17 @@ class CampaignRunner:
             ledger.put(record)
             if record.crash:
                 self.log(f"note {case_id}: environmental crash; will retry next window")
-        self.log("WINDOW DONE")
+                outcomes["crashed"] += 1
+            elif record.verdict == "verified":
+                outcomes["verified"] += 1
+            else:
+                outcomes["unverified"] += 1
+        left = len(items) - index if items else 0
+        self.log(
+            "WINDOW DONE "
+            + " ".join(f"{key}={val}" for key, val in outcomes.items())
+            + f" items_left={left}"
+        )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -560,6 +787,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-agent-turns", type=int, default=14)
     parser.add_argument("--provider-repair-attempts", type=int, default=1)
     parser.add_argument("--no-verify-baseline", dest="verify_baseline", action="store_false")
+    parser.add_argument(
+        "--edit-provider-mode",
+        choices=("live", "fake"),
+        default="live",
+        help="fake = deterministic canned provider, zero API tokens — for "
+        "rehearsing the orchestrator loop itself (pair with --limit 1)",
+    )
     parser.add_argument("--live-model", default="stealth/ox-alpha")
     parser.add_argument("--api-key", default=os.environ.get("OPENROUTER_API_KEY", ""))
     parser.add_argument("--state", default=str(REPO_ROOT / "temp/mvp/campaign/ledger.json"))
@@ -569,6 +803,22 @@ def main(argv: list[str] | None = None) -> int:
         metavar="CASE_ID",
         help="drop the stored verdict for this case so it re-runs under the "
         "current harness (repeatable; use after harness fixes)",
+    )
+    parser.add_argument(
+        "--include-unfit",
+        action="append",
+        metavar="CASE_ID",
+        help="force-include a gold-unfit case from GOLD_UNFIT_CASES this "
+        "window (repeatable; e.g. the Windows-only exclusion may be "
+        "scoreable on a Linux host)",
+    )
+    parser.add_argument(
+        "--first",
+        action="append",
+        metavar="CASE_ID",
+        help="hoist this case's earliest queued run to the front of the "
+        "plan (repeatable; use to spend short-window minutes on the most "
+        "urgent re-scores first)",
     )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)

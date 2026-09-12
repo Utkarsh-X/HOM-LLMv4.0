@@ -35,6 +35,22 @@ from homllm_v4.evaluation.swebench_lite_suites import (  # noqa: E402
     swebench_lite_cases,
 )
 
+
+def _load_gold_unfit_cases() -> dict[str, str]:
+    """Reuse the campaign orchestrator's certified-unfit exclusion set.
+
+    Fair pairing requires both lanes to score the same case universe; a
+    fixture no patch can pass must burn neither lane's tokens.
+    """
+    import importlib.util
+
+    script = REPO_ROOT / "scripts" / "run_swebench_campaign.py"
+    spec = importlib.util.spec_from_file_location("run_swebench_campaign", script)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module.GOLD_UNFIT_CASES
+
 LEDGER_PATH = REPO_ROOT / "temp" / "mvp" / "campaign" / "opencode_ledger.jsonl"
 WORK_ROOT = REPO_ROOT / "temp" / "opencode_baseline"
 
@@ -214,6 +230,14 @@ def main(argv: list[str] | None = None) -> int:
 
     case_ids: tuple[str, ...] | None = tuple(args.case_id) or None
     cases = swebench_lite_cases(Path(args.fixtures_root), case_ids)
+    unfit = _load_gold_unfit_cases()
+    skipped_unfit = [case.case_id for case in cases if case.case_id in unfit]
+    if skipped_unfit:
+        cases = [case for case in cases if case.case_id not in unfit]
+        log(
+            "skipping gold-unfit case(s) for fair pairing with the v4 lane: "
+            + ", ".join(skipped_unfit)
+        )
     if args.limit:
         cases = cases[: args.limit]
     LEDGER_PATH.parent.mkdir(parents=True, exist_ok=True)

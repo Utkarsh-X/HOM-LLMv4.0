@@ -33,6 +33,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 
@@ -40,6 +41,38 @@ from pathlib import Path
 # ./src/ and plain pytest never puts it on sys.path, so `import flask`
 # resolves to site-packages and verification measures the wrong Flask.
 # Upstream's runner installs the workspace package first; restore that view.
+# Shared alias-restoration conftest for sympy/requests/xarray fixtures.
+_ALIAS_CONFTEST_SOURCE = '''import collections
+import collections.abc
+
+for _name in (
+    "Mapping", "MutableMapping", "Sequence", "MutableSequence",
+    "Set", "MutableSet", "Iterable", "Iterator", "Callable",
+    "Hashable", "Sized", "Container", "Reversible",
+):
+    if not hasattr(collections, _name):
+        setattr(collections, _name, getattr(collections.abc, _name))
+
+try:
+    import numpy as _np
+except ImportError:
+    pass
+else:
+    for _alias, _target in (
+        ("unicode_", "str_"),
+        ("string_", "bytes_"),
+        ("bool8", "bool_"),
+        ("float_", "float64"),
+        ("complex_", "complex128"),
+        ("object0", "object_"),
+        ("int0", "int_"),
+        ("uint0", "uint"),
+    ):
+        if not hasattr(_np, _alias) and hasattr(_np, _target):
+            setattr(_np, _alias, getattr(_np, _target))
+'''
+
+
 _FLASK_CONFTEST_SOURCE = '''import os
 import sys
 
@@ -49,6 +82,27 @@ if os.path.isdir(_SRC):
     while _SRC in sys.path:
         sys.path.remove(_SRC)
     sys.path.insert(0, _SRC)
+'''
+
+
+# xarray-era (2019) code passes plain lists to pd.unique; modern pandas
+# rejects them. Restore the historical dependency API surface — same spirit
+# as the collections/numpy aliases — without touching any task content.
+_XARRAY_CONFTEST_EXTRA_SOURCE = '''
+try:
+    import numpy as _np_compat
+    import pandas as _pandas_compat
+
+    _pandas_unique_real = _pandas_compat.unique
+
+    def _pandas_unique_compat(values, *args, **kwargs):
+        if isinstance(values, list):
+            values = _np_compat.asarray(values)
+        return _pandas_unique_real(values, *args, **kwargs)
+
+    _pandas_compat.unique = _pandas_unique_compat
+except ImportError:
+    pass
 '''
 
 
@@ -408,41 +462,14 @@ def _materialize_one(row: dict, fixtures_root: Path, checkout_root: Path) -> Pat
     # environment (paths/settings); it never touches task content or tests.
     if repo in ("sympy/sympy", "psf/requests", "pydata/xarray"):
         # Historical commits import the ABCs from ``collections`` and use
-        # NumPy aliases that NumPy 2 removed. SWE-bench ran these on older
-        # interpreters where they existed; a root conftest restores that
-        # view before the project package (or its own conftest) imports.
-        # Environment restoration only — no task content touched.
+        # NumPy aliases that NumPy 2 removed; _ALIAS_CONFTEST_SOURCE
+        # restores that view. xarray additionally gets the pandas-compat
+        # block appended.
+        conftest_source = _ALIAS_CONFTEST_SOURCE
+        if repo == "pydata/xarray":
+            conftest_source += _XARRAY_CONFTEST_EXTRA_SOURCE
         (fixture_dir / "conftest.py").write_text(
-            '''import collections
-import collections.abc
-
-for _name in (
-    "Mapping", "MutableMapping", "Sequence", "MutableSequence",
-    "Set", "MutableSet", "Iterable", "Iterator", "Callable",
-    "Hashable", "Sized", "Container", "Reversible",
-):
-    if not hasattr(collections, _name):
-        setattr(collections, _name, getattr(collections.abc, _name))
-
-try:
-    import numpy as _np
-except ImportError:
-    pass
-else:
-    for _alias, _target in (
-        ("unicode_", "str_"),
-        ("string_", "bytes_"),
-        ("bool8", "bool_"),
-        ("float_", "float64"),
-        ("complex_", "complex128"),
-        ("object0", "object_"),
-        ("int0", "int_"),
-        ("uint0", "uint"),
-    ):
-        if not hasattr(_np, _alias) and hasattr(_np, _target):
-            setattr(_np, _alias, getattr(_np, _target))
-''',
-            encoding="utf-8",
+            conftest_source, encoding="utf-8"
         )
     if repo == "django/django":
         # Django's own suite expects the environment tests/runtests.py builds;
@@ -519,18 +546,46 @@ def _validate_gold_fixture(fixture_dir: Path) -> tuple[bool, str]:
 
     repo_root = Path(__file__).resolve().parents[1]
     rel_dir = fixture_dir.resolve().relative_to(repo_root)
+    log_dir = repo_root / "temp/mvp/campaign/gold_validation_logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    started = time.monotonic()
+
+    def _note(message: str) -> None:
+        print(
+            f"[gold-validate {fixture_dir.name} +{time.monotonic() - started:.1f}s] {message}",
+            flush=True,
+        )
 
     # Back up pre-patch state so the fixture returns pristine even on failure.
     # Patch-header paths are fixture-relative; resolve them against the
     # fixture's own directory inside the repo worktree.
     backups: dict[str, bytes | None] = {}
     targets: dict[str, Path] = {}
-    try:
-        for rel in touched:
-            target = repo_root / rel_dir / rel
-            targets[rel] = target
-            backups[rel] = target.read_bytes() if target.exists() else None
+    for rel in touched:
+        target = repo_root / rel_dir / rel
+        targets[rel] = target
+        backups[rel] = target.read_bytes() if target.exists() else None
 
+    def _restore() -> None:
+        for rel, data in backups.items():
+            target = targets[rel]
+            if data is None:
+                if target.exists():
+                    target.unlink()
+            else:
+                target.write_bytes(data)
+
+    def _restored_exactly() -> bool:
+        return all(
+            (targets[rel].exists() == (backups[rel] is not None))
+            and (
+                backups[rel] is None
+                or targets[rel].read_bytes() == backups[rel]
+            )
+            for rel in backups
+        )
+
+    try:
         patch_file = fixture_dir / "_gold_validation.patch"
         patch_file.write_text(gold_patch, encoding="utf-8")
         try:
@@ -543,6 +598,7 @@ def _validate_gold_fixture(fixture_dir: Path) -> tuple[bool, str]:
         finally:
             with contextlib.suppress(OSError):
                 patch_file.unlink()
+        _note("gold applied")
 
         proc = subprocess.run(
             [sys.executable, "-m", "pytest", "-q", "--no-header",
@@ -553,31 +609,29 @@ def _validate_gold_fixture(fixture_dir: Path) -> tuple[bool, str]:
             (l for l in reversed(proc.stdout.splitlines()) if l.strip()),
             "",
         )
-    finally:
-        restored_ok = True
-        for rel, data in backups.items():
-            target = targets[rel]
-            try:
-                if data is None:
-                    if target.exists():
-                        target.unlink()
-                else:
-                    target.write_bytes(data)
-            except OSError:
-                restored_ok = False
-
-    if not restored_ok or any(
-        (targets[rel].exists() != (backups[rel] is not None))
-        or (backups[rel] is not None and targets[rel].read_bytes() != backups[rel])
-        for rel in backups
-    ):
-        return True, (
-            "FAIL_TO_PASS green under gold patch, BUT pristine restoration "
-            "could not be verified -- inspect the fixture before trusting it"
+        _note(f"pytest exit={proc.returncode}")
+        (log_dir / f"{fixture_dir.name}.log").write_text(
+            proc.stdout + ("\n--- stderr ---\n" + proc.stderr if proc.stderr else ""),
+            encoding="utf-8",
         )
+    finally:
+        _restore()
+        if not _restored_exactly():
+            # One retry: transient Windows sharing violations are the usual
+            # suspect; never leave a fixture silently un-restored.
+            time.sleep(2)
+            _restore()
+            if not _restored_exactly():
+                _note("RESTORE FAILED twice -- fixture left modified")
+                return True, (
+                    "restoration FAILED -- fixture left modified; inspect before use"
+                )
+
+    verdict = "green" if proc.returncode == 0 else "not green"
+    suffix = "" if _restored_exactly() else " (restoration unverified)"
     if proc.returncode != 0:
-        return False, f"FAIL_TO_PASS not green under gold patch ({tail.strip()[:120]})"
-    return True, f"gold patch turns FAIL_TO_PASS green ({tail.strip()[:120]})"
+        return False, f"FAIL_TO_PASS {verdict} under gold patch ({tail.strip()[:120]}){suffix}"
+    return True, f"gold patch turns FAIL_TO_PASS {verdict} ({tail.strip()[:120]}){suffix}"
 
 
 def main(argv: list[str] | None = None) -> int:
